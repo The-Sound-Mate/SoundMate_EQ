@@ -1,0 +1,6 @@
+Device: {60fb4f57-8c22-485a-b84e-31d3453c6049}
+Filter: ON PK Fc 60 Hz Gain 1.4 dB Q 0.667
+Filter: ON PK Fc 230 Hz Gain -1.1 dB Q 0.667
+Filter: ON PK Fc 910 Hz Gain 1.0 dB Q 0.667
+Filter: ON PK Fc 4000 Hz Gain 3.2 dB Q 0.667
+Filter: ON PK Fc 14000 Hz Gain 2.5 dB Q 0.667
