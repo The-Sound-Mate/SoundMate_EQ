@@ -36,3 +36,7 @@ install_manifest.txt
 # OS
 .DS_Store
 Thumbs.db
+
+# Embedded Repos
+AI_eq/
+
