@@ -25,11 +25,24 @@ if not exist build (
 )
 
 :: 5. CMake 프로젝트 구성 (Configure)
+echo [*] Checking for CMake...
+where cmake >nul 2>&1
+if %ERRORLEVEL% neq 0 (
+    echo [!] CMake not found. Please install CMake (3.15+) and add it to PATH.
+    pause
+    exit /b %ERRORLEVEL%
+)
+
 echo [*] Running CMake configuration...
 cmake -B build
 
 if %ERRORLEVEL% neq 0 (
-    echo [!] CMake configuration failed. Please check if CMake and a C++ compiler (like Visual Studio) are installed.
+    echo.
+    echo [!] CMake configuration failed. 
+    echo [!] Possible reasons:
+    echo     1. C++ Compiler (Visual Studio 2026) is not installed.
+    echo     2. 'Desktop development with C++' workload is missing in VS Installer.
+    echo.
     pause
     exit /b %ERRORLEVEL%
 )

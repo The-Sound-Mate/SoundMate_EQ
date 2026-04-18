@@ -5,15 +5,10 @@
       "includePath": [
         "${workspaceFolder}/**"
       ],
-      "compilerPath": "C:/Program Files/Microsoft Visual Studio/18/Community/VC/Tools/MSVC/14.44.35207/bin/HostX64/x64/cl.exe",
       "cStandard": "c11",
       "cppStandard": "c++17",
       "intelliSenseMode": "windows-msvc-x64",
-      "compilerArgs": [
-        "/Zi",
-        "/EHsc",
-        "/nologo"
-      ]
+      "configurationProvider": "ms-vscode.cmake-tools"
     }
   ],
   "version": 4
