@@ -1,0 +1,38 @@
+# CMake
+build/
+bin/
+lib/
+CMakeCache.txt
+CMakeFiles/
+CMakeSettings.json
+cmake_install.cmake
+install_manifest.txt
+*.cmake
+
+# Visual Studio / MSVC
+.vs/
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+*.pdb
+*.ilk
+*.exe
+*.obj
+*.log
+*.tlog
+*.lastbuildstate
+*.idb
+*.cache
+
+# VS Code
+.vscode/ipch/
+.vscode/bin/
+.vscode/obj/
+# launch.json 및 tasks.json은 팀 공유를 위해 보통 포함하지만, 
+# 개별 설정이 강하다면 제외할 수 있습니다. 
+# 여기서는 팀원 편의를 위해 포함하는 쪽으로 잡았습니다.
+
+# OS
+.DS_Store
+Thumbs.db

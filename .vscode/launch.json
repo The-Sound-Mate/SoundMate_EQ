@@ -1,0 +1,21 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "SoundMate Debug (CodeLLDB)",
+      "type": "lldb",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/Debug/SoundMate_EQ.exe",
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "VSCODE_CLI": "1"
+      },
+      "terminal": "integrated",
+      "preLaunchTask": "CMake: Build SoundMate",
+      "windows": {
+        "type": "lldb"
+      }
+    }
+  ]
+}

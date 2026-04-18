@@ -1,0 +1,23 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "CMake: Build SoundMate",
+      "type": "shell",
+      "command": "cmake --build build --config Debug",
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": "$msCompile",
+      "detail": "CMake를 사용하여 전체 프로젝트를 빌드합니다."
+    },
+    {
+      "label": "CMake: CLEAN & BUILD",
+      "type": "shell",
+      "command": "Remove-Item -Recurse -Force build; cmake -B build; cmake --build build --config Debug",
+      "problemMatcher": "$msCompile",
+      "detail": "빌드 폴더를 초기화하고 처음부터 다시 빌드합니다."
+    }
+  ]
+}
