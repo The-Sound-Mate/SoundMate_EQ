@@ -1,0 +1,95 @@
+
+# /
+/*.aps
+/*.suo
+/*.vsp
+/.vs
+/ARM64
+/Common
+/Common.vcxproj.user
+/Debug
+/EqualizerAPO.opensdf
+/EqualizerAPO.sdf
+/EqualizerAPO.sln.DotSettings.user
+/EqualizerAPO.sln.startup.json
+/Release
+/build-*
+/ipch
+/x64
+
+# /Benchmark/
+/Benchmark/ARM64
+/Benchmark/Benchmark.vcxproj.user
+/Benchmark/Debug
+/Benchmark/Release
+/Benchmark/x64
+
+# /DeviceSelector/
+/DeviceSelector/*.aps
+/DeviceSelector/*.eto
+/DeviceSelector/*.nuget.props
+/DeviceSelector/*.nuget.targets
+/DeviceSelector/*.user
+/DeviceSelector/ARM64
+/DeviceSelector/ClientBin
+/DeviceSelector/GeneratedArtifacts
+/DeviceSelector/[Bb]in
+/DeviceSelector/[Dd]ebug
+/DeviceSelector/[Rr]elease
+/DeviceSelector/_Pvt_Extensions
+/DeviceSelector/obj
+/DeviceSelector/project.lock.json
+/DeviceSelector/x64
+
+# /DeviceSelector/translations/
+/DeviceSelector/translations/DeviceSelector_*.qm
+
+# /Editor/
+/Editor/.qtcreator
+/Editor/Editor.pro.user*
+
+# /EqualizerAPO/
+/EqualizerAPO/ARM64
+/EqualizerAPO/Debug
+/EqualizerAPO/EqualizerAPO.aps
+/EqualizerAPO/EqualizerAPO.vcxproj.user
+/EqualizerAPO/EqualizerAPO64.aps
+/EqualizerAPO/Release
+/EqualizerAPO/x64
+
+# /Setup/
+/Setup/*.exe
+/Setup/*.zip
+/Setup/EqualizerAPO32-0.5.exe
+/Setup/EqualizerAPO64-0.5.exe
+/Setup/Original
+
+# /UpdateChecker/
+/UpdateChecker/*.aps
+/UpdateChecker/*.eto
+/UpdateChecker/*.nuget.props
+/UpdateChecker/*.nuget.targets
+/UpdateChecker/*.user
+/UpdateChecker/ARM64
+/UpdateChecker/ClientBin
+/UpdateChecker/GeneratedArtifacts
+/UpdateChecker/[Bb]in
+/UpdateChecker/[Dd]ebug
+/UpdateChecker/[Rr]elease
+/UpdateChecker/_Pvt_Extensions
+/UpdateChecker/obj
+/UpdateChecker/project.lock.json
+/UpdateChecker/x64
+
+# /UpdateChecker/translations/
+/UpdateChecker/translations/UpdateChecker_*.qm
+
+# /VoicemeeterClient/
+/VoicemeeterClient/ARM64
+/VoicemeeterClient/Debug
+/VoicemeeterClient/Release
+/VoicemeeterClient/VoicemeeterClient.aps
+/VoicemeeterClient/VoicemeeterClient.vcxproj.user
+/VoicemeeterClient/x64
+
+# /Wiki/

@@ -47,6 +47,43 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     Shlwapi
 )
 
+# --- Music Detector Tester (Standalone) ---
+set(DETECTOR_SOURCES
+    "${CMAKE_CURRENT_SOURCE_DIR}/engine/src/MusicDetector/MusicDetector.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/engine/src/MusicDetector/MetadataDetector.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/engine/src/MusicDetector/DetectorTester.cpp"
+)
+
+add_executable(DetectorTester ${DETECTOR_SOURCES})
+
+# WinRT support
+if(MSVC)
+    target_compile_options(DetectorTester PRIVATE "/EHsc") # Standard exception handling
+endif()
+
+# Include and Link FFTW
+target_include_directories(DetectorTester PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/engine/deps/fftw")
+
+# Direct linking to the library file
+if(MSVC)
+    target_link_libraries(DetectorTester PRIVATE 
+        "${CMAKE_CURRENT_SOURCE_DIR}/engine/deps/fftw/fftw3f.lib"
+    )
+endif()
+
+# Output settings for tester
+set_target_properties(DetectorTester PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY_DEBUG "${CMAKE_BINARY_DIR}/Debug"
+    RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/Release"
+)
+
+# Copy FFTW DLL to output directory
+add_custom_command(TARGET DetectorTester POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_CURRENT_SOURCE_DIR}/engine/deps/fftw/libfftw3f-3.dll"
+        $<TARGET_FILE_DIR:DetectorTester>
+)
+
 
 
 # 출력 디렉토리 설정 (옵션: 결과물을 한곳에 모으고 싶을 때)
