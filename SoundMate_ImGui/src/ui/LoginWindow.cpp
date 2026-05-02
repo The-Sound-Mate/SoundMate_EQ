@@ -1,0 +1,291 @@
+// src/ui/LoginWindow.cpp
+#include "LoginWindow.h"
+#include "Theme.h"
+#include "../core/RecordManager.h"
+#include <windows.h>
+#include <shellapi.h>
+#include <winsock2.h>
+#include <nlohmann/json.hpp>
+#include <fstream>
+#include <filesystem>
+#include <thread>
+#pragma comment(lib, "ws2_32.lib")
+
+using json = nlohmann::json;
+
+static std::string GetLocalAppData() {
+    char buf[MAX_PATH]; GetEnvironmentVariableA("LOCALAPPDATA",buf,MAX_PATH);
+    return buf;
+}
+
+LoginWindow::LoginWindow() {}
+LoginWindow::~LoginWindow() {
+    m_serverRunning = false;
+    if (m_serverThread.joinable()) m_serverThread.detach();
+}
+
+std::string LoginWindow::GetTokenFilePath() {
+    return GetLocalAppData() + "\\SoundMateEqualizer\\record\\session_token.json";
+}
+
+void LoginWindow::Open(LoginSuccessCallback cb) {
+    m_onSuccess = cb;
+    m_open      = true;
+    m_statusMsg = "이전 세션 확인 중...";
+    std::thread([this]{ TryAutoLogin(); }).detach();
+}
+
+// ── 자동 로그인 (Python _try_auto_login 이식) ─────────────────────────────
+void LoginWindow::TryAutoLogin() {
+    std::string tokenPath = GetTokenFilePath();
+    if (!std::filesystem::exists(tokenPath)) {
+        m_statusMsg = "";
+        return;
+    }
+    try {
+        std::ifstream f(tokenPath);
+        auto token = json::parse(f);
+        std::string at = token.value("access_token","");
+        if (at.empty()) { m_statusMsg=""; return; }
+
+        std::string validToken = g_recordManager.GetUserIdFromToken();
+        if (!validToken.empty()) {
+            auto p1 = validToken.find('.'), p2 = validToken.find('.',p1+1);
+            std::string payload = validToken.substr(p1+1, p2-p1-1);
+            while(payload.size()%4) payload+='=';
+            for(auto& c:payload){if(c=='-')c='+';else if(c=='_')c='/';}
+            static const std::string b64="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+            std::string decoded; int val=0,bits=-8;
+            for(char c:payload){
+                auto pos=b64.find(c); if(pos==std::string::npos)continue;
+                val=(val<<6)|(int)pos; bits+=6;
+                if(bits>=0){decoded+=(char)((val>>bits)&0xFF);bits-=8;}
+            }
+            auto claims = json::parse(decoded);
+            std::string uid   = claims.value("sub","");
+            std::string email = claims.value("email","");
+            if (!uid.empty()) {
+                g_recordManager.SetUserId(uid);
+                m_open = false;
+                if (m_onSuccess) m_onSuccess(uid, email, false);
+                return;
+            }
+        } else {
+            // 토큰 만료 → 자동으로 브라우저 로그인 화면 표시
+            m_statusMsg = "세션이 만료되었습니다. 다시 로그인해주세요.";
+            m_statusIsErr = true;
+            // 자동으로 로그인 버튼 클릭 효과
+            OpenBrowser();
+            return;
+        }
+    } catch(...) {}
+    m_statusMsg = "";
+}
+
+// ── 로컬 HTTP 서버 (2단계 JS 브릿지로 hash fragment 캡처) ───────────────────
+void LoginWindow::StartCallbackServer() {
+    if (m_serverRunning) return;
+    m_serverRunning = true;
+    m_serverThread = std::thread([this]() {
+        WSADATA wsa; WSAStartup(MAKEWORD(2,2), &wsa);
+        SOCKET server = socket(AF_INET, SOCK_STREAM, 0);
+        sockaddr_in addr{};
+        addr.sin_family=AF_INET; addr.sin_addr.s_addr=INADDR_ANY; addr.sin_port=htons(8080);
+        int opt=1; setsockopt(server,SOL_SOCKET,SO_REUSEADDR,(char*)&opt,sizeof(opt));
+        bind(server,(sockaddr*)&addr,sizeof(addr));
+        listen(server, 5);
+
+        auto parseParam = [](const std::string& req, const std::string& key) -> std::string {
+            std::string needle = key + "=";
+            auto pos = req.find(needle);
+            if (pos == std::string::npos) return "";
+            pos += needle.size();
+            auto end = req.find_first_of(" &\r\n", pos);
+            return (end==std::string::npos) ? req.substr(pos) : req.substr(pos,end-pos);
+        };
+
+        // ── 1차 요청: HTML+JS 브릿지 페이지 제공 ──────────────────────────
+        // OAuth redirect는 토큰을 URL hash (#access_token=...&refresh_token=...)로 줌.
+        // HTTP 서버는 hash를 받을 수 없으므로, JS가 hash를 읽어
+        // /callback?access_token=...&refresh_token=... 으로 2차 요청을 보냄.
+        SOCKET c1 = accept(server, nullptr, nullptr);
+        if (c1 == INVALID_SOCKET) { closesocket(server); WSACleanup(); return; }
+
+        char buf1[8192]={};
+        recv(c1, buf1, sizeof(buf1)-1, 0);
+        std::string req1 = buf1;
+
+        // query string에 토큰이 있는 경우 (서버가 query param으로 리다이렉트)
+        std::string at1 = parseParam(req1, "access_token");
+        if (at1.empty()) at1 = parseParam(req1, "token");
+        std::string rt1 = parseParam(req1, "refresh_token");
+
+        if (!at1.empty()) {
+            // 이미 query param으로 토큰 획득 성공
+            const char* resp = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\r\n"
+                "<html><body style='background:#0B061A;color:#fff;text-align:center;padding:50px;font-family:sans-serif'>"
+                "<h1 style='color:#00D4FF'>&#10003; \xeb\xa1\x9c\xea\xb7\xb8\xec\x9d\xb8 \xec\x84\xb1\xea\xb3\xb5!</h1>"
+                "<script>setTimeout(()=>window.close(),2000);</script></body></html>";
+            send(c1, resp, (int)strlen(resp), 0);
+            closesocket(c1);
+            m_accessToken = at1; m_refreshToken = rt1; m_tokenReceived = true;
+            closesocket(server); WSACleanup(); m_serverRunning = false;
+            return;
+        }
+
+        // hash fragment 캡처용 HTML+JS 브릿지 페이지 응답
+        const std::string bridge =
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\r\n"
+            "<!DOCTYPE html><html><head><meta charset='utf-8'></head>"
+            "<body style='background:#0B061A;color:#fff;font-family:sans-serif;text-align:center;padding:50px'>"
+            "<h2 style='color:#00D4FF'>SoundMate EQ</h2><p>\xeb\xa1\x9c\xea\xb7\xb8\xec\x9d\xb8 \xec\xb2\x98\xeb\xa6\xac \xec\xa4\x91...</p>"
+            "<script>"
+            "(function(){"
+            "  var hash=window.location.hash.substring(1)||"
+            "           window.location.search.substring(1);"
+            "  var params={};"
+            "  hash.split('&').forEach(function(p){"
+            "    var kv=p.split('=');if(kv.length===2)params[kv[0]]=decodeURIComponent(kv[1]);"
+            "  });"
+            "  var at=params['access_token']||params['token']||'';"
+            "  var rt=params['refresh_token']||'';"
+            "  if(at){"
+            "    var url='http://localhost:8080/callback?access_token='+encodeURIComponent(at);"
+            "    if(rt)url+='&refresh_token='+encodeURIComponent(rt);"
+            "    fetch(url).then(function(){"
+            "      document.body.innerHTML='<h1 style=color:#00D4FF>&#10003; \xeb\xa1\x9c\xea\xb7\xb8\xec\x9d\xb8 \xec\x84\xb1\xea\xb3\xb5!</h1><p>SoundMate \xec\x95\xb1\xec\x9c\xbc\xeb\xa1\x9c \xeb\x8f\x8c\xec\x95\x84\xea\xb0\x80\xec\xa3\xbc\xec\x84\xb8\xec\x9a\x94.</p>';"
+            "      setTimeout(function(){window.close();},2000);"
+            "    });"
+            "  } else {"
+            "    document.body.innerHTML='<h2 style=color:#ff4444>\xed\x86\xa0\xed\x81\xb0\xec\x9d\x84 \xec\xb0\xbe\xec\x9d\x84 \xec\x88\x98 \xec\x97\x86\xec\x8a\xb5\xeb\x8b\x88\xeb\x8b\xa4</h2>';"
+            "  }"
+            "})();"
+            "</script></body></html>";
+        send(c1, bridge.c_str(), (int)bridge.size(), 0);
+        closesocket(c1);
+
+        // ── 2차 요청: JS가 /callback?access_token=...으로 보낸 실제 토큰 ──
+        SOCKET c2 = accept(server, nullptr, nullptr);
+        if (c2 == INVALID_SOCKET) { closesocket(server); WSACleanup(); return; }
+
+        char buf2[8192]={};
+        recv(c2, buf2, sizeof(buf2)-1, 0);
+        std::string req2 = buf2;
+
+        std::string at = parseParam(req2, "access_token");
+        if (at.empty()) at = parseParam(req2, "token");
+        std::string rt = parseParam(req2, "refresh_token");
+
+        const char* done = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nAccess-Control-Allow-Origin: *\r\n\r\nOK";
+        send(c2, done, (int)strlen(done), 0);
+        closesocket(c2);
+        closesocket(server);
+        WSACleanup();
+
+        if (!at.empty()) {
+            m_accessToken  = at;
+            m_refreshToken = rt;
+            m_tokenReceived = true;
+        }
+        m_serverRunning = false;
+    });
+}
+
+void LoginWindow::OpenBrowser() {
+    StartCallbackServer();
+    std::string url = "https://soundmate.kro.kr/login?redirect=http://localhost:8080";
+    ShellExecuteA(nullptr, "open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    m_waiting   = true;
+    m_statusMsg = "브라우저에서 로그인 대기 중...";
+    m_statusIsErr = false;
+}
+
+void LoginWindow::SaveToken(const std::string& at, const std::string& rt) {
+    std::string path = GetTokenFilePath();
+    std::filesystem::create_directories(std::filesystem::path(path).parent_path());
+    json token = {{"access_token",at},{"refresh_token",rt}};
+    std::ofstream f(path); f << token.dump(4);
+}
+
+void LoginWindow::HandleWebLogin(const std::string& at, const std::string& rt) {
+    // JWT 파싱
+    try {
+        auto p1 = at.find('.'), p2 = at.find('.',p1+1);
+        std::string payload = at.substr(p1+1,p2-p1-1);
+        while(payload.size()%4) payload+='=';
+        for(auto&c:payload){if(c=='-')c='+';else if(c=='_')c='/';}
+        static const std::string b64="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        std::string decoded; int val=0,bits=-8;
+        for(char c:payload){auto pos=b64.find(c);if(pos==std::string::npos)continue;val=(val<<6)|(int)pos;bits+=6;if(bits>=0){decoded+=(char)((val>>bits)&0xFF);bits-=8;}}
+        auto claims = json::parse(decoded);
+        std::string uid   = claims.value("sub","");
+        std::string email = claims.value("email","");
+        if (uid.empty()) { m_statusMsg="인증 실패"; m_statusIsErr=true; return; }
+        SaveToken(at, rt);
+        g_recordManager.SetUserId(uid);
+        m_open = false;
+        if (m_onSuccess) m_onSuccess(uid, email, false);
+    } catch(...) { m_statusMsg="토큰 처리 오류"; m_statusIsErr=true; }
+}
+
+void LoginWindow::LoginAsGuest() {
+    m_open = false;
+    if (m_onSuccess) m_onSuccess("guest","guest",false);
+}
+
+// ── ImGui 렌더 ─────────────────────────────────────────────────────────────
+void LoginWindow::Render() {
+    if (!m_open) return;
+
+    // 토큰 수신 확인 (서버 스레드에서 설정됨)
+    if (m_tokenReceived.exchange(false))
+        HandleWebLogin(m_accessToken, m_refreshToken);
+
+    ImGuiIO& io = ImGui::GetIO();
+    ImGui::SetNextWindowPos({io.DisplaySize.x*0.5f, io.DisplaySize.y*0.5f}, ImGuiCond_Always, {0.5f,0.5f});
+    ImGui::SetNextWindowSize({420, 460}, ImGuiCond_Always);
+
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, Theme::ToU32(Theme::PANEL_COLOR));
+    ImGui::Begin("##login", nullptr,
+        ImGuiWindowFlags_NoTitleBar|ImGuiWindowFlags_NoResize|ImGuiWindowFlags_NoMove);
+
+    // 로고 + 타이틀
+    float cw = ImGui::GetContentRegionAvail().x;
+    ImGui::SetCursorPosX((cw - ImGui::CalcTextSize("SoundMate").x) * 0.5f);
+    ImGui::TextColored(Theme::TEXT_WHITE, "SoundMate");
+
+    ImGui::SetCursorPosX((cw - ImGui::CalcTextSize("AI-Powered Equalizer").x) * 0.5f);
+    ImGui::TextColored(Theme::TEXT_GRAY, "AI-Powered Equalizer");
+
+    ImGui::Spacing(); ImGui::Spacing();
+
+    // 안내 텍스트
+    float tw = ImGui::CalcTextSize("웹 브라우저를 통해 로그인을 진행해주세요.").x;
+    ImGui::SetCursorPosX((cw - tw) * 0.5f);
+    ImGui::TextColored(Theme::TEXT_WHITE, "웹 브라우저를 통해 로그인을 진행해주세요.");
+
+    ImGui::Spacing(); ImGui::Spacing();
+
+    // 브라우저 로그인 버튼
+    ImGui::SetCursorPosX(30);
+    if (ImGui::Button("웹 브라우저에서 로그인", {cw-60, 46})) OpenBrowser();
+
+    ImGui::Spacing();
+
+    // 게스트 버튼
+    ImGui::SetCursorPosX(30);
+    ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(0,0,0,0));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Theme::ToU32(Theme::BTN_SECONDARY));
+    if (ImGui::Button("로그인하지 않고 실행하기", {cw-60, 38})) LoginAsGuest();
+    ImGui::PopStyleColor(2);
+
+    ImGui::Spacing();
+
+    // 상태 메시지
+    ImVec4 msgCol = m_statusIsErr ? Theme::COLOR_RED : Theme::TEXT_GRAY;
+    ImGui::SetCursorPosX((cw - ImGui::CalcTextSize(m_statusMsg.c_str()).x) * 0.5f);
+    ImGui::TextColored(msgCol, "%s", m_statusMsg.c_str());
+
+    ImGui::End();
+    ImGui::PopStyleColor();
+}

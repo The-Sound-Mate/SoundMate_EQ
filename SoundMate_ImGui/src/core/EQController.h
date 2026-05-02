@@ -1,0 +1,46 @@
+// src/core/EQController.h
+// Python의 core/eq_controller.py 를 C++로 이식
+#pragma once
+#include <string>
+#include <vector>
+#include <windows.h>
+
+class EQController {
+public:
+    EQController();
+
+    // ai_eq_config.txt 경로를 레지스트리에서 읽어 자동 설정
+    bool Initialize();
+
+    // EQ 적용 (Python의 apply_eq())
+    // gains: 각 밴드의 dB 값, freqs: 주파수 목록, deviceName: 기기 이름
+    bool ApplyEQ(const std::vector<float>& gains,
+                 const std::vector<int>&   freqs,
+                 const std::string&        deviceName = "");
+
+    // 전원 OFF 상태에서 모든 밴드를 0dB로 초기화
+    bool ApplyFlatEQ(const std::vector<int>& freqs,
+                     const std::string&      deviceName = "");
+
+    // config.txt 에 Include 줄을 맨 위에 보장 (Python의 _ensure_include_linked)
+    void EnsureIncludeLinked();
+
+    // 복원 상태 설정 (복원 시 EQ 재적용 차단)
+    void SetRestored(bool restored);
+    bool IsRestored() const { return m_isRestored; }
+
+    // 현재 설정된 파일 경로 반환
+    std::string GetConfigFilePath() const { return m_targetFilePath; }
+
+private:
+    // 레지스트리에서 Equalizer APO 설치 경로 탐색
+    std::string GetRealConfigDir();
+    std::string GetRealInstallPath();
+
+    // 밴드 수에 맞는 Q값 계산 (Python의 calculate_q)
+    float CalculateQ(int numBands);
+
+    std::string m_targetFilePath;   // ai_eq_config.txt 경로
+    bool        m_isRestored = false;
+    bool        m_initialized = false;
+};
