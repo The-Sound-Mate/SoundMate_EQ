@@ -123,7 +123,7 @@ void SettingsWindow::Render() {
     float rightCol = cw - 150.0f;
 
     // ── 오디오 설정 ──
-    RenderSection("🎵 오디오 설정");
+    RenderSection("오디오 설정");
     ImGui::TextColored(Theme::TEXT_GRAY, "기본 출력 장치");
     ImGui::SameLine(rightCol);
     ImGui::SetNextItemWidth(150);
@@ -142,7 +142,7 @@ void SettingsWindow::Render() {
     ImGui::Spacing();
 
     // ── AI 설정 ──
-    RenderSection("🤖 AI 설정");
+    RenderSection("AI 설정");
     
     ImGui::TextColored(Theme::TEXT_GRAY, "음악 취향 설정");
     ImGui::SameLine(rightCol);
@@ -158,7 +158,7 @@ void SettingsWindow::Render() {
     ImGui::Spacing();
 
     // ── 시스템 설정 ──
-    RenderSection("🖥️ 시스템 설정");
+    RenderSection("시스템 설정");
 
     ImGui::TextColored(Theme::TEXT_GRAY, "시작 시 자동 실행");
     ImGui::SameLine(cw - 40.0f);
@@ -193,7 +193,7 @@ void SettingsWindow::Render() {
     ImGui::Spacing();
 
     // ── EQ 제어 ──
-    RenderSection("🎛️ EQ 제어");
+    RenderSection("EQ 제어");
 
     ImGui::TextColored(Theme::TEXT_GRAY, "밴드 수 변환");
     ImGui::SameLine(cw - 280.0f);
@@ -231,7 +231,7 @@ void SettingsWindow::Render() {
     ImGui::SameLine(cw - 110.0f);
     ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(233,30,99,255)); // Pinkish red
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(255,64,129,255));
-    if (ImGui::Button("🔧 자동 설정", {110, 28})) {
+    if (ImGui::Button("자동 설정", {110, 28})) {
         if (m_onAutoDevice) m_onAutoDevice();
     }
     ImGui::PopStyleColor(2);
@@ -240,14 +240,14 @@ void SettingsWindow::Render() {
     ImGui::SameLine(cw - 110.0f);
     ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(117,117,117,255));
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(158,158,158,255));
-    if (ImGui::Button("⏪ 복원", {110, 28})) {
+    if (ImGui::Button("복원", {110, 28})) {
         if (m_onRestoreDevice) m_onRestoreDevice();
     }
     ImGui::PopStyleColor(2);
     ImGui::Spacing();
 
     // ── 계정 정보 ──
-    RenderSection("👤 계정 정보");
+    RenderSection("계정 정보");
 
     auto [userName, userPlan] = g_recordManager.GetUserInfo();
     ImGui::TextColored(Theme::TEXT_GRAY, "로그인된 사용자");
@@ -266,7 +266,7 @@ void SettingsWindow::Render() {
     ImGui::PushStyleColor(ImGuiCol_Button, Theme::ToU32(Theme::GRAD_START));
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Theme::ToU32(Theme::GRAD_END));
     ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(0,0,0,255));
-    if (ImGui::Button("취향 설문하기 🎵", {160, 32})) {
+    if (ImGui::Button("취향 설문하기", {160, 32})) {
         if (m_onSurvey) m_onSurvey();
     }
     ImGui::PopStyleColor(3);

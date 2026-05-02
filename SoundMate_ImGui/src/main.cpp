@@ -73,6 +73,12 @@ static std::string LoadEnvKey(const std::string& key) {
 
 // ─── WinMain ────────────────────────────────────────────────────────────────
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
+    // DPI 인지 활성화 (흐릿함 방지)
+    SetProcessDPIAware();
+    HDC hdc = GetDC(nullptr);
+    float dpiScale = GetDeviceCaps(hdc, LOGPIXELSX) / 96.0f;
+    ReleaseDC(nullptr, hdc);
+
     // 창 등록
     WNDCLASSEXW wc = {
         sizeof(wc), CS_CLASSDC, WndProc, 0L, 0L,
@@ -81,11 +87,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     };
     RegisterClassExW(&wc);
 
-    // 1100x750 창 생성 (Python self.geometry("1100x750") 대응)
+    // DPI에 맞게 창 크기 조정
+    int width = (int)(1100 * dpiScale);
+    int height = (int)(750 * dpiScale);
+
     g_hWnd = CreateWindowW(
         wc.lpszClassName, L"SoundMate Equalizer",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-        100, 100, 1100, 750,
+        100, 100, width, height,
         nullptr, nullptr, wc.hInstance, nullptr
     );
 
@@ -105,10 +114,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     io.IniFilename  = nullptr; // ini 파일 저장 비활성화
 
-    // 폰트: 맑은 고딕 (한글 지원)
-    io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\malgun.ttf", 16.0f,
-                                  nullptr, io.Fonts->GetGlyphRangesKorean());
+    // 폰트: 맑은 고딕 (한글 지원, 고해상도 처리)
+    ImFontConfig font_config;
+    font_config.OversampleH = 3;
+    font_config.OversampleV = 3;
+    io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\malgun.ttf", 16.0f * dpiScale,
+                                  &font_config, io.Fonts->GetGlyphRangesKorean());
     io.Fonts->Build();
+
+    // ImGui 스타일 스케일링
+    ImGui::GetStyle().ScaleAllSizes(dpiScale);
 
     // 테마 적용 (Python의 Color Palette 동일)
     Theme::Apply();
