@@ -11,6 +11,7 @@ public:
 
     // ai_eq_config.txt 경로를 레지스트리에서 읽어 자동 설정
     bool Initialize();
+    void RefreshPaths();
 
     // EQ 적용 (Python의 apply_eq())
     // gains: 각 밴드의 dB 값, freqs: 주파수 목록, deviceName: 기기 이름

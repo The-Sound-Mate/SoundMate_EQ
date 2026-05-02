@@ -393,56 +393,47 @@ void MainWindow::RenderTopBar() {
             [this]() { if (m_onLogout) m_onLogout(); },
             [this](const AppSettings& s) { m_settings = s; },
             [this]() {
-                // Auto Device Setup - 네이티브 EXE 호출 (관리자 권한)
+                // Auto Device Setup - 유니버설 경로 탐색 (v5.3)
                 std::thread([this]() {
-                    // 실행 파일 경로 탐색 (build/Debug 또는 build/Release)
-                    char exeDir[MAX_PATH];
-                    GetModuleFileNameA(nullptr, exeDir, MAX_PATH);
-                    std::string dir = exeDir;
-                    auto pos = dir.find_last_of("\\/");
-                    if (pos != std::string::npos) dir = dir.substr(0, pos);
+                    char exeP[MAX_PATH];
+                    GetModuleFileNameA(nullptr, exeP, MAX_PATH);
+                    std::filesystem::path curDir = std::filesystem::path(exeP).parent_path();
+                    std::string setupExe = "";
                     
-                    // 프로젝트 루트에서 엔진 설정 도구 찾기 (renamed to SoundMate_Setup.exe)
-                    std::string setupExe = dir + "\\SoundMate_Setup.exe";
-                    if (!std::filesystem::exists(setupExe)) {
-                        setupExe = "C:\\SoundMate_EQ\\build\\Debug\\SoundMate_Setup.exe"; // Fallback
+                    // 어떤 환경에서도 도구를 찾는 지능형 탐색 (5대 원칙 준수)
+                    for (int i = 0; i < 4; ++i) {
+                        if (std::filesystem::exists(curDir / "SoundMate_Setup.exe")) { setupExe = (curDir / "SoundMate_Setup.exe").string(); break; }
+                        if (std::filesystem::exists(curDir / "build/Release/SoundMate_Setup.exe")) { setupExe = (curDir / "build/Release/SoundMate_Setup.exe").string(); break; }
+                        curDir = curDir.parent_path();
                     }
-                    
-                    // 선택된 기기 GUID 가져오기
-                    std::string deviceGuid = "";
-                    if (m_selectedDevice >= 0 && m_selectedDevice < (int)m_devices.size()) {
-                        deviceGuid = m_devices[m_selectedDevice].guid;
-                    }
+                    if (setupExe.empty()) setupExe = "C:\\SoundMate_App\\SoundMate_Setup.exe";
 
-                    static std::string params;
-                    params = "--configure";
-                    if (!deviceGuid.empty()) {
-                        params += " --device " + deviceGuid;
-                    }
+                    std::string deviceGuid = (m_selectedDevice >= 0 && m_selectedDevice < (int)m_devices.size()) ? m_devices[m_selectedDevice].guid : "";
+                    std::string params = "--configure --device " + deviceGuid;
 
-                    // ShellExecuteA로 관리자 권한 실행
+                    SetStatus("시스템 최적화 및 설정 중...", Theme::TEXT_WHITE);
+
                     SHELLEXECUTEINFOA sei = { sizeof(sei) };
+                    sei.cbSize = sizeof(sei);
                     sei.lpVerb = "runas";
                     sei.lpFile = setupExe.c_str();
                     sei.lpParameters = params.c_str();
-                    sei.nShow = SW_SHOW;
+                    sei.nShow = SW_HIDE;
                     sei.fMask = SEE_MASK_NOCLOSEPROCESS;
                     
                     if (ShellExecuteExA(&sei)) {
-                        // 프로세스 완료 대기
-                        WaitForSingleObject(sei.hProcess, 30000);
+                        WaitForSingleObject(sei.hProcess, INFINITE);
                         DWORD exitCode = 0;
                         GetExitCodeProcess(sei.hProcess, &exitCode);
                         CloseHandle(sei.hProcess);
                         if (exitCode == 0) {
-                            SetStatus("자동 설정 완료!", Theme::COLOR_GREEN);
-                            // 기기 목록 즉시 새로고침
+                            SetStatus("설정 완료! (동영상 문제 해결)", Theme::ACCENT_COLOR);
                             FetchAudioDevices();
                         } else {
-                            SetStatus("자동 설정 실패 (코드: " + std::to_string(exitCode) + ")", Theme::COLOR_RED);
+                            SetStatus("설정 실패 (에러: " + std::to_string(exitCode) + ")", Theme::COLOR_RED);
                         }
                     } else {
-                        SetStatus("관리자 권한 실행 취소됨", Theme::COLOR_RED);
+                        SetStatus("설정 도구 실행 실패 (권한 거부)", Theme::COLOR_RED);
                     }
                 }).detach();
                 SetStatus("자동 설정 진행 중... (UAC 승인 필요)", Theme::COLOR_CYAN);
@@ -846,42 +837,44 @@ void MainWindow::ExecuteRestore(const std::string& filePath) {
     std::thread([this, filePath]() {
         // 실행 파일 경로 탐색
         char exeDir[MAX_PATH];
-        GetModuleFileNameA(nullptr, exeDir, MAX_PATH);
-        std::string dir = exeDir;
-        auto pos = dir.find_last_of("\\/");
-        if (pos != std::string::npos) dir = dir.substr(0, pos);
-
-        std::string setupExe = dir + "\\SoundMate_Setup.exe";
-        if (!std::filesystem::exists(setupExe)) {
-            setupExe = "C:\\SoundMate_EQ\\build\\Release\\SoundMate_Setup.exe";
+        // 어떤 환경에서도 도구를 찾는 유니버설 경로 탐색 (v5.3)
+        char exeP[MAX_PATH];
+        GetModuleFileNameA(nullptr, exeP, MAX_PATH);
+        std::filesystem::path curDir = std::filesystem::path(exeP).parent_path();
+        std::string setupExe = "";
+        for (int i = 0; i < 4; ++i) {
+            if (std::filesystem::exists(curDir / "SoundMate_Setup.exe")) { setupExe = (curDir / "SoundMate_Setup.exe").string(); break; }
+            if (std::filesystem::exists(curDir / "build/Release/SoundMate_Setup.exe")) { setupExe = (curDir / "build/Release/SoundMate_Setup.exe").string(); break; }
+            curDir = curDir.parent_path();
         }
-        std::string params = "--restore";
-        if (!filePath.empty()) {
-            params = "--restore-file \"" + filePath + "\"";
-        }
+        if (setupExe.empty()) setupExe = "C:\\SoundMate_App\\SoundMate_Setup.exe";
 
-        SetStatus("복원 중...", Theme::TEXT_WHITE);
+        std::string params = "--nuclear-repair";
+        if (!filePath.empty()) params = "--restore-file \"" + filePath + "\"";
+
+        SetStatus("시스템 전체 복원 및 초기화 중...", Theme::TEXT_WHITE);
 
         SHELLEXECUTEINFOA sei = { sizeof(sei) };
+        sei.cbSize = sizeof(sei);
         sei.lpVerb = "runas";
         sei.lpFile = setupExe.c_str();
         sei.lpParameters = params.c_str();
-        sei.nShow = SW_SHOW;
+        sei.nShow = SW_HIDE;
         sei.fMask = SEE_MASK_NOCLOSEPROCESS;
 
         if (ShellExecuteExA(&sei)) {
-            WaitForSingleObject(sei.hProcess, 30000);
+            WaitForSingleObject(sei.hProcess, INFINITE);
             DWORD exitCode = 0;
             GetExitCodeProcess(sei.hProcess, &exitCode);
             CloseHandle(sei.hProcess);
             if (exitCode == 0) {
-                SetStatus("장치 복원 완료!", Theme::COLOR_GREEN);
-                FetchAudioDevices(); // 복원 성공 시 디바이스 목록 즉시 갱신
+                SetStatus("복원 완료! 모든 오디오 시스템이 순정화되었습니다.", Theme::ACCENT_COLOR);
+                FetchAudioDevices();
             } else {
-                SetStatus("장치 복원 실패 (코드: " + std::to_string(exitCode) + ")", Theme::COLOR_RED);
+                SetStatus("복원 실패 (코드: " + std::to_string(exitCode) + ")", Theme::COLOR_RED);
             }
         } else {
-            SetStatus("관리자 권한 실행 취소됨", Theme::COLOR_RED);
+            SetStatus("설정 도구 실행 실패 (권한 거부)", Theme::COLOR_RED);
         }
     }).detach();
     SetStatus("장치 복원 진행 중... (UAC 승인 필요)", Theme::TEXT_GRAY);

@@ -75,10 +75,20 @@ std::string EQController::GetOfficialConfigDir() {
 EQController::EQController() {}
 
 bool EQController::Initialize() {
-    std::string configDir = GetRealConfigDir();
+    // 1. 최우선 경로: v5.x 공장 초기화 표준 경로 확인
+    std::string appPath = "C:\\SoundMate_App\\engine\\EqualizerAPO\\config";
+    std::string configDir = "";
+
+    if (std::filesystem::exists(appPath)) {
+        configDir = appPath;
+    } else {
+        // 2. 레지스트리 기반 탐색
+        configDir = GetRealConfigDir();
+    }
+
     m_targetFilePath = configDir + "\\" + AI_EQ_CONFIG_FILENAME;
 
-    // 정식 APO 설치 경로에도 동기화하기 위한 경로 설정
+    // 3. 정식 APO 설치 경로 동기화 (순정 상태의 config.txt 가 여기를 보도록 함)
     std::string officialDir = GetOfficialConfigDir();
     if (!officialDir.empty() && officialDir != configDir) {
         m_officialFilePath = officialDir + "\\" + AI_EQ_CONFIG_FILENAME;
@@ -86,6 +96,10 @@ bool EQController::Initialize() {
 
     m_initialized = true;
     return true;
+}
+
+void EQController::RefreshPaths() {
+    Initialize();
 }
 
 bool EQController::WriteEQFile(const std::string& filePath, const std::string& content) {
@@ -115,6 +129,7 @@ bool EQController::ApplyEQ(const std::vector<float>& gains,
                             const std::vector<int>&   freqs,
                             const std::string&        deviceName)
 {
+    RefreshPaths(); // [v5.4] 매번 실시간으로 경로를 갱신하여 자동 설정 즉시 반영
     if (m_isRestored)   return false;
     if (!m_initialized) Initialize();
 
@@ -160,67 +175,81 @@ bool EQController::ApplyFlatEQ(const std::vector<int>& freqs,
 // ──────────────────────────────────────────────────────────────────────────
 // Python의 _ensure_include_linked() 완전 이식
 // ──────────────────────────────────────────────────────────────────────────
-// 단일 config.txt 파일에 Include 줄 보장 (기존 내용 보존)
-static void EnsureIncludeInFile(const std::string& configPath, const std::string& includeLine) {
-    if (!std::filesystem::exists(configPath)) return;
+static void EnsureIncludeInFile(const std::string& configPath) {
+    std::string officialRoot = "C:\\Program Files\\EqualizerAPO\\config\\";
+    std::string fullAiPath = officialRoot + std::string(AI_EQ_CONFIG_FILENAME);
+    std::string includeLine = "Include: " + fullAiPath;
+    std::string deviceLine  = "Device: all";
+    
+    if (!std::filesystem::exists(configPath)) {
+        // 파일이 없으면 새로 생성 (공식 경로 대응)
+        try {
+            std::filesystem::create_directories(officialRoot);
+            std::ofstream create(configPath, std::ios::binary);
+            if (create.is_open()) {
+                create.put((char)0xEF); create.put((char)0xBB); create.put((char)0xBF);
+                create << deviceLine << "\r\n" << includeLine << "\r\n";
+                create.close();
+            }
+        } catch (...) {}
+        return;
+    }
 
-    std::ifstream fin(configPath);
+    std::ifstream fin(configPath, std::ios::binary);
     if (!fin.is_open()) return;
 
     std::vector<std::string> lines;
     std::string line;
+    unsigned char bom[3] = {0};
+    fin.read((char*)bom, 3);
+    if (!(bom[0] == 0xEF && bom[1] == 0xBB && bom[2] == 0xBF)) { fin.seekg(0); }
+
+    bool hasAbsoluteInclude = false;
+    bool hasDeviceAll = false;
+
     while (std::getline(fin, line)) {
         if (!line.empty() && line.back() == '\r') line.pop_back();
+        std::string trimmed = line;
+        auto s = trimmed.find_first_not_of(" \t");
+        if (s != std::string::npos) trimmed = trimmed.substr(s);
+        auto e = trimmed.find_last_not_of(" \t");
+        if (e != std::string::npos) trimmed = trimmed.substr(0, e + 1);
+
+        if (trimmed == deviceLine) hasDeviceAll = true;
+        if (trimmed == includeLine) hasAbsoluteInclude = true;
+        
+        if (trimmed.find("Include:") != std::string::npos && trimmed.find(AI_EQ_CONFIG_FILENAME) != std::string::npos && trimmed != includeLine) {
+            continue;
+        }
         lines.push_back(line);
     }
     fin.close();
 
-    // 이미 맨 위에 있으면 종료
-    if (!lines.empty()) {
-        std::string firstTrimmed = lines[0];
-        auto s = firstTrimmed.find_first_not_of(" \t");
-        if (s != std::string::npos) firstTrimmed = firstTrimmed.substr(s);
-        auto e = firstTrimmed.find_last_not_of(" \t");
-        if (e != std::string::npos) firstTrimmed = firstTrimmed.substr(0, e + 1);
-        if (firstTrimmed == includeLine) return;
-    }
+    if (hasDeviceAll && hasAbsoluteInclude) return;
 
-    // 다른 위치에 있으면 제거 후 맨 앞에 추가
-    lines.erase(std::remove_if(lines.begin(), lines.end(),
-        [&](const std::string& l) {
-            std::string trimmed = l;
-            auto s = trimmed.find_first_not_of(" \t");
-            if (s != std::string::npos) trimmed = trimmed.substr(s);
-            auto e = trimmed.find_last_not_of(" \t");
-            if (e != std::string::npos) trimmed = trimmed.substr(0, e + 1);
-            return trimmed == includeLine;
-        }), lines.end());
-
-    lines.insert(lines.begin(), includeLine);
+    if (!hasAbsoluteInclude) lines.insert(lines.begin(), includeLine);
+    if (!hasDeviceAll) lines.insert(lines.begin(), deviceLine);
 
     try {
-        std::ofstream fout(configPath, std::ios::trunc);
+        std::ofstream fout(configPath, std::ios::binary | std::ios::trunc);
         if (!fout.is_open()) return;
-        for (auto& l : lines) fout << l << "\n";
+        fout.put((char)0xEF); fout.put((char)0xBB); fout.put((char)0xBF);
+        for (auto& l : lines) fout << l << "\r\n";
     }
     catch (...) {}
 }
 
 void EQController::EnsureIncludeLinked() {
     if (m_isRestored) return;
+    
+    // 1) 공식 경로의 config.txt를 최우선으로 관리
+    std::string officialPath = "C:\\Program Files\\EqualizerAPO\\config\\" + std::string(CONFIG_FILENAME);
+    EnsureIncludeInFile(officialPath);
 
-    std::string includeLine = std::string("Include: ") + AI_EQ_CONFIG_FILENAME;
-
-    // 1) 레지스트리 기반 설정 디렉토리
-    std::string configDir  = GetRealConfigDir();
-    std::string configPath = configDir + "\\" + CONFIG_FILENAME;
-    EnsureIncludeInFile(configPath, includeLine);
-
-    // 2) 정식 APO 설치 경로의 config.txt 에도 보장 (기존 내용 보존)
-    std::string officialDir = GetOfficialConfigDir();
-    if (!officialDir.empty() && officialDir != configDir) {
-        std::string officialPath = officialDir + "\\" + CONFIG_FILENAME;
-        EnsureIncludeInFile(officialPath, includeLine);
+    // 2) 레지스트리에 등록된 경로가 있다면 그곳도 함께 관리 (이중 안전 장치)
+    std::string registryConfigPath = GetRealConfigDir() + "\\" + CONFIG_FILENAME;
+    if (registryConfigPath != officialPath) {
+        EnsureIncludeInFile(registryConfigPath);
     }
 }
 

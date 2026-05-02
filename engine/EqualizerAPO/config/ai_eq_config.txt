@@ -1,5 +1,5 @@
-Filter: ON PK Fc 60 Hz Gain 0.00 dB Q 0.667
-Filter: ON PK Fc 230 Hz Gain 0.00 dB Q 0.667
-Filter: ON PK Fc 910 Hz Gain 0.00 dB Q 0.667
-Filter: ON PK Fc 4000 Hz Gain 0.00 dB Q 0.667
-Filter: ON PK Fc 14000 Hz Gain 0.00 dB Q 0.667
+Filter: ON PK Fc 60 Hz Gain -12.00 dB Q 0.667
+Filter: ON PK Fc 230 Hz Gain -12.00 dB Q 0.667
+Filter: ON PK Fc 910 Hz Gain 12.00 dB Q 0.667
+Filter: ON PK Fc 4000 Hz Gain 12.00 dB Q 0.667
+Filter: ON PK Fc 14000 Hz Gain -12.00 dB Q 0.667
