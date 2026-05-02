@@ -28,7 +28,9 @@ if not exist build (
 echo [*] Checking for CMake...
 where cmake >nul 2>&1
 if %ERRORLEVEL% neq 0 (
-    echo [!] CMake not found. Please install CMake (3.15+) and add it to PATH.
+    echo [ERROR] CMake not found. 
+    echo [ERROR] Please install CMake 3.15 or later from: https://cmake.org/download/
+    echo [ERROR] IMPORTANT: Select 'Add CMake to the system PATH' during installation.
     pause
     exit /b %ERRORLEVEL%
 )
@@ -38,10 +40,11 @@ cmake -B build
 
 if %ERRORLEVEL% neq 0 (
     echo.
-    echo [!] CMake configuration failed. 
-    echo [!] Possible reasons:
-    echo     1. C++ Compiler (Visual Studio 2026) is not installed.
+    echo [ERROR] CMake configuration failed. 
+    echo [ERROR] Possible reasons:
+    echo     1. C++ Compiler (Visual Studio 2022) is not installed.
     echo     2. 'Desktop development with C++' workload is missing in VS Installer.
+    echo     3. If you just installed them, please RESTART VS Code/Terminal.
     echo.
     pause
     exit /b %ERRORLEVEL%

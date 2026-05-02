@@ -2,7 +2,7 @@
   "version": "2.0.0",
   "tasks": [
     {
-      "label": "CMake: Build SoundMate",
+      "label": "CMake: Build All",
       "type": "shell",
       "command": "cmake --build build --config Debug",
       "group": {
@@ -10,23 +10,22 @@
         "isDefault": true
       },
       "problemMatcher": "$msCompile",
-      "detail": "CMake를 사용하여 전체 프로젝트를 빌드합니다."
+      "detail": "전체 프로젝트를 빌드합니다."
     },
     {
-      "label": "CMake: CLEAN & BUILD",
-      "type": "shell",
-      "command": "Remove-Item -Recurse -Force build; cmake -B build; cmake --build build --config Debug",
-      "problemMatcher": "$msCompile",
-      "detail": "빌드 폴더를 초기화하고 처음부터 다시 빌드합니다."
-    },
-    {
-      "label": "Run: SoundMate (Admin)",
+      "label": "SoundMate: Run as Admin",
       "type": "shell",
       "command": "powershell -ExecutionPolicy Bypass -Command \"Start-Process powershell -ArgumentList '-NoExit', '-Command', '& { .\\build\\Debug\\SoundMate_EQ.exe }' -Verb RunAs\"",
-      "dependsOn": "CMake: Build SoundMate",
+      "dependsOn": "CMake: Build All",
       "problemMatcher": [],
-      "detail": "빌드 후 관리자 권한으로 실행합니다. (UAC 팝업이 뜨면 '예'를 눌러주세요)"
+      "detail": "빌드 후 관리자 권한으로 실행합니다. (UAC 승인 필요)"
+    },
+    {
+      "label": "Project: CLEAN & REBUILD",
+      "type": "shell",
+      "command": "if (Test-Path build) { Remove-Item -Recurse -Force build }; cmake -B build; cmake --build build --config Debug",
+      "problemMatcher": "$msCompile",
+      "detail": "빌드 폴더를 초기화하고 처음부터 다시 빌드합니다."
     }
-
   ]
 }

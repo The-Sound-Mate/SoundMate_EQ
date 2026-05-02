@@ -1,39 +1,37 @@
-# SoundMate_EQ 개발 환경 구축 가이드
+# SoundMate_EQ
 
-이 프로젝트는 Windows 환경에서 **SoundMate_EQ**를 빌드하고 디버깅하기 위한 최소한의 설정을 제공합니다.
+Equalizer APO 기반의 지능형 오디오 보정 시스템 엔진입니다.
 
-## 1. 필수 설치 소프트웨어
+## 🛠 C++ 개발 환경 구축 가이드
 
-프로젝트를 시작하기 전에 아래 도구들이 설치되어 있어야 합니다.
+본 프로젝트를 빌드하고 실행하려면 다음 도구들이 설치되어 있어야 합니다.
 
-1.  **Visual Studio 2026 (또는 2022 v17.x 이상)**
-    *   'C++를 사용한 데스크톱 개발' 워크로드가 포함되어야 합니다.
-2.  **CMake (3.15 이상)**
-    *   [cmake.org](https://cmake.org/download/)에서 설치 후 시스템 PATH에 추가하세요.
-3.  **Visual Studio Code**
-    *   확장 프로그램 설치가 필요합니다 (프로젝트 오픈 시 추천 항목 확인).
+### 1. 필수 소프트웨어 설치
+1.  **Visual Studio 2022** (무료 Community 버전 가능)
+    -   설치 시 **"C++를 사용한 데스크톱 개발"** 워크로드를 반드시 체크하세요.
+    -   [다운로드 링크](https://visualstudio.microsoft.com/ko/downloads/)
+2.  **CMake** (3.15 이상)
+    -   설치 중 **"Add CMake to the system PATH for all users"** 옵션을 선택하세요.
+    -   [다운로드 링크](https://cmake.org/download/)
 
-## 2. 프로젝트 초기화 (초기 1회)
-
-프로젝트 루트 폴더에 있는 `init_project.bat` 파일을 실행합니다. 이 스크립트는 다음 작업을 수행합니다:
-*   `build` 폴더 생성 및 CMake 프로젝트 구성
-*   필수 VS Code 확장 프로그램(`CodeLLDB`) 설치
-
-```cmd
-init_project.bat
+### 2. 프로젝트 초기화 (최초 1회)
+터미널 또는 탐색기에서 프로젝트 루트에 있는 `init_project.bat`를 실행하세요.
+```bash
+.\init_project.bat
 ```
+이 스크립트는 빌드 폴더를 생성하고 CMake 구성을 시도합니다.
 
-## 3. VS Code 설정 및 빌드
+### 3. VS Code에서 빌드 및 실행
+-   **빌드**: `Ctrl + Shift + B`를 눌러 `CMake: Build All`을 선택하세요.
+-   **실행 (관리자 권한)**: `F1` -> `Tasks: Run Task` -> `SoundMate: Run as Admin`을 선택하세요. (레지스트리 접근을 위해 관리자 권한이 필수입니다.)
+-   **디버깅**: `F5` 키를 눌러 디버깅을 시작할 수 있습니다. (CodeLLDB 확장 프로그램 필요)
 
-1.  VS Code로 프로젝트 폴더를 엽니다.
-2.  오른쪽 하단에 뜨는 **확장 프로그램 추천** 팝업에서 "Install All"을 클릭하여 권장 확장 프로그램을 설치합니다.
-3.  **빌드**: `Ctrl + Shift + B` 를 눌러 전체 프로젝트를 빌드합니다.
-4.  **디버깅**: `F5` 를 눌러 `CodeLLDB`를 통한 디버깅을 시작합니다.
-    *   *참고: 관리자 권한(UAC) 팝업이 뜨면 '예'를 눌러주세요.*
+---
 
-## 4. 주의 사항
-*   이 프로젝트는 Windows 오디오 서비스 및 레지스트리를 수정할 수 있으므로, 실행 시 **관리자 권한**이 필요할 수 있습니다.
-*   `engine/` 폴더 내의 Equalizer APO 구성 파일들이 누락되지 않도록 주의하세요.
+## 프로젝트 구조
+- `src/main.cpp`: 메인 레지스트리 관리 및 서비스 제어 로직
+- `engine/`: 오디오 처리 엔진 (DLL) 및 필터 설정
+- `CMakeLists.txt`: 빌드 구성 파일
 
 ---
 © 2026 SoundMate Team.
