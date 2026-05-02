@@ -10,6 +10,7 @@
 #include <sstream>
 #include <windows.h>
 #include <winreg.h>
+#include <shellapi.h>
 #include "../core/RecordManager.h"
 #include "../core/GenreManager.h"
 
@@ -57,43 +58,56 @@ void MainWindow::SetStatus(const std::string& msg, ImVec4 color) {
 void MainWindow::FetchAudioDevices() {
     m_devices.clear();
     DWORD flags = KEY_READ | KEY_WOW64_64KEY;
-    const char* apoBase = "SOFTWARE\\EqualizerAPO\\Child APOs";
-    const char* mmBase  = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\Render";
+    const char* mmBase = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\Render";
 
-    HKEY apoKey;
-    if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, apoBase, 0, flags, &apoKey) != ERROR_SUCCESS) {
+    HKEY hRoot;
+    if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, mmBase, 0, flags, &hRoot) != ERROR_SUCCESS) {
         m_devices.push_back({"Default Output", ""});
         return;
     }
+
     char guidBuf[256];
-    for (DWORD i=0;;i++) {
+    for (DWORD i = 0;; i++) {
         DWORD sz = sizeof(guidBuf);
-        if (RegEnumKeyExA(apoKey, i, guidBuf, &sz, nullptr,nullptr,nullptr,nullptr) != ERROR_SUCCESS) break;
+        if (RegEnumKeyExA(hRoot, i, guidBuf, &sz, nullptr, nullptr, nullptr, nullptr) != ERROR_SUCCESS) break;
         std::string guid = guidBuf;
-        std::string devPath = std::string(mmBase) + "\\" + guid + "\\Properties";
-        HKEY propKey;
-        if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, devPath.c_str(), 0, flags, &propKey) != ERROR_SUCCESS) continue;
-        char nameBuf[512] = {};
-        DWORD nameSz = sizeof(nameBuf);
-        RegQueryValueExA(propKey, "{a45c254e-df1c-4efd-8020-67d146a850e0},2", nullptr, nullptr, (LPBYTE)nameBuf, &nameSz);
-        RegCloseKey(propKey);
-        if (strlen(nameBuf) > 0) {
-            // CP949 -> UTF-8 변환
-            int wlen = MultiByteToWideChar(CP_ACP, 0, nameBuf, -1, nullptr, 0);
-            std::wstring wstr(wlen, L'\0');
-            MultiByteToWideChar(CP_ACP, 0, nameBuf, -1, &wstr[0], wlen);
 
-            int ulen = WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), -1, nullptr, 0, nullptr, nullptr);
-            std::string utf8str(ulen, '\0');
-            WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), -1, &utf8str[0], ulen, nullptr, nullptr);
-            // 널 문자 제거
-            if (!utf8str.empty() && utf8str.back() == '\0') utf8str.pop_back();
+        // 장치 활성화 상태 확인
+        std::string statePath = std::string(mmBase) + "\\" + guid;
+        HKEY hDevice;
+        if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, statePath.c_str(), 0, flags, &hDevice) == ERROR_SUCCESS) {
+            DWORD state = 0, stateSz = sizeof(state);
+            RegQueryValueExA(hDevice, "DeviceState", nullptr, nullptr, (LPBYTE)&state, &stateSz);
+            RegCloseKey(hDevice);
+            if (state != 1) continue; // 1 = ACTIVE
+        }
 
-            m_devices.push_back({utf8str, guid});
+        // 이름 가져오기
+        std::string propPath = statePath + "\\Properties";
+        HKEY hProp;
+        if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, propPath.c_str(), 0, flags, &hProp) == ERROR_SUCCESS) {
+            char nameBuf[512] = {};
+            DWORD nameSz = sizeof(nameBuf);
+            // PKEY_Device_FriendlyName
+            if (RegQueryValueExA(hProp, "{a45c254e-df1c-4efd-8020-67d146a850e0},2", nullptr, nullptr, (LPBYTE)nameBuf, &nameSz) == ERROR_SUCCESS) {
+                int wlen = MultiByteToWideChar(CP_ACP, 0, nameBuf, -1, nullptr, 0);
+                std::wstring wstr(wlen, L'\0');
+                MultiByteToWideChar(CP_ACP, 0, nameBuf, -1, &wstr[0], wlen);
+                int ulen = WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), -1, nullptr, 0, nullptr, nullptr);
+                std::string utf8str(ulen, '\0');
+                WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), -1, &utf8str[0], ulen, nullptr, nullptr);
+                if (!utf8str.empty() && utf8str.back() == '\0') utf8str.pop_back();
+                m_devices.push_back({ utf8str, guid });
+            }
+            RegCloseKey(hProp);
         }
     }
-    RegCloseKey(apoKey);
-    if (m_devices.empty()) m_devices.push_back({"Default Output", ""});
+    RegCloseKey(hRoot);
+
+    if (m_devices.empty()) m_devices.push_back({ "Default Output", "" });
+    
+    // 이전에 선택했던 기기가 있다면 인덱스 복구, 없으면 0번
+    if (m_selectedDevice >= (int)m_devices.size()) m_selectedDevice = 0;
 }
 
 // ── EQ 적용 ──────────────────────────────────────────────────────────────────
@@ -325,6 +339,9 @@ void MainWindow::Render() {
         m_settingsWin.Render();
     }
     m_surveyWin.Render();
+
+    // 복원 백업 선택 팝업
+    RenderRestorePopup();
 }
 
 // ── 상단 바 ──────────────────────────────────────────────────────────────────
@@ -376,18 +393,63 @@ void MainWindow::RenderTopBar() {
             [this]() { if (m_onLogout) m_onLogout(); },
             [this](const AppSettings& s) { m_settings = s; },
             [this]() {
-                // Auto Device Setup
-                std::thread([]() {
-                    system("python \"C:\\SoundMate_EQ\\AI_eq\\AI_eq\\core\\registry_configurator.py\" --configure");
+                // Auto Device Setup - 네이티브 EXE 호출 (관리자 권한)
+                std::thread([this]() {
+                    // 실행 파일 경로 탐색 (build/Debug 또는 build/Release)
+                    char exeDir[MAX_PATH];
+                    GetModuleFileNameA(nullptr, exeDir, MAX_PATH);
+                    std::string dir = exeDir;
+                    auto pos = dir.find_last_of("\\/");
+                    if (pos != std::string::npos) dir = dir.substr(0, pos);
+                    
+                    // 프로젝트 루트에서 엔진 설정 도구 찾기 (renamed to SoundMate_Setup.exe)
+                    std::string setupExe = dir + "\\SoundMate_Setup.exe";
+                    if (!std::filesystem::exists(setupExe)) {
+                        setupExe = "C:\\SoundMate_EQ\\build\\Debug\\SoundMate_Setup.exe"; // Fallback
+                    }
+                    
+                    // 선택된 기기 GUID 가져오기
+                    std::string deviceGuid = "";
+                    if (m_selectedDevice >= 0 && m_selectedDevice < (int)m_devices.size()) {
+                        deviceGuid = m_devices[m_selectedDevice].guid;
+                    }
+
+                    static std::string params;
+                    params = "--configure";
+                    if (!deviceGuid.empty()) {
+                        params += " --device " + deviceGuid;
+                    }
+
+                    // ShellExecuteA로 관리자 권한 실행
+                    SHELLEXECUTEINFOA sei = { sizeof(sei) };
+                    sei.lpVerb = "runas";
+                    sei.lpFile = setupExe.c_str();
+                    sei.lpParameters = params.c_str();
+                    sei.nShow = SW_SHOW;
+                    sei.fMask = SEE_MASK_NOCLOSEPROCESS;
+                    
+                    if (ShellExecuteExA(&sei)) {
+                        // 프로세스 완료 대기
+                        WaitForSingleObject(sei.hProcess, 30000);
+                        DWORD exitCode = 0;
+                        GetExitCodeProcess(sei.hProcess, &exitCode);
+                        CloseHandle(sei.hProcess);
+                        if (exitCode == 0) {
+                            SetStatus("자동 설정 완료!", Theme::COLOR_GREEN);
+                            // 기기 목록 즉시 새로고침
+                            FetchAudioDevices();
+                        } else {
+                            SetStatus("자동 설정 실패 (코드: " + std::to_string(exitCode) + ")", Theme::COLOR_RED);
+                        }
+                    } else {
+                        SetStatus("관리자 권한 실행 취소됨", Theme::COLOR_RED);
+                    }
                 }).detach();
-                SetStatus("Starting Auto Setup...", Theme::COLOR_CYAN);
+                SetStatus("자동 설정 진행 중... (UAC 승인 필요)", Theme::COLOR_CYAN);
             },
             [this]() {
-                // Restore Device Setup
-                std::thread([]() {
-                    system("python \"C:\\SoundMate_EQ\\AI_eq\\AI_eq\\core\\registry_configurator.py\" --restore");
-                }).detach();
-                SetStatus("Starting Restore...", Theme::TEXT_GRAY);
+                // Restore Device Setup - 무조건 하드코딩된 원본 상태로 복원
+                ExecuteRestore("");
             },
             [this]() {
                 // Open Survey
@@ -650,4 +712,177 @@ void MainWindow::RenderStatusBar() {
         ImGui::TextColored(Theme::ACCENT_COLOR, "⚡ AI Analyzing...");
     else
         ImGui::TextColored(m_statusColor, "%s", m_statusText.c_str());
+}
+
+// ── 백업 스캔 ────────────────────────────────────────────────────────────────
+void MainWindow::ScanBackups() {
+    m_backupList.clear();
+    std::string backupDir = "C:\\SoundMate_App\\engine\\EqualizerAPO\\backups";
+    if (!std::filesystem::exists(backupDir)) return;
+
+    // 파일 목록 수집
+    struct FileEntry { std::string name; std::string path; std::filesystem::file_time_type time; };
+    std::vector<FileEntry> files;
+    for (auto& entry : std::filesystem::directory_iterator(backupDir)) {
+        if (entry.path().extension() == ".reg") {
+            // 파일명에서 날짜/시간 추출하여 표시명 생성
+            std::wstring wfname = entry.path().filename().wstring();
+            int ulen = WideCharToMultiByte(CP_UTF8, 0, wfname.c_str(), -1, nullptr, 0, nullptr, nullptr);
+            std::string fname(ulen, '\0');
+            WideCharToMultiByte(CP_UTF8, 0, wfname.c_str(), -1, &fname[0], ulen, nullptr, nullptr);
+            if (!fname.empty() && fname.back() == '\0') fname.pop_back();
+
+            std::string display = fname;
+            // YYYYMMDD_HHMMSS_DeviceName.reg -> YYYY-MM-DD HH:MM:SS DeviceName
+            if (fname.size() > 16 && fname[8] == '_') {
+                std::string date = fname.substr(0,4) + "-" + fname.substr(4,2) + "-" + fname.substr(6,2);
+                std::string time = fname.substr(9,2) + ":" + fname.substr(11,2) + ":" + fname.substr(13,2);
+                std::string rest = fname.substr(16);
+                // .reg 확장자 제거
+                if (rest.size() > 4) rest = rest.substr(0, rest.size() - 4);
+                display = date + " " + time + " - " + rest;
+            }
+            files.push_back({ display, entry.path().string(), entry.last_write_time() });
+        }
+    }
+
+    // 최신순 정렬
+    std::sort(files.begin(), files.end(), [](const FileEntry& a, const FileEntry& b) {
+        return a.time > b.time;
+    });
+
+    for (auto& f : files) {
+        m_backupList.push_back({ f.name, f.path });
+    }
+}
+
+// ── 복원 팝업 렌더링 ─────────────────────────────────────────────────────────
+void MainWindow::RenderRestorePopup() {
+    if (!m_restorePopupOpen) return;
+
+    ImGuiIO& io = ImGui::GetIO();
+    ImGui::SetNextWindowPos({io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f},
+                             ImGuiCond_Always, {0.5f, 0.5f});
+    ImGui::SetNextWindowSize({460, 400}, ImGuiCond_Always);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, Theme::ToU32(Theme::PANEL_COLOR));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 12.0f);
+
+    ImGui::Begin("백업 복원##restore_popup", &m_restorePopupOpen,
+                 ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoTitleBar);
+
+    // 제목
+    ImGui::TextColored(Theme::TEXT_WHITE, "  백업에서 복원");
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImVec2 p = ImGui::GetCursorScreenPos();
+    float cw = ImGui::GetContentRegionAvail().x;
+    dl->AddLine({p.x, p.y}, {p.x + cw, p.y}, IM_COL32(255,255,255,30), 1.0f);
+    ImGui::Dummy({0, 8});
+
+    if (m_backupList.empty()) {
+        ImGui::TextColored(Theme::TEXT_GRAY, "저장된 백업이 없습니다.");
+        ImGui::TextColored(Theme::TEXT_GRAY, "먼저 '자동 설정'을 실행하세요.");
+    } else {
+        ImGui::TextColored(Theme::TEXT_GRAY, "복원할 백업을 선택하세요 (최신순):");
+        ImGui::Spacing();
+
+        // 백업 목록 (스크롤 가능)
+        ImGui::BeginChild("##backup_list", {0, 240}, true);
+        for (int i = 0; i < (int)m_backupList.size(); i++) {
+            bool isSelected = (m_selectedBackup == i);
+            std::string label = (i == 0) ? m_backupList[i].displayName + " (최신)"
+                                         : m_backupList[i].displayName;
+
+            if (isSelected) {
+                ImGui::PushStyleColor(ImGuiCol_Header, Theme::ToU32(Theme::ACCENT_COLOR));
+                ImGui::PushStyleColor(ImGuiCol_HeaderHovered, Theme::ToU32(Theme::ACCENT_HOVER));
+            }
+            if (ImGui::Selectable(label.c_str(), isSelected, 0, {0, 28})) {
+                m_selectedBackup = i;
+            }
+            if (isSelected) {
+                ImGui::PopStyleColor(2);
+            }
+        }
+        ImGui::EndChild();
+    }
+
+    ImGui::Spacing();
+
+    // 버튼들
+    float btnW = (cw - 12) / 2;
+    bool hasSelection = !m_backupList.empty();
+
+    // 복원 버튼
+    if (hasSelection) {
+        ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(233,30,99,255));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(255,64,129,255));
+    } else {
+        ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(80,80,80,255));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(80,80,80,255));
+    }
+    if (ImGui::Button("복원하기", {btnW, 36}) && hasSelection) {
+        ExecuteRestore(m_backupList[m_selectedBackup].fullPath);
+        m_restorePopupOpen = false;
+    }
+    ImGui::PopStyleColor(2);
+
+    ImGui::SameLine(0, 12);
+
+    // 취소 버튼
+    ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(60,60,60,255));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(90,90,90,255));
+    if (ImGui::Button("취소", {btnW, 36})) {
+        m_restorePopupOpen = false;
+    }
+    ImGui::PopStyleColor(2);
+
+    ImGui::End();
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor();
+}
+
+// ── 복원 실행 ────────────────────────────────────────────────────────────────
+void MainWindow::ExecuteRestore(const std::string& filePath) {
+    std::thread([this, filePath]() {
+        // 실행 파일 경로 탐색
+        char exeDir[MAX_PATH];
+        GetModuleFileNameA(nullptr, exeDir, MAX_PATH);
+        std::string dir = exeDir;
+        auto pos = dir.find_last_of("\\/");
+        if (pos != std::string::npos) dir = dir.substr(0, pos);
+
+        std::string setupExe = dir + "\\SoundMate_Setup.exe";
+        if (!std::filesystem::exists(setupExe)) {
+            setupExe = "C:\\SoundMate_EQ\\build\\Release\\SoundMate_Setup.exe";
+        }
+        std::string params = "--restore";
+        if (!filePath.empty()) {
+            params = "--restore-file \"" + filePath + "\"";
+        }
+
+        SetStatus("복원 중...", Theme::TEXT_WHITE);
+
+        SHELLEXECUTEINFOA sei = { sizeof(sei) };
+        sei.lpVerb = "runas";
+        sei.lpFile = setupExe.c_str();
+        sei.lpParameters = params.c_str();
+        sei.nShow = SW_SHOW;
+        sei.fMask = SEE_MASK_NOCLOSEPROCESS;
+
+        if (ShellExecuteExA(&sei)) {
+            WaitForSingleObject(sei.hProcess, 30000);
+            DWORD exitCode = 0;
+            GetExitCodeProcess(sei.hProcess, &exitCode);
+            CloseHandle(sei.hProcess);
+            if (exitCode == 0) {
+                SetStatus("장치 복원 완료!", Theme::COLOR_GREEN);
+                FetchAudioDevices(); // 복원 성공 시 디바이스 목록 즉시 갱신
+            } else {
+                SetStatus("장치 복원 실패 (코드: " + std::to_string(exitCode) + ")", Theme::COLOR_RED);
+            }
+        } else {
+            SetStatus("관리자 권한 실행 취소됨", Theme::COLOR_RED);
+        }
+    }).detach();
+    SetStatus("장치 복원 진행 중... (UAC 승인 필요)", Theme::TEXT_GRAY);
 }

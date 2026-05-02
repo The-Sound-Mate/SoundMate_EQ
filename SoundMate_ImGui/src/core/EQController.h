@@ -36,11 +36,16 @@ private:
     // 레지스트리에서 Equalizer APO 설치 경로 탐색
     std::string GetRealConfigDir();
     std::string GetRealInstallPath();
+    std::string GetOfficialConfigDir();
 
     // 밴드 수에 맞는 Q값 계산 (Python의 calculate_q)
     float CalculateQ(int numBands);
 
-    std::string m_targetFilePath;   // ai_eq_config.txt 경로
+    // ai_eq_config.txt 를 특정 디렉토리에 기록
+    bool WriteEQFile(const std::string& filePath, const std::string& content);
+
+    std::string m_targetFilePath;      // 레지스트리 기반 ai_eq_config.txt 경로
+    std::string m_officialFilePath;    // 정식 APO 설치 경로의 ai_eq_config.txt
     bool        m_isRestored = false;
     bool        m_initialized = false;
 };

@@ -62,14 +62,43 @@ std::string EQController::GetRealConfigDir() {
     return GetRealInstallPath() + "\\config";
 }
 
+std::string EQController::GetOfficialConfigDir() {
+    // 정식 Equalizer APO 설치 경로 확인 (항상 고정)
+    for (auto& path : { "C:\\Program Files\\EqualizerAPO\\config",
+                         "C:\\Program Files (x86)\\EqualizerAPO\\config" }) {
+        if (std::filesystem::exists(path)) return path;
+    }
+    return "";
+}
+
 // ──────────────────────────────────────────────────────────────────────────
 EQController::EQController() {}
 
 bool EQController::Initialize() {
     std::string configDir = GetRealConfigDir();
     m_targetFilePath = configDir + "\\" + AI_EQ_CONFIG_FILENAME;
+
+    // 정식 APO 설치 경로에도 동기화하기 위한 경로 설정
+    std::string officialDir = GetOfficialConfigDir();
+    if (!officialDir.empty() && officialDir != configDir) {
+        m_officialFilePath = officialDir + "\\" + AI_EQ_CONFIG_FILENAME;
+    }
+
     m_initialized = true;
     return true;
+}
+
+bool EQController::WriteEQFile(const std::string& filePath, const std::string& content) {
+    try {
+        auto dir = std::filesystem::path(filePath).parent_path();
+        std::filesystem::create_directories(dir);
+        std::ofstream file(filePath, std::ios::trunc);
+        if (!file.is_open()) return false;
+        file << content;
+        return true;
+    } catch (...) {
+        return false;
+    }
 }
 
 // Python calculate_q 와 동일
@@ -97,10 +126,9 @@ bool EQController::ApplyEQ(const std::vector<float>& gains,
 
     std::ostringstream oss;
 
-    // Device 줄 추가 (선택된 기기가 있을 경우)
-    if (!deviceName.empty() && deviceName != "-- 선택 --") {
-        oss << "Device: " << deviceName << "\n";
-    }
+    // GUID가 있는 특정 장치만 타겟팅하지 않고, E-APO가 활성화된 모든 장치에 글로벌 적용합니다.
+    // 이렇게 하면 USB 이어폰 등을 뺐다 꽂아 GUID가 바뀌어도 EQ가 정상 적용됩니다.
+    // (기존 Device: <GUID> 출력 로직 제거)
 
     // Peaking Filter 포맷으로 각 밴드 기록
     for (size_t i = 0; i < freqs.size(); ++i) {
@@ -109,19 +137,17 @@ bool EQController::ApplyEQ(const std::vector<float>& gains,
             << " dB Q " << std::setprecision(3) << q << "\n";
     }
 
-    try {
-        // 디렉토리 생성
-        auto dir = std::filesystem::path(m_targetFilePath).parent_path();
-        std::filesystem::create_directories(dir);
+    std::string content = oss.str();
 
-        std::ofstream file(m_targetFilePath, std::ios::trunc);
-        if (!file.is_open()) return false;
-        file << oss.str();
-        return true;
+    // 1) 레지스트리 기반 설정 디렉토리에 기록
+    bool ok = WriteEQFile(m_targetFilePath, content);
+
+    // 2) 정식 APO 설치 경로에도 동기화 (있으면)
+    if (!m_officialFilePath.empty()) {
+        WriteEQFile(m_officialFilePath, content);
     }
-    catch (...) {
-        return false;
-    }
+
+    return ok;
 }
 
 bool EQController::ApplyFlatEQ(const std::vector<int>& freqs,
@@ -134,23 +160,16 @@ bool EQController::ApplyFlatEQ(const std::vector<int>& freqs,
 // ──────────────────────────────────────────────────────────────────────────
 // Python의 _ensure_include_linked() 완전 이식
 // ──────────────────────────────────────────────────────────────────────────
-void EQController::EnsureIncludeLinked() {
-    if (m_isRestored) return;
-
-    std::string configDir  = GetRealConfigDir();
-    std::string configPath = configDir + "\\" + CONFIG_FILENAME;
-    std::string includeLine = std::string("Include: ") + AI_EQ_CONFIG_FILENAME;
-
+// 단일 config.txt 파일에 Include 줄 보장 (기존 내용 보존)
+static void EnsureIncludeInFile(const std::string& configPath, const std::string& includeLine) {
     if (!std::filesystem::exists(configPath)) return;
 
-    // 파일 읽기
     std::ifstream fin(configPath);
     if (!fin.is_open()) return;
 
     std::vector<std::string> lines;
     std::string line;
     while (std::getline(fin, line)) {
-        // 윈도우 \r\n 처리
         if (!line.empty() && line.back() == '\r') line.pop_back();
         lines.push_back(line);
     }
@@ -159,12 +178,10 @@ void EQController::EnsureIncludeLinked() {
     // 이미 맨 위에 있으면 종료
     if (!lines.empty()) {
         std::string firstTrimmed = lines[0];
-        // 앞뒤 공백 제거
         auto s = firstTrimmed.find_first_not_of(" \t");
         if (s != std::string::npos) firstTrimmed = firstTrimmed.substr(s);
         auto e = firstTrimmed.find_last_not_of(" \t");
         if (e != std::string::npos) firstTrimmed = firstTrimmed.substr(0, e + 1);
-
         if (firstTrimmed == includeLine) return;
     }
 
@@ -187,6 +204,24 @@ void EQController::EnsureIncludeLinked() {
         for (auto& l : lines) fout << l << "\n";
     }
     catch (...) {}
+}
+
+void EQController::EnsureIncludeLinked() {
+    if (m_isRestored) return;
+
+    std::string includeLine = std::string("Include: ") + AI_EQ_CONFIG_FILENAME;
+
+    // 1) 레지스트리 기반 설정 디렉토리
+    std::string configDir  = GetRealConfigDir();
+    std::string configPath = configDir + "\\" + CONFIG_FILENAME;
+    EnsureIncludeInFile(configPath, includeLine);
+
+    // 2) 정식 APO 설치 경로의 config.txt 에도 보장 (기존 내용 보존)
+    std::string officialDir = GetOfficialConfigDir();
+    if (!officialDir.empty() && officialDir != configDir) {
+        std::string officialPath = officialDir + "\\" + CONFIG_FILENAME;
+        EnsureIncludeInFile(officialPath, includeLine);
+    }
 }
 
 void EQController::SetRestored(bool restored) {

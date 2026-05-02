@@ -120,7 +120,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     font_config.OversampleV = 3;
     io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\malgun.ttf", 16.0f * dpiScale,
                                   &font_config, io.Fonts->GetGlyphRangesKorean());
-    io.Fonts->Build();
+    // io.Fonts->Build(); // [FIX] Modern backends handle this automatically; calling it manually causes assertion failure.
 
     // ImGui 스타일 스케일링
     ImGui::GetStyle().ScaleAllSizes(dpiScale);

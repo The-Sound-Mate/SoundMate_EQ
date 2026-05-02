@@ -1,2 +1,1 @@
 Include: ai_eq_config.txt
-Preamp: 0 dB

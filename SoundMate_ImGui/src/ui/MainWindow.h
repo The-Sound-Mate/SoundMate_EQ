@@ -151,6 +151,18 @@ private:
     AppSettings    m_settings;
     std::string    m_userPreference;
     std::function<void()> m_onLogout;
+
+    // 복원 팝업
+    struct BackupEntry {
+        std::string displayName;  // UI에 보여줄 이름
+        std::string fullPath;     // 전체 경로
+    };
+    bool                     m_restorePopupOpen = false;
+    std::vector<BackupEntry> m_backupList;
+    int                      m_selectedBackup = 0;
+    void                     ScanBackups();
+    void                     RenderRestorePopup();
+    void                     ExecuteRestore(const std::string& filePath);
 public:
     void SetOnLogoutCallback(std::function<void()> cb) { m_onLogout = cb; }
 };
