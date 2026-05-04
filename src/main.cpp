@@ -1,112 +1,89 @@
 #include <windows.h>
-#include <iostream>
-#include <string>
-#include <vector>
+#include <stdio.h>
 #include <accctrl.h>
 #include <aclapi.h>
-#include <algorithm>
 
 /**
  * ============================================================
- *  SoundMate_Setup v6.5 - THE GUARDIAN ARCHITECT
- *  Surgical Restoration & Co-existence Support.
+ *  SoundMate_Setup v10.4 - THE NUCLEUS INFILTRATOR
+ *  Heap-only memory allocation & Precise Security Handling.
  * ============================================================
  */
 
-const std::wstring SOUNDMATE_CLSID = L"{EC1CC9CE-FAED-4822-828A-82A81A6F018F}";
+const wchar_t* EAPO_CLSID = L"{EC1CC9CE-FAED-4822-828A-82A81A6F018F}";
 
-bool SetPrivilege(LPCWSTR lpszPrivilege, bool bEnablePrivilege) {
+void Log(const char* msg) {
+    FILE* f = fopen("C:\\SoundMate_App\\setup_log.txt", "a");
+    if (f) { fprintf(f, "[v10.4] %s\n", msg); fclose(f); }
+}
+
+BOOL SetPrivilege(LPCWSTR lpszPrivilege, BOOL bEnablePrivilege) {
     HANDLE hToken; TOKEN_PRIVILEGES tp; LUID luid;
-    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &hToken)) return false;
-    if (!LookupPrivilegeValue(NULL, lpszPrivilege, &luid)) return false;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &hToken)) return FALSE;
+    if (!LookupPrivilegeValueW(NULL, lpszPrivilege, &luid)) return FALSE;
     tp.PrivilegeCount = 1; tp.Privileges[0].Luid = luid;
     tp.Privileges[0].Attributes = bEnablePrivilege ? SE_PRIVILEGE_ENABLED : 0;
-    AdjustTokenPrivileges(hToken, FALSE, &tp, sizeof(TOKEN_PRIVILEGES), NULL, NULL);
+    AdjustTokenPrivileges(hToken, FALSE, &tp, 0, NULL, NULL);
     return (GetLastError() == ERROR_SUCCESS);
 }
 
-// 다중 문자열(MULTI_SZ)에서 특정 CLSID만 제거하는 로직
-void SurgicalRemoveCLSID(HKEY hKey, const std::wstring& valueName) {
-    DWORD sz = 0;
-    if (RegQueryValueExW(hKey, valueName.c_str(), NULL, NULL, NULL, &sz) != ERROR_SUCCESS) return;
+void GraftOfficial(const wchar_t* guid) {
+    wchar_t* fxPath = (wchar_t*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 1024);
+    wsprintfW(fxPath, L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\Render\\%s\\FxProperties", guid);
     
-    std::vector<wchar_t> buf(sz / sizeof(wchar_t) + 2, 0);
-    if (RegQueryValueExW(hKey, valueName.c_str(), NULL, NULL, (BYTE*)buf.data(), &sz) != ERROR_SUCCESS) return;
-
-    std::vector<std::wstring> remaining;
-    wchar_t* p = buf.data();
-    while (*p) {
-        std::wstring item = p;
-        if (item != SOUNDMATE_CLSID) remaining.push_back(item);
-        p += item.length() + 1;
+    wchar_t* fullPath = (wchar_t*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 1024);
+    wsprintfW(fullPath, L"MACHINE\\%s", fxPath);
+    
+    // 1. Take Ownership
+    SetNamedSecurityInfoW(fullPath, SE_REGISTRY_KEY, OWNER_SECURITY_INFORMATION, NULL, NULL, NULL, NULL);
+    
+    // 2. Grant Permissions (DACL)
+    EXPLICIT_ACCESSW ea = { 0 };
+    ea.grfAccessPermissions = GENERIC_ALL;
+    ea.grfAccessMode = SET_ACCESS;
+    ea.grfInheritance = SUB_CONTAINERS_AND_OBJECTS_INHERIT;
+    ea.Trustee.TrusteeForm = TRUSTEE_IS_NAME;
+    ea.Trustee.TrusteeType = TRUSTEE_IS_WELL_KNOWN_GROUP;
+    ea.Trustee.ptstrName = (LPWSTR)L"Everyone";
+    
+    PACL pNewACL = NULL;
+    if (SetEntriesInAclW(1, &ea, NULL, &pNewACL) == ERROR_SUCCESS) {
+        SetNamedSecurityInfoW(fullPath, SE_REGISTRY_KEY, DACL_SECURITY_INFORMATION, NULL, NULL, pNewACL, NULL);
+        LocalFree(pNewACL);
     }
 
-    if (remaining.empty()) {
-        RegDeleteValueW(hKey, valueName.c_str());
-    } else {
-        std::vector<wchar_t> newData;
-        for (const auto& s : remaining) {
-            for (wchar_t c : s) newData.push_back(c);
-            newData.push_back(L'\0');
-        }
-        newData.push_back(L'\0');
-        RegSetValueExW(hKey, valueName.c_str(), 0, REG_MULTI_SZ, (BYTE*)newData.data(), (DWORD)(newData.size() * sizeof(wchar_t)));
-    }
-}
-
-void NativeAction(const std::wstring& guid, bool isRestore) {
-    std::wstring fxPath = L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\Render\\" + guid + L"\\FxProperties";
-    std::wstring fullPath = L"MACHINE\\" + fxPath;
-    
-    SetNamedSecurityInfoW((LPWSTR)fullPath.c_str(), SE_REGISTRY_KEY, OWNER_SECURITY_INFORMATION, NULL, NULL, NULL, NULL);
-    
+    // 3. Graft Structures
     HKEY hKey;
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, fxPath.c_str(), 0, KEY_ALL_ACCESS, &hKey) == ERROR_SUCCESS) {
-        std::vector<std::wstring> keys = {
-            L"{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},1", L"{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},2", 
-            L"{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},3", L"{d3993a3f-99c2-4402-b5ec-a92a0367664b},5",
-            L"{d3993a3f-99c2-4402-b5ec-a92a0367664b},6"
-        };
-
-        for(const auto& k : keys) {
-            if (isRestore) {
-                SurgicalRemoveCLSID(hKey, k);
-            } else {
-                // Install logic (Prepend CLSID for priority)
-                // (Omitted for brevity, but stays same as v6.4 logic: Overwrite/Prepend)
-                std::vector<wchar_t> data;
-                for(wchar_t c : SOUNDMATE_CLSID) data.push_back(c);
-                data.push_back(L'\0'); data.push_back(L'\0');
-                RegSetValueExW(hKey, k.c_str(), 0, REG_MULTI_SZ, (BYTE*)data.data(), (DWORD)(data.size() * sizeof(wchar_t)));
-            }
-        }
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, fxPath, 0, KEY_ALL_ACCESS, &hKey) == ERROR_SUCCESS) {
+        RegSetValueExW(hKey, L"{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},1", 0, REG_SZ, (BYTE*)EAPO_CLSID, (DWORD)((wcslen(EAPO_CLSID) + 1) * sizeof(wchar_t)));
+        RegSetValueExW(hKey, L"{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},2", 0, REG_SZ, (BYTE*)EAPO_CLSID, (DWORD)((wcslen(EAPO_CLSID) + 1) * sizeof(wchar_t)));
         
-        if (isRestore) {
-            // Restore only if it was disabled by us (Optional, but safe to keep 0 for APOs)
-        } else {
-            DWORD disable = 0;
-            RegSetValueExW(hKey, L"{1da5d803-d492-4edd-8c23-e0c0ffee7f0e},5", 0, REG_DWORD, (BYTE*)&disable, sizeof(DWORD));
+        HKEY hChild;
+        if (RegCreateKeyExW(hKey, L"Child APOs", 0, NULL, 0, KEY_ALL_ACCESS, NULL, &hChild, NULL) == ERROR_SUCCESS) {
+            RegSetValueExW(hChild, L"{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},1", 0, REG_SZ, (BYTE*)EAPO_CLSID, (DWORD)((wcslen(EAPO_CLSID) + 1) * sizeof(wchar_t)));
+            RegSetValueExW(hChild, L"{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},2", 0, REG_SZ, (BYTE*)EAPO_CLSID, (DWORD)((wcslen(EAPO_CLSID) + 1) * sizeof(wchar_t)));
+            RegCloseKey(hChild);
         }
+        DWORD one = 1;
+        RegSetValueExW(hKey, L"{1da5d803-d492-4edd-8c23-e0c0ffee7f0e},5", 0, REG_DWORD, (BYTE*)&one, sizeof(DWORD));
         RegCloseKey(hKey);
     }
+    
+    HeapFree(GetProcessHeap(), 0, fxPath);
+    HeapFree(GetProcessHeap(), 0, fullPath);
 }
 
-int main(int argc, char* argv[]) {
-    SetPrivilege(SE_TAKE_OWNERSHIP_NAME, true);
-    bool isRestore = false;
-    for (int i = 1; i < argc; i++) { if (std::string(argv[i]) == "--restore") isRestore = true; }
-
-    std::cout << (isRestore ? "Surgical Restoration Started..." : "Native Installation Started...") << std::endl;
-    
-    std::wstring target = L"{05658a7c-fd93-4886-9e06-6e866e188533}";
-    NativeAction(target, isRestore);
-    NativeAction(L"{d417d94e-8595-4022-aef1-5a00b183e2bd}", isRestore);
-
-    // [v6.5 Fix] Do NOT delete SOFTWARE\EqualizerAPO to preserve existing setup
-    
-    system("net stop audiosrv /y >nul 2>&1");
-    system("net start audiosrv >nul 2>&1");
-    
-    std::cout << "Operation Completed. (Preserved non-SoundMate settings)" << std::endl;
+int main() {
+    Log("Starting Nuclear Infiltration...");
+    SetPrivilege(SE_TAKE_OWNERSHIP_NAME, TRUE);
+    HKEY hRoot;
+    if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\Render", 0, KEY_READ, &hRoot) == ERROR_SUCCESS) {
+        wchar_t subKey[MAX_PATH]; DWORD index = 0;
+        while (RegEnumKeyW(hRoot, index++, subKey, MAX_PATH) == ERROR_SUCCESS) {
+            GraftOfficial(subKey);
+        }
+        RegCloseKey(hRoot);
+    }
+    Log("Nuclear Infiltration Completed Successfully.");
     return 0;
 }

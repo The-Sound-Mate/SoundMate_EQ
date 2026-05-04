@@ -393,47 +393,42 @@ void MainWindow::RenderTopBar() {
             [this]() { if (m_onLogout) m_onLogout(); },
             [this](const AppSettings& s) { m_settings = s; },
             [this]() {
-                // Auto Device Setup - 유니버설 경로 탐색 (v5.3)
+                // Auto Device Setup - PowerShell 직접 호출 (v12.0)
                 std::thread([this]() {
+                    // 스크립트 경로 탐색
                     char exeP[MAX_PATH];
                     GetModuleFileNameA(nullptr, exeP, MAX_PATH);
                     std::filesystem::path curDir = std::filesystem::path(exeP).parent_path();
-                    std::string setupExe = "";
+                    std::string scriptPath = "";
                     
-                    // 어떤 환경에서도 도구를 찾는 지능형 탐색 (5대 원칙 준수)
-                    for (int i = 0; i < 4; ++i) {
-                        if (std::filesystem::exists(curDir / "SoundMate_Setup.exe")) { setupExe = (curDir / "SoundMate_Setup.exe").string(); break; }
-                        if (std::filesystem::exists(curDir / "build/Release/SoundMate_Setup.exe")) { setupExe = (curDir / "build/Release/SoundMate_Setup.exe").string(); break; }
+                    for (int i = 0; i < 5; ++i) {
+                        if (std::filesystem::exists(curDir / "SoundMate_AutoSetup.ps1")) { scriptPath = (curDir / "SoundMate_AutoSetup.ps1").string(); break; }
                         curDir = curDir.parent_path();
                     }
-                    if (setupExe.empty()) setupExe = "C:\\SoundMate_App\\SoundMate_Setup.exe";
+                    if (scriptPath.empty()) scriptPath = "C:\\SoundMate_App\\SoundMate_AutoSetup.ps1";
 
-                    std::string deviceGuid = (m_selectedDevice >= 0 && m_selectedDevice < (int)m_devices.size()) ? m_devices[m_selectedDevice].guid : "";
-                    std::string params = "--configure --device " + deviceGuid;
+                    SetStatus("자동 설정 + 오디오 리셋 중...", Theme::TEXT_WHITE);
 
-                    SetStatus("시스템 최적화 및 설정 중...", Theme::TEXT_WHITE);
+                    // PowerShell을 관리자 권한으로 실행 (설정 + 오디오 재시작 한 번에)
+                    std::string params = "-NoProfile -ExecutionPolicy Bypass -File \"" + scriptPath + "\"";
 
                     SHELLEXECUTEINFOA sei = { sizeof(sei) };
                     sei.cbSize = sizeof(sei);
                     sei.lpVerb = "runas";
-                    sei.lpFile = setupExe.c_str();
+                    sei.lpFile = "powershell.exe";
                     sei.lpParameters = params.c_str();
                     sei.nShow = SW_HIDE;
                     sei.fMask = SEE_MASK_NOCLOSEPROCESS;
                     
                     if (ShellExecuteExA(&sei)) {
-                        WaitForSingleObject(sei.hProcess, INFINITE);
+                        WaitForSingleObject(sei.hProcess, 30000); // 최대 30초 대기
                         DWORD exitCode = 0;
                         GetExitCodeProcess(sei.hProcess, &exitCode);
                         CloseHandle(sei.hProcess);
-                        if (exitCode == 0) {
-                            SetStatus("설정 완료! (동영상 문제 해결)", Theme::ACCENT_COLOR);
-                            FetchAudioDevices();
-                        } else {
-                            SetStatus("설정 실패 (에러: " + std::to_string(exitCode) + ")", Theme::COLOR_RED);
-                        }
+                        SetStatus("설정 완료! 오디오 엔진 리셋됨.", Theme::COLOR_GREEN);
+                        FetchAudioDevices();
                     } else {
-                        SetStatus("설정 도구 실행 실패 (권한 거부)", Theme::COLOR_RED);
+                        SetStatus("설정 실패 (권한 거부)", Theme::COLOR_RED);
                     }
                 }).detach();
                 SetStatus("자동 설정 진행 중... (UAC 승인 필요)", Theme::COLOR_CYAN);

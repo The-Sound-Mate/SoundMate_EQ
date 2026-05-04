@@ -1,0 +1,2 @@
+﻿Include: C:\Program Files\EqualizerAPO\config\ai_eq_config.txt
+Device: all

@@ -74,16 +74,15 @@ std::string EQController::GetOfficialConfigDir() {
 // ──────────────────────────────────────────────────────────────────────────
 EQController::EQController() {}
 
-bool EQController::Initialize() {
-    // 1. 최우선 경로: v5.x 공장 초기화 표준 경로 확인
-    std::string appPath = "C:\\SoundMate_App\\engine\\EqualizerAPO\\config";
-    std::string configDir = "";
+    // 1. 레지스트리 기반 탐색 (v11.0 최우선 순위: 엔진과 100% 동기화)
+    std::string configDir = GetRealConfigDir();
 
-    if (std::filesystem::exists(appPath)) {
-        configDir = appPath;
-    } else {
-        // 2. 레지스트리 기반 탐색
-        configDir = GetRealConfigDir();
+    // 만약 레지스트리 경로가 유효하지 않을 때만 폴백
+    if (configDir.empty() || !std::filesystem::exists(configDir)) {
+        std::string appPath = "C:\\SoundMate_App\\engine\\EqualizerAPO\\config";
+        if (std::filesystem::exists(appPath)) {
+            configDir = appPath;
+        }
     }
 
     m_targetFilePath = configDir + "\\" + AI_EQ_CONFIG_FILENAME;
