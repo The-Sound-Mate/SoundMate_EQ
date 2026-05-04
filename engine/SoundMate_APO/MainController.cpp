@@ -70,25 +70,17 @@ int main() {
     if (targetIndex == -1 && !devices.empty()) targetIndex = 0;
 
     if (targetIndex != -1) {
-        std::cout << "\n[3] 타겟 기기(" << WStringToUTF8(devices[targetIndex].name) << ")의 Multi-APO 강제 복구...\n";
+        std::cout << "\n[2] 타겟 기기(" << WStringToUTF8(devices[targetIndex].name) << ")에 SoundMate APO 설치 중...\n";
         
-        // C++에서 Multi-String 복구는 권한 등 복잡하므로 레지스트리 스크립트 실행으로 복구
-        std::ofstream regFile("C:\\Program Files\\SoundMate\\restore_multi_apo.reg");
-        if (regFile.is_open()) {
-            regFile << "Windows Registry Editor Version 5.00\n\n";
-            regFile << "[HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\Render\\" 
-                    << WStringToUTF8(devices[targetIndex].id) << "\\FxProperties]\n";
-            // 원래 Realtek 값 하나만 남김: {905069CC-CF0D-4EAD-B7D7-FBC5A9E38BD5}
-            regFile << "\"{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},13\"=hex(7):7b,00,39,00,30,00,35,00,30,00,36,00,39,00,43,00,43,00,2d,00,43,00,46,00,30,00,44,00,2d,00,34,00,45,00,41,00,44,00,2d,00,42,00,37,00,44,00,37,00,2d,00,46,00,42,00,43,00,35,00,41,00,39,00,45,00,33,00,38,00,42,00,44,00,35,00,7d,00,00,00,00,00\n";
-            regFile.close();
-            
-            system("regedit /s \"C:\\Program Files\\SoundMate\\restore_multi_apo.reg\"");
-            std::cout << " -> Multi-APO 원상복구 완료.\n";
+        if (DeviceManager::Install(devices[targetIndex].id)) {
+            std::cout << " -> 설치(레지스트리 등록) 성공.\n";
+        } else {
+            std::cout << " -> 설치 실패. 관리자 권한이 필요할 수 있습니다.\n";
         }
 
-        std::cout << "\n[4] 오디오 서비스 재시작 시도...\n";
+        std::cout << "\n[3] 오디오 서비스 재시작 시도...\n";
         if (DeviceManager::RestartAudioService()) {
-            std::cout << " -> 서비스 재시작 완료! 이제 원래 소리(우리 설정 제거됨)로 돌아왔는지 확인하세요.\n";
+            std::cout << " -> 서비스 재시작 완료! 이제 소리를 재생하여 EQ가 적용되는지 확인하세요.\n";
         } else {
             std::cout << " -> 서비스 재시작 실패. 아래 명령어를 관리자 권한 파워쉘에서 실행해주세요:\n";
             std::cout << "    Restart-Service audiosrv -Force\n";

@@ -1,132 +1,194 @@
 #include "DeviceManager.h"
-#include "DeviceAPOInfo.h"
-#include "helpers/RegistryHelper.h"
 #include <iostream>
-#include <memory>
+#include <propkey.h>
 
 #pragma comment(lib, "ole32.lib")
-#pragma comment(lib, "advapi32.lib")
-#pragma comment(lib, "shlwapi.lib")
+
+#define SOUNDMATE_APO_CLSID L"{B81648BD-6CE6-4D24-81D6-0A1FF8E60E21}"
+
+// Constants for APO property keys
+DEFINE_PROPERTYKEY(PKEY_FX_Endpoint_Policies, 0xd04e05a6, 0x594b, 0x4fb6, 0xa8, 0x0d, 0x01, 0xaf, 0x5e, 0xed, 0x7d, 0x1d, 5);
+// PKEY_FX_Endpoint_Policies is actually {d04e05a6-594b-4fb6-a80d-01af5eed7d1d},5
+
+std::wstring GetPropertyString(IPropertyStore* pStore, const PROPERTYKEY& key) {
+    PROPVARIANT prop;
+    PropVariantInit(&prop);
+    std::wstring result = L"";
+    if (SUCCEEDED(pStore->GetValue(key, &prop)) && prop.vt == VT_LPWSTR) {
+        result = prop.pwszVal;
+    }
+    PropVariantClear(&prop);
+    return result;
+}
 
 std::vector<AudioDeviceInfo> DeviceManager::GetActiveDevices() {
     std::vector<AudioDeviceInfo> deviceList;
-    
-    // Initialize COM
     CoInitialize(nullptr);
 
-    // Load Render device list (Reuse Equalizer APO logic)
-    auto apoInfos = DeviceAPOInfo::loadAllInfos(false);
-    
-    for (const auto& info : apoInfos) {
-        // Ignore disabled or unplugged devices
-        if (!info->isDisabled() && !info->isUnplugged()) {
-            AudioDeviceInfo dInfo;
-            dInfo.id = info->getDeviceGuid();
-            dInfo.name = info->getDeviceName();
-            dInfo.isInstalled = info->isInstalled();
-            deviceList.push_back(dInfo);
+    IMMDeviceEnumerator* pEnum = nullptr;
+    if (SUCCEEDED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, __uuidof(IMMDeviceEnumerator), (void**)&pEnum))) {
+        IMMDeviceCollection* pDevices = nullptr;
+        if (SUCCEEDED(pEnum->EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE, &pDevices))) {
+            UINT count = 0;
+            pDevices->GetCount(&count);
+            for (UINT i = 0; i < count; i++) {
+                IMMDevice* pDevice = nullptr;
+                if (SUCCEEDED(pDevices->Item(i, &pDevice))) {
+                    LPWSTR pwszID = nullptr;
+                    pDevice->GetId(&pwszID);
+                    
+                    IPropertyStore* pStore = nullptr;
+                    if (SUCCEEDED(pDevice->OpenPropertyStore(STGM_READ, &pStore))) {
+                        AudioDeviceInfo info;
+                        info.id = pwszID;
+                        info.name = GetPropertyString(pStore, PKEY_Device_FriendlyName);
+                        info.isInstalled = CheckIfInstalled(info.id);
+                        deviceList.push_back(info);
+                        pStore->Release();
+                    }
+                    CoTaskMemFree(pwszID);
+                    pDevice->Release();
+                }
+            }
+            pDevices->Release();
         }
+        pEnum->Release();
     }
-
     CoUninitialize();
     return deviceList;
 }
 
-bool DeviceManager::FullReset() {
-    bool anyChanged = false;
-    CoInitialize(nullptr);
-
-    try {
-        // 1. Reset all Render devices
-        auto renderInfos = DeviceAPOInfo::loadAllInfos(false);
-        for (auto& info : renderInfos) {
-            if (info->isInstalled()) {
-                info->uninstall();
-                anyChanged = true;
+bool DeviceManager::CheckIfInstalled(const std::wstring& deviceID) {
+    std::wstring fxPath = L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\Render\\" + deviceID + L"\\FxProperties";
+    HKEY hKey;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, fxPath.c_str(), 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+        // Check SFX (5)
+        WCHAR szVal[512] = {0};
+        DWORD cbSize = sizeof(szVal);
+        if (RegQueryValueExW(hKey, L"{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},5", NULL, NULL, (LPBYTE)szVal, &cbSize) == ERROR_SUCCESS) {
+            if (std::wstring(szVal).find(SOUNDMATE_APO_CLSID) != std::wstring::npos) {
+                RegCloseKey(hKey);
+                return true;
             }
-        }
-
-        // 2. Reset all Capture devices
-        auto captureInfos = DeviceAPOInfo::loadAllInfos(true);
-        for (auto& info : captureInfos) {
-            if (info->isInstalled()) {
-                info->uninstall();
-                anyChanged = true;
-            }
-        }
-
-        // 3. Delete main Equalizer APO registry key
-        if (RegistryHelper::keyExists(L"HKEY_LOCAL_MACHINE\\SOFTWARE\\EqualizerAPO")) {
-            RegistryHelper::deleteKey(L"HKEY_LOCAL_MACHINE\\SOFTWARE\\EqualizerAPO");
-            anyChanged = true;
         }
         
-    } catch (...) {
-        CoUninitialize();
-        return false;
+        // Check Multi-SFX (13) which is MULTI_SZ
+        cbSize = sizeof(szVal);
+        DWORD type = 0;
+        if (RegQueryValueExW(hKey, L"{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},13", NULL, &type, (LPBYTE)szVal, &cbSize) == ERROR_SUCCESS && type == REG_MULTI_SZ) {
+            WCHAR* p = szVal;
+            while (*p) {
+                if (std::wstring(p).find(SOUNDMATE_APO_CLSID) != std::wstring::npos) {
+                    RegCloseKey(hKey);
+                    return true;
+                }
+                p += wcslen(p) + 1;
+            }
+        }
+        RegCloseKey(hKey);
     }
-
-    CoUninitialize();
-    return anyChanged;
+    return false;
 }
 
 bool DeviceManager::Install(const std::wstring& deviceID) {
-    CoInitialize(nullptr);
-    bool success = false;
+    if (CheckIfInstalled(deviceID)) return true;
 
-    auto renderInfos = DeviceAPOInfo::loadAllInfos(false);
-    for (auto& info : renderInfos) {
-        if (info->getDeviceGuid() == deviceID) {
-            
-            // Cast to DeviceAPOInfo to access detailed state
-            auto dInfo = std::dynamic_pointer_cast<DeviceAPOInfo>(info);
-            if (dInfo) {
-                // Enable both Pre-Mix and Post-Mix
-                dInfo->getSelectedInstallState().installPreMix = true;
-                dInfo->getSelectedInstallState().installPostMix = true;
-                
-                // Force load original system APOs as children
-                dInfo->getSelectedInstallState().useOriginalAPOPreMix = true;
-                dInfo->getSelectedInstallState().useOriginalAPOPostMix = true;
-            }
-            
-            // Install using Equalizer APO method
-            try {
-                info->install();
-                
-                // Register DLL in COM (SoundMate_APO.dll)
-                DeviceAPOInfo::checkAPORegistration(true);
-                success = true;
-            } catch (...) {
-                success = false;
-            }
-            break;
+    std::wstring fxPath = L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\Render\\" + deviceID + L"\\FxProperties";
+    HKEY hKey;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, fxPath.c_str(), 0, KEY_READ | KEY_WRITE, &hKey) != ERROR_SUCCESS) return false;
+
+    // Check Multi-SFX (13) first
+    WCHAR szVal[2048] = {0};
+    DWORD cbSize = sizeof(szVal);
+    DWORD type = 0;
+    
+    if (RegQueryValueExW(hKey, L"{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},13", NULL, &type, (LPBYTE)szVal, &cbSize) == ERROR_SUCCESS && type == REG_MULTI_SZ) {
+        // Realtek / Multi-APO chain
+        // We inject our GUID at the top of the MULTI_SZ array.
+        WCHAR newVal[2048] = {0};
+        wcscpy_s(newVal, SOUNDMATE_APO_CLSID);
+        
+        size_t offset = wcslen(newVal) + 1;
+        WCHAR* p = szVal;
+        while (*p) {
+            wcscpy_s(newVal + offset, 2048 - offset, p);
+            offset += wcslen(p) + 1;
+            p += wcslen(p) + 1;
         }
+        newVal[offset] = L'\0'; // double null termination
+        
+        RegSetValueExW(hKey, L"{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},13", 0, REG_MULTI_SZ, (const BYTE*)newVal, (DWORD)(offset + 1) * sizeof(WCHAR));
+    } else {
+        // Standard SFX (5)
+        // Backup original
+        cbSize = sizeof(szVal);
+        if (RegQueryValueExW(hKey, L"{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},5", NULL, &type, (LPBYTE)szVal, &cbSize) == ERROR_SUCCESS) {
+            RegSetValueExW(hKey, L"{b81648bd-6ce6-4d24-81d6-0a1ff8e60e21},0", 0, type, (const BYTE*)szVal, cbSize);
+        }
+        RegSetValueExW(hKey, L"{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},5", 0, REG_SZ, (const BYTE*)SOUNDMATE_APO_CLSID, sizeof(SOUNDMATE_APO_CLSID));
     }
 
-    CoUninitialize();
-    return success;
+    RegCloseKey(hKey);
+    return true;
 }
 
 bool DeviceManager::Uninstall(const std::wstring& deviceID) {
-    CoInitialize(nullptr);
-    bool success = false;
+    if (!CheckIfInstalled(deviceID)) return true;
 
-    auto renderInfos = DeviceAPOInfo::loadAllInfos(false);
-    for (auto& info : renderInfos) {
-        if (info->getDeviceGuid() == deviceID) {
-            try {
-                info->uninstall();
-                success = true;
-            } catch (...) {
-                success = false;
+    std::wstring fxPath = L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\Render\\" + deviceID + L"\\FxProperties";
+    HKEY hKey;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, fxPath.c_str(), 0, KEY_READ | KEY_WRITE, &hKey) != ERROR_SUCCESS) return false;
+
+    // Restore Standard SFX
+    WCHAR szVal[512] = {0};
+    DWORD cbSize = sizeof(szVal);
+    DWORD type = 0;
+    if (RegQueryValueExW(hKey, L"{b81648bd-6ce6-4d24-81d6-0a1ff8e60e21},0", NULL, &type, (LPBYTE)szVal, &cbSize) == ERROR_SUCCESS) {
+        RegSetValueExW(hKey, L"{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},5", 0, type, (const BYTE*)szVal, cbSize);
+        RegDeleteValueW(hKey, L"{b81648bd-6ce6-4d24-81d6-0a1ff8e60e21},0");
+    } else {
+        // If we were the only one, just delete the SFX key or leave empty.
+        // Actually, let's just delete the value if we overwrote it and there was no backup.
+        cbSize = sizeof(szVal);
+        if (RegQueryValueExW(hKey, L"{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},5", NULL, NULL, (LPBYTE)szVal, &cbSize) == ERROR_SUCCESS) {
+            if (std::wstring(szVal).find(SOUNDMATE_APO_CLSID) != std::wstring::npos) {
+                RegDeleteValueW(hKey, L"{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},5");
             }
-            break;
         }
     }
 
-    CoUninitialize();
-    return success;
+    // Restore Multi-SFX (13)
+    WCHAR szMulti[2048] = {0};
+    cbSize = sizeof(szMulti);
+    if (RegQueryValueExW(hKey, L"{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},13", NULL, &type, (LPBYTE)szMulti, &cbSize) == ERROR_SUCCESS && type == REG_MULTI_SZ) {
+        WCHAR newVal[2048] = {0};
+        size_t offset = 0;
+        WCHAR* p = szMulti;
+        while (*p) {
+            if (std::wstring(p).find(SOUNDMATE_APO_CLSID) == std::wstring::npos) {
+                wcscpy_s(newVal + offset, 2048 - offset, p);
+                offset += wcslen(p) + 1;
+            }
+            p += wcslen(p) + 1;
+        }
+        newVal[offset] = L'\0';
+        RegSetValueExW(hKey, L"{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},13", 0, REG_MULTI_SZ, (const BYTE*)newVal, (DWORD)(offset + 1) * sizeof(WCHAR));
+    }
+
+    RegCloseKey(hKey);
+    return true;
+}
+
+bool DeviceManager::FullReset() {
+    auto devices = GetActiveDevices();
+    bool changed = false;
+    for (const auto& dev : devices) {
+        if (dev.isInstalled) {
+            Uninstall(dev.id);
+            changed = true;
+        }
+    }
+    return changed;
 }
 
 bool DeviceManager::RestartAudioService() {
@@ -151,8 +213,4 @@ bool DeviceManager::RestartAudioService() {
     CloseServiceHandle(hSCM);
     
     return success;
-}
-
-bool DeviceManager::CheckIfInstalled(const std::wstring& deviceID) {
-    return false;
 }
