@@ -85,27 +85,19 @@ public:
     unsigned getOutputChannelCount() const { return outChannels; }
 
     void process(float* outBuffer, const float* inBuffer, unsigned frames) {
-        if (!outBuffer || !inBuffer || frames == 0 || inChannels == 0 || outChannels == 0) return;
-        if (filters.empty() || filters[0].empty()) return;
-
         // If inBuffer and outBuffer are different, copy first
         if (inBuffer != outBuffer) {
-            unsigned copyCount = frames * (inChannels < outChannels ? inChannels : outChannels);
-            for (unsigned i = 0; i < copyCount; ++i) {
+            for (unsigned i = 0; i < frames * inChannels; ++i) {
                 outBuffer[i] = inBuffer[i];
             }
         }
         
-        unsigned bands = activeBands; // Snapshot
-        if (bands > 10) bands = 10;
-
         for (unsigned f = 0; f < frames; ++f) {
             for (unsigned c = 0; c < outChannels; ++c) {
+                // If outChannels > inChannels, just process up to inChannels
                 unsigned inC = (c < inChannels) ? c : 0;
-                if (inC >= filters.size()) inC = 0;
-
                 float sample = outBuffer[f * outChannels + c] * masterGain;
-                for (unsigned b = 0; b < bands; ++b) {
+                for (unsigned b = 0; b < activeBands; ++b) {
                     sample = filters[inC][b].process(sample);
                 }
                 outBuffer[f * outChannels + c] = sample;
@@ -162,29 +154,27 @@ public:
     }
 
     void LoadConfig() {
+        // Simple line-based config parser for robustness
         std::ifstream file("C:\\Program Files\\SoundMate\\config.txt");
         if (!file.is_open()) return;
 
-        unsigned newActiveBands = 0;
+        activeBands = 0;
         std::string line;
         while (std::getline(file, line)) {
-            if (line.empty()) continue;
             if (line.find("Preamp:") == 0) {
-                masterGain = powf(10.0f, (float)atof(line.substr(7).c_str()) / 20.0f);
+                masterGain = powf(10.0f, std::stof(line.substr(7)) / 20.0f);
             } else if (line.find("Filter:") == 0) {
-                float f = 0, g = 0, q = 0;
-                int idx = 0;
+                // Format: Filter: index freq gain Q
+                float f, g, q;
+                int idx;
                 if (sscanf_s(line.c_str(), "Filter: %d %f %f %f", &idx, &f, &g, &q) == 4) {
-                    if (newActiveBands < 10) {
-                        for (unsigned c = 0; c < filters.size(); ++c) {
-                            filters[c][newActiveBands].setPeaking(f, g, q, sampleRate);
-                        }
-                        newActiveBands++;
+                    for (unsigned c = 0; c < inChannels; ++c) {
+                        filters[c][activeBands].setPeaking(f, g, q, sampleRate);
                     }
+                    activeBands++;
                 }
             }
         }
-        activeBands = newActiveBands;
     }
 
     float sampleRate;

@@ -51,15 +51,27 @@ int main() {
         std::cout << "  - " << (d.isInstalled ? "[V] " : "[ ] ") << WStringToUTF8(d.name) << " (" << WStringToUTF8(d.id) << ")\n";
     }
 
-    // 2. Full Reset
-    std::cout << "\n[2] 레지스트리 백지화 (Full Reset) 실행 중...\n";
-    if (DeviceManager::FullReset()) {
-        std::cout << " -> 일반 복구 완료.\n";
+    // 2. Init EQ Controller & Create Test Config
+    std::cout << "\n[2] EQ 컨트롤러 초기화 및 테스트 설정 생성 중...\n";
+    
+    // Create directory if it doesn't exist
+    CreateDirectoryW(L"C:\\Program Files\\SoundMate", NULL);
+    
+    // Create a test config file with extreme settings to verify it works
+    std::ofstream configFile("C:\\Program Files\\SoundMate\\config.txt");
+    if (configFile.is_open()) {
+        configFile << "Preamp: 0 dB\n";
+        configFile << "Filter: 0 60 15 1.0\n"; // 60Hz, +15dB (Obvious Bass Boost)
+        configFile << "Filter: 1 10000 -20 1.0\n"; // 10kHz, -20dB (Treble Cut)
+        configFile.close();
+        std::cout << " -> 테스트 설정 파일 생성 성공 (C:\\Program Files\\SoundMate\\config.txt)\n";
+    } else {
+        std::cout << " -> 설정 파일 생성 실패 (관리자 권한 필요).\n";
     }
 
     // 3. Target the correct audio device (e.g., Realtek or Speaker)
     int targetIndex = -1;
-    for (int i = 0; i < devices.size(); ++i) {
+    for (int i = 0; i < (int)devices.size(); ++i) {
         std::wstring name = devices[i].name;
         if (name.find(L"Realtek") != std::wstring::npos || name.find(L"Speaker") != std::wstring::npos) {
             targetIndex = i;
@@ -70,24 +82,37 @@ int main() {
     if (targetIndex == -1 && !devices.empty()) targetIndex = 0;
 
     if (targetIndex != -1) {
-        std::cout << "\n[2] 타겟 기기(" << WStringToUTF8(devices[targetIndex].name) << ")에 SoundMate APO 설치 중...\n";
-        
+        std::cout << "\n[3] 타겟 기기(" << WStringToUTF8(devices[targetIndex].name) << ")에 Proxy APO 설치 시도...\n";
         if (DeviceManager::Install(devices[targetIndex].id)) {
-            std::cout << " -> 설치(레지스트리 등록) 성공.\n";
-        } else {
-            std::cout << " -> 설치 실패. 관리자 권한이 필요할 수 있습니다.\n";
-        }
+            std::cout << " -> 설치 성공 (Proxy 모드)!\n";
+            
+            // Also apply the Multi-SFX hack (,13) for Realtek
+            if (devices[targetIndex].name.find(L"Realtek") != std::wstring::npos) {
+                std::cout << " -> Realtek Multi-APO 체인 등록 시도...\n";
+                std::ofstream regFile("C:\\Program Files\\SoundMate\\apply_multi_apo.reg");
+                if (regFile.is_open()) {
+                    regFile << "Windows Registry Editor Version 5.00\n\n";
+                    regFile << "[HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\Render\\" 
+                            << WStringToUTF8(devices[targetIndex].id) << "\\FxProperties]\n";
+                    // Prepend SoundMate APO {E7F4E1C6-F95C-4A7A-8EC8-8AEF24F379A1} to Realtek {905069CC-CF0D-4EAD-B7D7-FBC5A9E38BD5}
+                    regFile << "\"{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},13\"=hex(7):7b,00,45,00,37,00,46,00,34,00,45,00,31,00,43,00,36,00,2d,00,46,00,39,00,35,00,43,00,2d,00,34,00,41,00,37,00,41,00,2d,00,38,00,45,00,43,00,38,00,2d,00,38,00,41,00,45,00,46,00,32,00,34,00,46,00,33,00,37,00,39,00,41,00,31,00,7d,00,00,00,7b,00,39,00,30,00,35,00,30,00,36,00,39,00,43,00,43,00,2d,00,43,00,46,00,30,00,44,00,2d,00,34,00,45,00,41,00,44,00,2d,00,42,00,37,00,44,00,37,00,2d,00,46,00,42,00,43,00,35,00,41,00,39,00,45,00,33,00,38,00,42,00,44,00,35,00,7d,00,00,00,00,00\n";
+                    regFile.close();
+                    system("regedit /s \"C:\\Program Files\\SoundMate\\apply_multi_apo.reg\"");
+                }
+            }
 
-        std::cout << "\n[3] 오디오 서비스 재시작 시도...\n";
-        if (DeviceManager::RestartAudioService()) {
-            std::cout << " -> 서비스 재시작 완료! 이제 소리를 재생하여 EQ가 적용되는지 확인하세요.\n";
+            std::cout << "\n[4] 오디오 서비스 재시작 시도...\n";
+            if (DeviceManager::RestartAudioService()) {
+                std::cout << " -> 서비스 재시작 완료! 이제 소리를 들어보세요.\n";
+            } else {
+                std::cout << " -> 서비스 재시작 실패. 관리자 권한으로 실행 중인지 확인하세요.\n";
+            }
         } else {
-            std::cout << " -> 서비스 재시작 실패. 아래 명령어를 관리자 권한 파워쉘에서 실행해주세요:\n";
-            std::cout << "    Restart-Service audiosrv -Force\n";
+            std::cout << " -> 설치 실패.\n";
         }
     }
 
-    std::cout << "\n복구 완료. 프로그램을 종료하려면 엔터를 누르세요.\n";
+    std::cout << "\n테스트 완료. 프로그램을 종료하려면 엔터를 누르세요.\n";
     std::cin.get();
 
     return 0;
