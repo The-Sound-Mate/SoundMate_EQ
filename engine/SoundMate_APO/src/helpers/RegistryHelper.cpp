@@ -26,6 +26,7 @@
 #include <fstream>
 #include <ObjBase.h>
 #include <sstream>
+#include <iostream>
 
 #include "StringHelper.h"
 
@@ -656,4 +657,32 @@ wstring RegistryHelper::splitKey(const wstring& key, HKEY* rootKey)
 		throw RegistryException(L"Unknown root key " + rootPart);
 
 	return pathPart;
+}
+
+vector<wstring> RegistryHelper::enumValueNames(wstring key)
+{
+    HKEY keyHandle;
+    try {
+        keyHandle = openKey(key, KEY_READ | KEY_WOW64_64KEY);
+    } catch (...) {
+        return {};
+    }
+
+	vector<wstring> result;
+	DWORD index = 0;
+	wchar_t valueName[MAX_PATH];
+	DWORD valueNameSize = MAX_PATH;
+    LSTATUS status;
+	while ((status = RegEnumValueW(keyHandle, index++, valueName, &valueNameSize, NULL, NULL, NULL, NULL)) == ERROR_SUCCESS)
+	{
+		result.push_back(valueName);
+		valueNameSize = MAX_PATH;
+	}
+
+    if (status != ERROR_NO_MORE_ITEMS) {
+        std::wcerr << L"      [!] RegEnumValueW failed with error code: " << status << L" for key: " << key << std::endl;
+    }
+
+	RegCloseKey(keyHandle);
+	return result;
 }

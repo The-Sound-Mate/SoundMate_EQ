@@ -165,13 +165,10 @@ bool DeviceAPOInfo::checkAPORegistration(bool fix)
 
 		if (fix)
 		{
-			wchar_t path[MAX_PATH];
-			if (GetModuleFileNameW(NULL, path, MAX_PATH) != 0)
-			{
-				PathRemoveFileSpecW(path);
-				wstring params = wstring(L"/s \"") + path + L"\\SoundMate_APO.dll\"";
-				ShellExecuteW(NULL, L"open", L"regsvr32.exe", params.c_str(), NULL, SW_SHOWNORMAL);
-			}
+			// Explicitly register the DLL in Program Files to ensure correct permissions
+			wstring dllPath = L"C:\\Program Files\\SoundMate\\SoundMate_APO.dll";
+			wstring params = L"/s \"" + dllPath + L"\"";
+			ShellExecuteW(NULL, L"open", L"regsvr32.exe", params.c_str(), NULL, SW_SHOWNORMAL);
 		}
 	}
 

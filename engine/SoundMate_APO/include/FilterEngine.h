@@ -5,6 +5,17 @@
 #include <fstream>
 #include <cmath>
 #include "SoundMate_Shared.h"
+#include <ctime>
+
+inline void WriteAPOLog(const char* msg) {
+    std::ofstream f("C:\\Users\\Public\\SoundMate_APO_Debug.txt", std::ios::app);
+    if (f.is_open()) {
+        std::time_t t = std::time(nullptr);
+        char timestamp[32];
+        strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", std::localtime(&t));
+        f << "[" << timestamp << "] " << msg << std::endl;
+    }
+}
 
 // Standard Biquad Filter Implementation
 class SoundMateFilter {
@@ -42,7 +53,7 @@ private:
 // Architecture inspired by industry standards, implemented from scratch.
 class FilterEngine {
 public:
-    FilterEngine() : sampleRate(48000.0f), inChannels(2), outChannels(2), masterGain(1.0f), capture(false), preMix(false),
+    FilterEngine() : sampleRate(48000.0f), inChannels(2), outChannels(2), masterGain(1.0f), activeBands(0), capture(false), preMix(false),
                      hMapFile(NULL), pSettings(nullptr), lastUpdateCounter(0) {
         lastWriteTime.dwLowDateTime = 0;
         lastWriteTime.dwHighDateTime = 0;
@@ -61,6 +72,7 @@ public:
     bool isCapture() const { return capture; }
     
     void initialize(float rate, unsigned inCh, unsigned realCh, unsigned outCh, unsigned chMask, unsigned maxFrames) {
+        WriteAPOLog("FilterEngine::initialize started");
         sampleRate = rate;
         inChannels = inCh;
         outChannels = outCh;
@@ -71,9 +83,13 @@ public:
         hMapFile = OpenFileMappingW(FILE_MAP_READ, FALSE, SOUNDMATE_SHM_NAME);
         if (hMapFile) {
             pSettings = (SoundMateSettings*)MapViewOfFile(hMapFile, FILE_MAP_READ, 0, 0, sizeof(SoundMateSettings));
+            WriteAPOLog("FilterEngine::initialize - SHM Connected");
+        } else {
+            WriteAPOLog("FilterEngine::initialize - SHM Connection Failed");
         }
 
         CheckForUpdates();
+        WriteAPOLog("FilterEngine::initialize finished");
     }
 
     void updateFromSharedMemory() {
@@ -85,6 +101,9 @@ public:
     unsigned getOutputChannelCount() const { return outChannels; }
 
     void process(float* outBuffer, const float* inBuffer, unsigned frames) {
+        static int logCounter = 0;
+        if (logCounter++ % 1000 == 0) WriteAPOLog("FilterEngine::process - 1000 frames processed");
+
         // If inBuffer and outBuffer are different, copy first
         if (inBuffer != outBuffer) {
             for (unsigned i = 0; i < frames * inChannels; ++i) {

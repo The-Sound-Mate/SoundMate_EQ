@@ -4,6 +4,9 @@
 #include <iostream>
 #include <memory>
 
+#define renderKeyPath L"HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\Render"
+#define captureKeyPath L"HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\Capture"
+
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "shlwapi.lib")
@@ -37,23 +40,24 @@ bool DeviceManager::FullReset() {
     CoInitialize(nullptr);
 
     try {
-        // 1. Reset all Render devices
-        auto renderInfos = DeviceAPOInfo::loadAllInfos(false);
-        for (auto& info : renderInfos) {
-            if (info->isInstalled()) {
-                info->uninstall();
+        // 1. Reset all Render devices (including disconnected ones)
+        auto renderGuids = RegistryHelper::enumSubKeys(renderKeyPath);
+        for (const auto& guid : renderGuids) {
+            if (Uninstall(guid)) {
                 anyChanged = true;
             }
         }
 
-        // 2. Reset all Capture devices
-        auto captureInfos = DeviceAPOInfo::loadAllInfos(true);
-        for (auto& info : captureInfos) {
-            if (info->isInstalled()) {
-                info->uninstall();
+        // 2. Reset all Capture devices (including disconnected ones)
+        auto captureGuids = RegistryHelper::enumSubKeys(captureKeyPath);
+        for (const auto& guid : captureGuids) {
+            if (Uninstall(guid)) {
                 anyChanged = true;
             }
         }
+
+        // 2. Remove COM Registration
+        RegistryHelper::deleteKey(L"HKEY_LOCAL_MACHINE\\SOFTWARE\\Classes\\CLSID\\{E7F4E1C6-F95C-4A7A-8EC8-8AEF24F379A1}");
 
         // 3. Delete main Equalizer APO registry key
         if (RegistryHelper::keyExists(L"HKEY_LOCAL_MACHINE\\SOFTWARE\\EqualizerAPO")) {
@@ -71,62 +75,58 @@ bool DeviceManager::FullReset() {
 }
 
 bool DeviceManager::Install(const std::wstring& deviceID) {
-    CoInitialize(nullptr);
-    bool success = false;
+    try {
+        std::wstring regPath = L"HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\Render\\" + deviceID + L"\\FxProperties";
+        
+        std::vector<std::wstring> slots = {
+            L"{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},1",   // SFX
+            L"{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},2",   // MFX
+            L"{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},13"   // EFX
+        };
 
-    auto renderInfos = DeviceAPOInfo::loadAllInfos(false);
-    for (auto& info : renderInfos) {
-        if (info->getDeviceGuid() == deviceID) {
-            
-            // Cast to DeviceAPOInfo to access detailed state
-            auto dInfo = std::dynamic_pointer_cast<DeviceAPOInfo>(info);
-            if (dInfo) {
-                // Enable both Pre-Mix and Post-Mix
-                dInfo->getSelectedInstallState().installPreMix = true;
-                dInfo->getSelectedInstallState().installPostMix = true;
-                
-                // Force load original system APOs as children
-                dInfo->getSelectedInstallState().useOriginalAPOPreMix = true;
-                dInfo->getSelectedInstallState().useOriginalAPOPostMix = true;
-            }
-            
-            // Install using Equalizer APO method
-            try {
-                info->install();
-                
-                // Register DLL in COM (SoundMate_APO.dll)
-                DeviceAPOInfo::checkAPORegistration(true);
-                success = true;
-            } catch (...) {
-                success = false;
-            }
-            break;
+        std::vector<std::wstring> values = { L"{E7F4E1C6-F95C-4A7A-8EC8-8AEF24F379A1}" };
+
+        // Perform Injection (Using REG_MULTI_SZ to match the working PowerShell script)
+        for (const auto& slot : slots) {
+            RegistryHelper::writeMultiValue(regPath, slot, values);
         }
-    }
 
-    CoUninitialize();
-    return success;
+        // Ensure Windows Audio Sandbox allows our DLL
+        RegistryHelper::writeDWORDValue(L"HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Audio", L"DisableProtectedAudioDG", 1);
+
+        // Ensure COM Registration exists
+        DeviceAPOInfo::checkAPORegistration(true);
+
+        return true;
+    } catch (...) {
+        return false;
+    }
 }
 
 bool DeviceManager::Uninstall(const std::wstring& deviceID) {
-    CoInitialize(nullptr);
-    bool success = false;
-
-    auto renderInfos = DeviceAPOInfo::loadAllInfos(false);
-    for (auto& info : renderInfos) {
-        if (info->getDeviceGuid() == deviceID) {
-            try {
-                info->uninstall();
-                success = true;
-            } catch (...) {
-                success = false;
+    try {
+        std::wstring regPath = L"HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\Render\\" + deviceID + L"\\FxProperties";
+        
+        // Deep Clean: Delete ALL values that start with our SoundMate/EqualizerAPO GUID prefix
+        std::wstring targetPrefix = L"{d04e05a6-594b-4fb6-a80d-01af5eed7d1d}";
+        
+        auto values = RegistryHelper::enumValueNames(regPath);
+        bool deletedAny = false;
+        for (const auto& valName : values) {
+            if (valName.find(targetPrefix) == 0) {
+                std::wcout << L"      -> Deleting: " << valName << std::endl;
+                RegistryHelper::deleteValue(regPath, valName);
+                deletedAny = true;
             }
-            break;
         }
+        return deletedAny;
+    } catch (const std::exception& e) {
+        std::cerr << "      [!] Error during Uninstall: " << e.what() << std::endl;
+        return false;
+    } catch (...) {
+        std::cerr << "      [!] Unknown error during Uninstall." << std::endl;
+        return false;
     }
-
-    CoUninitialize();
-    return success;
 }
 
 bool DeviceManager::RestartAudioService() {
