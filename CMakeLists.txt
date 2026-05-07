@@ -27,7 +27,14 @@ set(SETUP_SOURCES
 )
 add_executable(SoundMate_Setup ${SETUP_SOURCES})
 target_link_libraries(SoundMate_Setup PRIVATE 
-    User32 Ole32 Advapi32 Comdlg32 Shell32 Uuid Mmdevapi Shlwapi
+    advapi32 
+    user32 
+    shell32 
+    ole32 
+    uuid
+    Mmdevapi 
+    Shlwapi
+    Comdlg32
 )
 # 관리자 권한 강제
 if(MSVC)

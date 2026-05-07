@@ -2,42 +2,42 @@
 #include <stdio.h>
 #include <accctrl.h>
 #include <aclapi.h>
+#include <string>
+#include <vector>
+#include <iostream>
 
 /**
  * ============================================================
- *  SoundMate_Setup v10.4 - THE NUCLEUS INFILTRATOR
- *  Heap-only memory allocation & Precise Security Handling.
+ *  SoundMate_Setup v11.0 - THE ULTIMATE OPTIMIZER
+ *  Fixes: GUIDs, Permissions, AudioEngine Trust, and Processing Modes.
  * ============================================================
  */
 
-const wchar_t* EAPO_CLSID = L"{EC1CC9CE-FAED-4822-828A-82A81A6F018F}";
+// Correct GUIDs from RegistryHelper.h
+const wchar_t* PRE_MIX_GUID  = L"{E7F4E1C6-F95C-4A7A-8EC8-8AEF24F379A1}";
+const wchar_t* POST_MIX_GUID = L"{E7F4E1C5-F95C-4A7A-8EC8-8AEF24F379A1}";
+const wchar_t* DEFAULT_MODE  = L"{C18E2F7E-933D-4965-B7D1-1EEF228D2AF3}";
+
+// Registry Paths
+const wchar_t* RENDER_PATH  = L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\Render";
+const wchar_t* APO_TRUST_PATH = L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Audio\\AudioEngine\\AudioProcessingObjects";
 
 void Log(const char* msg) {
-    FILE* f = fopen("C:\\SoundMate_App\\setup_log.txt", "a");
-    if (f) { fprintf(f, "[v10.4] %s\n", msg); fclose(f); }
+    printf("[v11.0] %s\n", msg);
 }
 
-BOOL SetPrivilege(LPCWSTR lpszPrivilege, BOOL bEnablePrivilege) {
-    HANDLE hToken; TOKEN_PRIVILEGES tp; LUID luid;
-    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &hToken)) return FALSE;
-    if (!LookupPrivilegeValueW(NULL, lpszPrivilege, &luid)) return FALSE;
-    tp.PrivilegeCount = 1; tp.Privileges[0].Luid = luid;
-    tp.Privileges[0].Attributes = bEnablePrivilege ? SE_PRIVILEGE_ENABLED : 0;
-    AdjustTokenPrivileges(hToken, FALSE, &tp, 0, NULL, NULL);
-    return (GetLastError() == ERROR_SUCCESS);
-}
+// --- Security Helper: Take Ownership and Grant Full Access ---
+BOOL TakeOwnership(const wchar_t* keyPath) {
+    PSID pSIDAdmin = NULL;
+    SID_IDENTIFIER_AUTHORITY SIDAuthNT = SECURITY_NT_AUTHORITY;
+    if (!AllocateAndInitializeSid(&SIDAuthNT, 2, SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_ADMINS, 0, 0, 0, 0, 0, 0, &pSIDAdmin)) return FALSE;
 
-void GraftOfficial(const wchar_t* guid) {
-    wchar_t* fxPath = (wchar_t*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 1024);
-    wsprintfW(fxPath, L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\Render\\%s\\FxProperties", guid);
+    std::wstring fullPath = L"MACHINE\\" + std::wstring(keyPath);
     
-    wchar_t* fullPath = (wchar_t*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 1024);
-    wsprintfW(fullPath, L"MACHINE\\%s", fxPath);
-    
-    // 1. Take Ownership
-    SetNamedSecurityInfoW(fullPath, SE_REGISTRY_KEY, OWNER_SECURITY_INFORMATION, NULL, NULL, NULL, NULL);
-    
-    // 2. Grant Permissions (DACL)
+    // Set Owner to Administrators
+    SetNamedSecurityInfoW((LPWSTR)fullPath.c_str(), SE_REGISTRY_KEY, OWNER_SECURITY_INFORMATION, pSIDAdmin, NULL, NULL, NULL);
+
+    // Grant Full Access to Everyone
     EXPLICIT_ACCESSW ea = { 0 };
     ea.grfAccessPermissions = GENERIC_ALL;
     ea.grfAccessMode = SET_ACCESS;
@@ -45,45 +45,95 @@ void GraftOfficial(const wchar_t* guid) {
     ea.Trustee.TrusteeForm = TRUSTEE_IS_NAME;
     ea.Trustee.TrusteeType = TRUSTEE_IS_WELL_KNOWN_GROUP;
     ea.Trustee.ptstrName = (LPWSTR)L"Everyone";
-    
+
     PACL pNewACL = NULL;
     if (SetEntriesInAclW(1, &ea, NULL, &pNewACL) == ERROR_SUCCESS) {
-        SetNamedSecurityInfoW(fullPath, SE_REGISTRY_KEY, DACL_SECURITY_INFORMATION, NULL, NULL, pNewACL, NULL);
+        SetNamedSecurityInfoW((LPWSTR)fullPath.c_str(), SE_REGISTRY_KEY, DACL_SECURITY_INFORMATION, NULL, NULL, pNewACL, NULL);
         LocalFree(pNewACL);
     }
+    FreeSid(pSIDAdmin);
+    return TRUE;
+}
 
-    // 3. Graft Structures
+// --- Step 1: Register APO in AudioEngine (Trust Building) ---
+void RegisterAPOTrust(const wchar_t* clsid, const wchar_t* name) {
     HKEY hKey;
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, fxPath, 0, KEY_ALL_ACCESS, &hKey) == ERROR_SUCCESS) {
-        RegSetValueExW(hKey, L"{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},1", 0, REG_SZ, (BYTE*)EAPO_CLSID, (DWORD)((wcslen(EAPO_CLSID) + 1) * sizeof(wchar_t)));
-        RegSetValueExW(hKey, L"{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},2", 0, REG_SZ, (BYTE*)EAPO_CLSID, (DWORD)((wcslen(EAPO_CLSID) + 1) * sizeof(wchar_t)));
-        
-        HKEY hChild;
-        if (RegCreateKeyExW(hKey, L"Child APOs", 0, NULL, 0, KEY_ALL_ACCESS, NULL, &hChild, NULL) == ERROR_SUCCESS) {
-            RegSetValueExW(hChild, L"{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},1", 0, REG_SZ, (BYTE*)EAPO_CLSID, (DWORD)((wcslen(EAPO_CLSID) + 1) * sizeof(wchar_t)));
-            RegSetValueExW(hChild, L"{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},2", 0, REG_SZ, (BYTE*)EAPO_CLSID, (DWORD)((wcslen(EAPO_CLSID) + 1) * sizeof(wchar_t)));
-            RegCloseKey(hChild);
-        }
-        DWORD one = 1;
-        RegSetValueExW(hKey, L"{1da5d803-d492-4edd-8c23-e0c0ffee7f0e},5", 0, REG_DWORD, (BYTE*)&one, sizeof(DWORD));
+    std::wstring subKey = std::wstring(APO_TRUST_PATH) + L"\\" + clsid;
+    if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, subKey.c_str(), 0, NULL, 0, KEY_ALL_ACCESS, NULL, &hKey, NULL) == ERROR_SUCCESS) {
+        RegSetValueExW(hKey, L"FriendlyName", 0, REG_SZ, (BYTE*)name, (DWORD)((wcslen(name) + 1) * sizeof(wchar_t)));
+        RegSetValueExW(hKey, L"Copyright", 0, REG_SZ, (BYTE*)L"SoundMate", (DWORD)((wcslen(L"SoundMate") + 1) * sizeof(wchar_t)));
+        DWORD val = 1; RegSetValueExW(hKey, L"MajorVersion", 0, REG_DWORD, (BYTE*)&val, 4);
+        val = 0; RegSetValueExW(hKey, L"MinorVersion", 0, REG_DWORD, (BYTE*)&val, 4);
+        val = 0xD; RegSetValueExW(hKey, L"Flags", 0, REG_DWORD, (BYTE*)&val, 4);
         RegCloseKey(hKey);
     }
+}
+
+// --- Step 2: Inject to Device and Set Default Effects Mode ---
+void OptimizeDevice(const wchar_t* devGuid) {
+    std::wstring fxPath = std::wstring(RENDER_PATH) + L"\\" + devGuid + L"\\FxProperties";
     
-    HeapFree(GetProcessHeap(), 0, fxPath);
-    HeapFree(GetProcessHeap(), 0, fullPath);
+    TakeOwnership(fxPath.c_str());
+
+    HKEY hKey;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, fxPath.c_str(), 0, KEY_ALL_ACCESS, &hKey) == ERROR_SUCCESS) {
+        // 1. Inject SoundMate GUIDs
+        RegSetValueExW(hKey, L"{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},1", 0, REG_MULTI_SZ, (BYTE*)PRE_MIX_GUID, (DWORD)((wcslen(PRE_MIX_GUID) + 2) * sizeof(wchar_t)));
+        RegSetValueExW(hKey, L"{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},2", 0, REG_MULTI_SZ, (BYTE*)PRE_MIX_GUID, (DWORD)((wcslen(PRE_MIX_GUID) + 2) * sizeof(wchar_t)));
+        RegSetValueExW(hKey, L"{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},13", 0, REG_MULTI_SZ, (BYTE*)PRE_MIX_GUID, (DWORD)((wcslen(PRE_MIX_GUID) + 2) * sizeof(wchar_t)));
+
+        // 2. Set Device Default Effects (Processing Modes)
+        const wchar_t* modes[] = { L"{d3993a3f-99c2-4402-b5ec-a92a0367664b},5", L"{d3993a3f-99c2-4402-b5ec-a92a0367664b},6", L"{d3993a3f-99c2-4402-b5ec-a92a0367664b},7" };
+        for (auto modeKey : modes) {
+            RegSetValueExW(hKey, modeKey, 0, REG_MULTI_SZ, (BYTE*)DEFAULT_MODE, (DWORD)((wcslen(DEFAULT_MODE) + 2) * sizeof(wchar_t)));
+        }
+
+        // 3. Force Enable Enhancements
+        DWORD zero = 0;
+        RegSetValueExW(hKey, L"{1da5d803-d492-4edd-8c23-e0c0ffee7f0e},5", 0, REG_DWORD, (BYTE*)&zero, 4);
+
+        // 4. Child APOs support
+        HKEY hChild;
+        if (RegCreateKeyExW(hKey, L"Child APOs", 0, NULL, 0, KEY_ALL_ACCESS, NULL, &hChild, NULL) == ERROR_SUCCESS) {
+            RegSetValueExW(hChild, L"{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},1", 0, REG_SZ, (BYTE*)PRE_MIX_GUID, (DWORD)((wcslen(PRE_MIX_GUID) + 1) * sizeof(wchar_t)));
+            RegSetValueExW(hChild, L"{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},2", 0, REG_SZ, (BYTE*)PRE_MIX_GUID, (DWORD)((wcslen(PRE_MIX_GUID) + 1) * sizeof(wchar_t)));
+            RegCloseKey(hChild);
+        }
+        RegCloseKey(hKey);
+    }
 }
 
 int main() {
-    Log("Starting Nuclear Infiltration...");
-    SetPrivilege(SE_TAKE_OWNERSHIP_NAME, TRUE);
+    Log("SoundMate Setup v11.0 Starting...");
+
+    // Elevation check and Privilege escalation
+    HANDLE hToken;
+    if (OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &hToken)) {
+        LUID luid;
+        if (LookupPrivilegeValue(NULL, SE_TAKE_OWNERSHIP_NAME, &luid)) {
+            TOKEN_PRIVILEGES tp;
+            tp.PrivilegeCount = 1; tp.Privileges[0].Luid = luid; tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+            AdjustTokenPrivileges(hToken, FALSE, &tp, 0, NULL, NULL);
+        }
+        CloseHandle(hToken);
+    }
+
+    // Step 1: Trust Registration
+    RegisterAPOTrust(PRE_MIX_GUID, L"SoundMate Pre-Mix APO");
+    RegisterAPOTrust(POST_MIX_GUID, L"SoundMate Post-Mix APO");
+    Log("Step 1: Audio Engine Trust Registered.");
+
+    // Step 2: Device Infiltration & Optimization
     HKEY hRoot;
-    if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\Render", 0, KEY_READ, &hRoot) == ERROR_SUCCESS) {
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, RENDER_PATH, 0, KEY_READ, &hRoot) == ERROR_SUCCESS) {
         wchar_t subKey[MAX_PATH]; DWORD index = 0;
         while (RegEnumKeyW(hRoot, index++, subKey, MAX_PATH) == ERROR_SUCCESS) {
-            GraftOfficial(subKey);
+            OptimizeDevice(subKey);
         }
         RegCloseKey(hRoot);
     }
-    Log("Nuclear Infiltration Completed Successfully.");
+    Log("Step 2: Devices Optimized to Default Effects Mode.");
+
+    Log("Setup Completed Successfully. Please restart audio service.");
     return 0;
 }
