@@ -27,7 +27,8 @@ cmake -B build
 # 3. 전체 프로젝트 컴파일 (Release 모드)
 cmake --build build --config Release
 ```
-* 빌드가 완료되면 `build\Release\` 폴더 안에 `SoundMate_Setup.exe`와 `SoundMate_Cleanup.exe`가 생성됩니다.
+* 빌드가 완료되면 `build\Release\` 폴더 안에 `SoundMate_Setup.exe`와 `SoundMate_Cleanup.exe`가 생성되며, 엔진 핵심인 `engine\SoundMate_APO\build\SoundMate_APO.dll` 파일도 함께 생성됩니다.
+* **중요**: 보안 및 개발 표준을 위해 모든 바이너리(`.exe`, `.dll`) 파일은 Git 저장소에서 제외되어 있습니다. 반드시 위 빌드 절차를 거쳐야 파일이 생성됩니다.
 
 ---
 
@@ -36,7 +37,7 @@ cmake --build build --config Release
 빌드된 파일을 시스템 오디오 엔진에 연결하는 과정입니다. **반드시 다음 순서를 지켜주세요.**
 
 ### STEP 1: 배포 준비
-빌드된 파일들을 한 폴더에 모읍니다.
+빌드된 파일들을 한 폴더에 모읍니다. (이 파일들은 위 **빌드 절차**를 마친 후 생성된 결과물들입니다.)
 *   `SoundMate_Setup.exe`
 *   `SoundMate_APO.dll` (같은 폴더에 위치 필수)
 *   `config.txt` (선택 사항)
