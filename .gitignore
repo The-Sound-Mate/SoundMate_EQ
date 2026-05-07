@@ -33,12 +33,20 @@ install_manifest.txt
 # 개별 설정이 강하다면 제외할 수 있습니다. 
 # 여기서는 팀원 편의를 위해 포함하는 쪽으로 잡았습니다.
 
-# OS
-.DS_Store
-Thumbs.db
-*.reg
+# Project Specific Logs
+setup_log.txt
+SoundMate_APO_Debug.txt
+*.txt.bak
 
-# Embedded Repos
+# Compiled Binaries
+*.exe
+*.dll
+*.lib
+*.exp
+engine/SoundMate_APO/build/
+build/
+
+# Embedded Repos (Keep ignoring if they are submodules)
 AI_eq/
 equalizerapo-code/
 
