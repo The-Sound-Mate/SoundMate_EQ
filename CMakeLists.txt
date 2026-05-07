@@ -1,47 +1,51 @@
-cmake_minimum_required(VERSION 3.20)
+﻿cmake_minimum_required(VERSION 3.20)
 project(SoundMate_EQ VERSION 1.0.0 LANGUAGES C CXX)
 
-# C++ 표준 설정
+# C++ ?쒖? ?ㅼ젙
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# 한글 경로 및 UTF-8 소스 파일 처리를 위한 컴파일러 옵션 설정
+# ?쒓? 寃쎈줈 諛?UTF-8 ?뚯뒪 ?뚯씪 泥섎━瑜??꾪븳 而댄뙆?쇰윭 ?듭뀡 ?ㅼ젙
 if(MSVC)
     add_compile_options("/utf-8")
     add_compile_definitions(UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
     add_compile_options("/W3")
     
-    # 디버깅 설정
+    # ?붾쾭源??ㅼ젙
     add_compile_options("/Zi")
     add_link_options("/DEBUG")
 endif()
 
-# ─── 경로 설정 ───
+# ??? 寃쎈줈 ?ㅼ젙 ???
 set(GUI_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/SoundMate_ImGui")
 set(THIRD_PARTY_DIR "${GUI_SRC_DIR}/third_party")
 set(IMGUI_DIR       "${THIRD_PARTY_DIR}/imgui")
 
-# ─── 1. 장치 설정 도구 (SoundMate_Setup.exe) ───
-set(SETUP_SOURCES
-    "${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp"
+# ??? 1. ?μ튂 ?ㅼ젙 ?꾧뎄 (SoundMate_Setup.exe) ???
+set(SETUP_SOURCES src/main.cpp)
+set(CLEANUP_SOURCES 
+    src/cleanup.cpp
+    engine/SoundMate_APO/src/DeviceManager.cpp
+    engine/SoundMate_APO/src/DeviceAPOInfo.cpp
+    engine/SoundMate_APO/src/AbstractAPOInfo.cpp
+    engine/SoundMate_APO/src/helpers/RegistryHelper.cpp
+    engine/SoundMate_APO/src/helpers/StringHelper.cpp
 )
+
+# ?ㅽ뻾 ?뚯씪 ?앹꽦
 add_executable(SoundMate_Setup ${SETUP_SOURCES})
-target_link_libraries(SoundMate_Setup PRIVATE 
-    advapi32 
-    user32 
-    shell32 
-    ole32 
-    uuid
-    Mmdevapi 
-    Shlwapi
-    Comdlg32
-)
-# 관리자 권한 강제
+add_executable(SoundMate_Cleanup ${CLEANUP_SOURCES})
+
+# ?쇱씠釉뚮윭由??곌껐
+set(COMMON_LIBS advapi32 user32 shell32 ole32 uuid Mmdevapi Shlwapi Comdlg32)
+target_link_libraries(SoundMate_Setup PRIVATE ${COMMON_LIBS})
+target_link_libraries(SoundMate_Cleanup PRIVATE ${COMMON_LIBS})
+# 愿由ъ옄 沅뚰븳 媛뺤젣
 if(MSVC)
     set_target_properties(SoundMate_Setup PROPERTIES LINK_FLAGS "/MANIFESTUAC:level='requireAdministrator' /SUBSYSTEM:CONSOLE")
 endif()
 
-# ─── 2. 메인 GUI 앱 (SoundMate_EQ.exe) ───
+# ??? 2. 硫붿씤 GUI ??(SoundMate_EQ.exe) ???
 set(IMGUI_SOURCES
     ${IMGUI_DIR}/imgui.cpp
     ${IMGUI_DIR}/imgui_draw.cpp
@@ -91,13 +95,13 @@ target_link_libraries(SoundMate_EQ PRIVATE
     ${THIRD_PARTY_DIR}/curl/lib/libcurl.lib
 )
 
-# 출력 디렉토리 설정
+# 異쒕젰 ?붾젆?좊━ ?ㅼ젙
 set_target_properties(SoundMate_Setup SoundMate_EQ PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY_DEBUG "${CMAKE_BINARY_DIR}/Debug"
     RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/Release"
 )
 
-# DLL 복사
+# DLL 蹂듭궗
 add_custom_command(TARGET SoundMate_EQ POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${THIRD_PARTY_DIR}/curl/bin/libcurl-x64.dll"

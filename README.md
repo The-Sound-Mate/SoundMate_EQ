@@ -1,61 +1,78 @@
-# 🎧 SoundMate EQ Engine v11.0
+# 🎧 SoundMate EQ Engine v11.0 (Development Guide)
 
-Equalizer APO 기반의 시스템 전역 오디오 보정 엔진 및 자동 설정 프레임워크입니다. 윈도우 10/11 환경에서 오디오 장치에 직접 개입하여 고성능 EQ를 적용합니다.
+Equalizer APO 기반의 시스템 전역 오디오 보정 엔진입니다. 이 가이드는 개발자가 소스 코드를 빌드하고 시스템에 성공적으로 배포하기 위한 모든 단계를 설명합니다.
 
 ---
 
-## 🚀 빠른 시작 가이드 (다른 개발자용)
+## 🛠 1. 사전 준비 (Prerequisites)
+빌드를 시작하기 전에 다음 도구들이 설치되어 있어야 합니다.
+- **Visual Studio 2022**: "C++를 사용한 데스크톱 개발" 워크로드 포함
+- **CMake**: 3.15 버전 이상 (시스템 PATH 추가 권장)
+- **Git**: 소스 코드 관리를 위한 도구
 
-본 프로젝트는 엔진(DLL), 설정 도구(Setup), 실시간 감시 도구(Controller), 복구 도구(Cleanup)로 구성됩니다.
+---
 
-### 1. 빌드 (Build)
-비주얼 스튜디오 2022 환경에서 다음 명령어로 전체 프로젝트를 빌드합니다.
+## 🏗 2. 빌드 절차 (Build Process)
+
+터미널(PowerShell 또는 CMD)을 열고 다음 명령어를 순서대로 입력하여 바이너리를 생성합니다.
+
 ```powershell
+# 1. 저장소 클론 (이미 완료했다면 스킵)
+git clone https://github.com/The-Sound-Mate/SoundMate_EQ.git
+cd SoundMate_EQ
+
+# 2. 빌드 환경 구성 (CMake)
 cmake -B build
+
+# 3. 전체 프로젝트 컴파일 (Release 모드)
 cmake --build build --config Release
 ```
-*   **참고**: 모든 바이너리는 `/MT` (정적 링크) 옵션으로 빌드되어, 런타임 DLL 없이 독립 실행 가능합니다.
-
-### 2. 설치 및 적용 (Deployment)
-빌드가 완료되면 다음 순서대로 실행하여 시스템에 적용합니다.
-
-1.  **배포 폴더 생성**: `C:\Program Files\SoundMate` 디렉토리를 만듭니다.
-2.  **파일 배치**: 빌드된 `SoundMate_APO.dll`과 `config.txt`를 위 폴더로 복사합니다.
-3.  **기기 설정**: `SoundMate_Setup.exe`를 **관리자 권한**으로 실행합니다. (레지스트리 주입 및 윈도우 11 최적화 수행)
-4.  **컨트롤러 실행**: `SoundMate_Controller.exe`를 실행합니다. (오디오 서비스 재부팅 및 실시간 EQ 감시 시작)
-
-### 3. 복구 및 초기화 (Recovery)
-시스템을 원래 상태로 되돌리고 싶을 때 사용합니다.
-*   `SoundMate_Cleanup.exe`를 **관리자 권한**으로 실행하면 모든 레지스트리 설정이 순정 상태로 복구됩니다.
+* 빌드가 완료되면 `build\Release\` 폴더 안에 `SoundMate_Setup.exe`와 `SoundMate_Cleanup.exe`가 생성됩니다.
 
 ---
 
-## 🛠 주요 기술적 특징
+## 🚀 3. 배포 및 설치 (Deployment Workflow)
 
-### 1. Windows 11 최적화 (Device Default Effects)
-v11.0 엔진은 최신 윈도우 오디오 아키텍처를 지원합니다.
-*   **Processing Mode**: `{C18E2F7E-933D-4965-B7D1-1EEF228D2AF3}` (Default) 모드를 자동으로 설정하여 하드웨어 가속 장치에서도 안정적으로 작동합니다.
-*   **AudioEngine Trust**: `AudioProcessingObjects` 레지스트리에 엔진을 등록하여 윈도우 오디오 엔진(`audiodg.exe`)의 로드 거부 문제를 해결했습니다.
+빌드된 파일을 시스템 오디오 엔진에 연결하는 과정입니다. **반드시 다음 순서를 지켜주세요.**
 
-### 2. 권한 자동화 (Take Ownership)
-시스템 소유(TrustedInstaller)로 묶인 오디오 레지스트리 키의 권한을 자동으로 획득하여 주입합니다.
+### STEP 1: 엔진 배포
+빌드된 엔진 파일을 아래 경로로 복사합니다. (**SoundMate_Setup.exe가 폴더를 자동으로 생성하므로, 먼저 실행하거나 수동으로 생성해도 됩니다.**)
 
-### 3. 실시간 동기화
-`SoundMate_Controller`는 `config.txt`의 변화를 초당 2회 감시하며, 파일 저장 즉시 오디오 엔진에 새로운 파라미터를 전달합니다.
+```powershell
+# 빌드된 파일 복사 (관리자 권한 터미널)
+copy "engine\SoundMate_APO\build\SoundMate_APO.dll" "C:\Program Files\SoundMate\"
+copy "config.txt" "C:\Program Files\SoundMate\"
+```
+
+### STEP 2: 기기 설정 (Registry Infiltration)
+모든 오디오 장치에 SoundMate 엔진을 주입하고 최적화합니다.
+1. `build\Release\SoundMate_Setup.exe` 파일을 찾습니다.
+2. **마우스 우클릭 -> 관리자 권한으로 실행**합니다.
+3. 이 단계에서 윈도우 11 최적화(Default Effects 모드)가 자동 적용됩니다.
+
+### STEP 3: 컨트롤러 가동 및 오디오 재부팅
+1. `engine\SoundMate_APO\SoundMate_Controller.exe`를 **관리자 권한으로 실행**합니다.
+2. 실행 즉시 오디오 서비스가 재시작되며, `config.txt` 실시간 감시가 시작됩니다.
+
+---
+
+## 🧹 4. 복구 및 제거 (Recovery)
+시스템을 순정 상태로 되돌리고 싶다면 다음을 실행하세요.
+1. `build\Release\SoundMate_Cleanup.exe`를 **관리자 권한으로 실행**합니다.
+2. 모든 레지스트리 주입 정보가 삭제되고 오디오 서비스가 재부팅됩니다.
 
 ---
 
-## 📂 프로젝트 구조
--   `src/main.cpp`: v11.0 통합 설치 프로그램 (Setup)
--   `src/cleanup.cpp`: 시스템 복구 프로그램 (Cleanup)
--   `engine/SoundMate_APO/`: 오디오 처리 핵심 엔진 (DLL)
--   `config.txt`: EQ 필터 설정 (Preamp, Filter 등)
+## 🔍 5. 문제 해결 (Troubleshooting)
+
+적용이 안 될 경우 다음 로그를 확인하세요.
+- **설정 로그**: `C:\SoundMate_App\setup_log.txt` (설정 프로그램 실행 결과)
+- **엔진 로그**: `C:\Users\Public\SoundMate_APO_Debug.txt` (DLL 로드 및 작동 여부)
+
+**핵심 체크리스트:**
+- [ ] 모든 실행 파일을 **관리자 권한**으로 실행했는가?
+- [ ] 윈도우 설정에서 **"오디오 향상(Audio Enhancements)"**이 켜져 있는가? (Setup이 자동 활성화를 시도하지만 수동 확인 권장)
+- [ ] `DisableProtectedAudioDG` 레지스트리 값이 `1`인가? (Setup이 자동 처리함)
 
 ---
-
-## ⚠️ 주의 사항
--   모든 실행 파일(`.exe`)은 반드시 **관리자 권한**으로 실행해야 레지스트리 접근이 가능합니다.
--   윈도우 설정의 **"오디오 향상(Audio Enhancements)"** 옵션이 켜져 있어야 엔진이 활성화됩니다. (Setup 프로그램이 자동으로 켜도록 설계되어 있습니다.)
-
----
-© 2026 SoundMate Team. All rights reserved.
+© 2026 SoundMate Team.

@@ -104,7 +104,20 @@ void OptimizeDevice(const wchar_t* devGuid) {
 }
 
 int main() {
-    Log("SoundMate Setup v11.0 Starting...");
+    Log("SoundMate Setup v11.1 Starting...");
+
+    // Step 0: Ensure Directory Exists
+    const wchar_t* targetDir = L"C:\\Program Files\\SoundMate";
+    if (GetFileAttributesW(targetDir) == INVALID_FILE_ATTRIBUTES) {
+        if (CreateDirectoryW(targetDir, NULL)) {
+            Log("Target directory 'C:\\Program Files\\SoundMate' created.");
+        } else {
+            // If failed, it might be due to parent dir or permissions, try SHCreateDirectoryEx
+            Log("Failed to create directory. Please ensure you are running as Admin.");
+        }
+    } else {
+        Log("Target directory already exists. Skipping creation.");
+    }
 
     // Elevation check and Privilege escalation
     HANDLE hToken;
