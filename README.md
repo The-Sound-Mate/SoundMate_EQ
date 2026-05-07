@@ -35,20 +35,18 @@ cmake --build build --config Release
 
 빌드된 파일을 시스템 오디오 엔진에 연결하는 과정입니다. **반드시 다음 순서를 지켜주세요.**
 
-### STEP 1: 엔진 배포
-빌드된 엔진 파일을 아래 경로로 복사합니다. (**SoundMate_Setup.exe가 폴더를 자동으로 생성하므로, 먼저 실행하거나 수동으로 생성해도 됩니다.**)
+### STEP 1: 배포 준비
+빌드된 파일들을 한 폴더에 모읍니다.
+*   `SoundMate_Setup.exe`
+*   `SoundMate_APO.dll` (같은 폴더에 위치 필수)
+*   `config.txt` (선택 사항)
 
-```powershell
-# 빌드된 파일 복사 (관리자 권한 터미널)
-copy "engine\SoundMate_APO\build\SoundMate_APO.dll" "C:\Program Files\SoundMate\"
-copy "config.txt" "C:\Program Files\SoundMate\"
-```
-
-### STEP 2: 기기 설정 (Registry Infiltration)
-모든 오디오 장치에 SoundMate 엔진을 주입하고 최적화합니다.
-1. `build\Release\SoundMate_Setup.exe` 파일을 찾습니다.
-2. **마우스 우클릭 -> 관리자 권한으로 실행**합니다.
-3. 이 단계에서 윈도우 11 최적화(Default Effects 모드)가 자동 적용됩니다.
+### STEP 2: 설치 및 적용 (True One-Click)
+1. **`SoundMate_Setup.exe`**를 **관리자 권한으로 실행**합니다.
+2. 프로그램이 자동으로 다음 작업을 수행합니다:
+    *   `C:\Program Files\SoundMate` 폴더 생성
+    *   DLL 및 설정 파일을 해당 경로로 자동 복사
+    *   윈도우 오디오 레지스트리 주입 및 윈도우 11 최적화
 
 ### STEP 3: 컨트롤러 가동 및 오디오 재부팅
 1. `engine\SoundMate_APO\SoundMate_Controller.exe`를 **관리자 권한으로 실행**합니다.

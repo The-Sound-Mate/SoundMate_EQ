@@ -119,6 +119,27 @@ int main() {
         Log("Target directory already exists. Skipping creation.");
     }
 
+    // Step 0.1: Auto-copy files to target directory
+    wchar_t exePath[MAX_PATH];
+    GetModuleFileNameW(NULL, exePath, MAX_PATH);
+    std::wstring currentDir = exePath;
+    currentDir = currentDir.substr(0, currentDir.find_last_of(L"\\/"));
+
+    std::wstring sourceDll = currentDir + L"\\SoundMate_APO.dll";
+    std::wstring targetDll = std::wstring(targetDir) + L"\\SoundMate_APO.dll";
+    std::wstring sourceConfig = currentDir + L"\\config.txt";
+    std::wstring targetConfig = std::wstring(targetDir) + L"\\config.txt";
+
+    if (CopyFileW(sourceDll.c_str(), targetDll.c_str(), FALSE)) {
+        Log("SoundMate_APO.dll successfully deployed to Program Files.");
+    } else {
+        Log("SoundMate_APO.dll not found in current folder or copy failed. (Skipping)");
+    }
+
+    if (CopyFileW(sourceConfig.c_str(), targetConfig.c_str(), FALSE)) {
+        Log("config.txt successfully deployed to Program Files.");
+    }
+
     // Elevation check and Privilege escalation
     HANDLE hToken;
     if (OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &hToken)) {
