@@ -26,7 +26,7 @@
 #include "helpers/LogHelper.h"
 #include "helpers/RegistryHelper.h"
 #include "ClassFactory.h"
-#include "EqualizerAPO.h"
+#include "SoundMateAPO.h"
 
 using namespace std;
 

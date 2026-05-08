@@ -22,7 +22,7 @@
 #include "ClassFactory.h"
 
 #include "helpers/LogHelper.h"
-#include "EqualizerAPO.h"
+#include "SoundMateAPO.h"
 
 long ClassFactory::lockCount = 0;
 
