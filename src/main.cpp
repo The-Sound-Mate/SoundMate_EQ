@@ -115,12 +115,17 @@ void OptimizeDevice(const wchar_t *devGuid) {
                      (DWORD)((wcslen(DEFAULT_MODE) + 2) * sizeof(wchar_t)));
     }
 
-    // 3. Force Enable Enhancements
+    // 3. Force Enable Enhancements (Disable Disable-All)
     DWORD zero = 0;
     RegSetValueExW(hKey, L"{1da5d803-d492-4edd-8c23-e0c0ffee7f0e},5", 0,
                    REG_DWORD, (BYTE *)&zero, 4);
 
-    // 4. Child APOs support
+    // 4. DISABLE Hardware Acceleration (IMPORTANT for APO)
+    DWORD one = 1;
+    RegSetValueExW(hKey, L"{1da5d803-d492-4edd-8c23-e0c0ffee7f0e},1", 0,
+                   REG_DWORD, (BYTE *)&one, 4);
+
+    // 5. Child APOs support
     HKEY hChild;
     if (RegCreateKeyExW(hKey, L"Child APOs", 0, NULL, 0, KEY_ALL_ACCESS, NULL,
                         &hChild, NULL) == ERROR_SUCCESS) {
@@ -137,14 +142,23 @@ void OptimizeDevice(const wchar_t *devGuid) {
 }
 
 int main() {
-  Log("SoundMate Setup v12.0 Starting (Targeted Mode)...");
+  Log("SoundMate Setup v13.0 Starting (Targeted Mode)...");
   CoInitialize(NULL);
+
+  // Step -1: Create SoundMateAPO Main Registry Key
+  HKEY hAppKey;
+  if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\SoundMateAPO", 0, NULL, 0, KEY_ALL_ACCESS, NULL, &hAppKey, NULL) == ERROR_SUCCESS) {
+      const wchar_t* installPath = L"C:\\Program Files\\SoundMate Equalizer";
+      RegSetValueExW(hAppKey, L"InstallPath", 0, REG_SZ, (BYTE*)installPath, (DWORD)((wcslen(installPath) + 1) * sizeof(wchar_t)));
+      RegCloseKey(hAppKey);
+      Log("Main SoundMateAPO registry key created.");
+  }
 
   // Step 0: Ensure Directory Exists
   const wchar_t *targetDir = L"C:\\Program Files\\SoundMate Equalizer";
   if (GetFileAttributesW(targetDir) == INVALID_FILE_ATTRIBUTES) {
     CreateDirectoryW(targetDir, NULL);
-    Log("Target directory 'C:\\Program Files\\SoundMate Equalizer' created.");
+    Log("Target directory created.");
   }
 
   // Step 0.1: Auto-copy files to target directory
@@ -158,24 +172,19 @@ int main() {
   std::wstring sourceConfig = currentDir + L"\\config.txt";
   std::wstring targetConfig = std::wstring(targetDir) + L"\\config.txt";
 
-  if (CopyFileW(sourceDll.c_str(), targetDll.c_str(), FALSE)) {
-    Log("SoundMate_APO.dll successfully deployed to Program Files.");
-  }
+  CopyFileW(sourceDll.c_str(), targetDll.c_str(), FALSE);
+  CopyFileW(sourceConfig.c_str(), targetConfig.c_str(), FALSE);
+  Log("Files deployed to Program Files.");
 
-  if (CopyFileW(sourceConfig.c_str(), targetConfig.c_str(), FALSE)) {
-    Log("config.txt successfully deployed to Program Files.");
-  }
-
-  // Step 1: Trust Registration (COM 등록)
+  // Step 1: Trust Registration
   RegisterAPOTrust(PRE_MIX_GUID, L"SoundMateAPO Pre-Mix APO");
   RegisterAPOTrust(POST_MIX_GUID, L"SoundMateAPO Post-Mix APO");
-  Log("Step 1: Audio Engine Trust Registered.");
+  Log("Audio Engine Trust Registered.");
 
-  // Step 1.1: System-wide DLL Registration (VERY IMPORTANT)
-  Log("Step 1.1: Registering DLL to system...");
-  std::wstring regParams = L"/s \"" + targetDll + L"\"";
-  ShellExecuteW(NULL, L"open", L"regsvr32.exe", regParams.c_str(), NULL, SW_HIDE);
-  Sleep(1000); // Wait for registration
+  // Step 1.1: System-wide DLL Registration (Synchronous)
+  Log("Registering DLL to system...");
+  std::wstring regCmd = L"regsvr32.exe /s \"" + targetDll + L"\"";
+  _wsystem(regCmd.c_str()); 
 
   // Step 2: Target ONLY the Default Device
   IMMDeviceEnumerator *pEnumerator = NULL;
@@ -188,10 +197,8 @@ int main() {
                                                        &pDevice))) {
       LPWSTR pwszID = NULL;
       pDevice->GetId(&pwszID);
-
-      Log("Step 2: Targeting Default Device Only...");
-      OptimizeDevice(pwszID); // 딱 이 기기만 주입!
-
+      Log("Targeting Default Device...");
+      OptimizeDevice(pwszID); 
       CoTaskMemFree(pwszID);
       pDevice->Release();
     }
@@ -199,13 +206,13 @@ int main() {
   }
 
   // Step 3: Auto-Restart Audio Services
-  Log("Step 3: Restarting Audio Services to apply changes...");
+  Log("Restarting Audio Services...");
   system("net stop audiosrv /y");
   system("net stop AudioEndpointBuilder /y");
   system("net start AudioEndpointBuilder");
   system("net start audiosrv");
 
   CoUninitialize();
-  Log("Setup Completed Successfully! SoundMate is now active.");
+  Log("Setup Completed Successfully!");
   return 0;
 }

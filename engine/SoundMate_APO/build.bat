@@ -5,8 +5,8 @@ call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build
 
 if not exist build mkdir build
 
-echo [SoundMate Build] Compiling SoundMate APO (Dynamic Link /MD)...
-cl /EHsc /O2 /LD /MD /DUNICODE /D_UNICODE /I include /I include\helpers /I src /I src\helpers ^
+echo [SoundMate Build] Compiling SoundMate APO (Static Link /MT)...
+cl /EHsc /O2 /LD /MT /DUNICODE /D_UNICODE /I include /I include\helpers /I src /I src\helpers ^
     src\AbstractAPOInfo.cpp ^
     src\ClassFactory.cpp ^
     src\DeviceAPOInfo.cpp ^
