@@ -18,15 +18,14 @@
 */
 
 #include "stdafx.h"
-
 #include <Unknwn.h>
 #define INITGUID
 #include <mmdeviceapi.h>
+#include <audioenginebaseapo.h>
 
 #include "helpers/LogHelper.h"
 #include "helpers/RegistryHelper.h"
 #include "helpers/StringHelper.h"
-#include "DeviceAPOInfo.h"
 #include "EqualizerAPO.h"
 
 using namespace std;
@@ -43,114 +42,75 @@ SoundMateAPO::SoundMateAPO(IUnknown* pUnkOuter, const CLSID& clsid)
 	: CBaseAudioProcessingObject(clsid == EQUALIZERAPO_PRE_MIX_GUID ? regPreMixProperties : regPostMixProperties)
 {
 	refCount = 1;
-	if (pUnkOuter != NULL)
-		this->pUnkOuter = pUnkOuter;
-	else
-		this->pUnkOuter = reinterpret_cast<IUnknown*>(static_cast<INonDelegatingUnknown*>(this));
-
-	allowSilentBufferModification = false;
-
-	childAPO = NULL;
-	childRT = NULL;
+	this->pUnkOuter = pUnkOuter;
 
 	filterEngine = new FilterEngine();
-
 	InterlockedIncrement(&instCount);
 }
 
 SoundMateAPO::~SoundMateAPO()
 {
-	if (childAPO != NULL)
-		childAPO->Release();
-	if (childRT != NULL)
-		childRT->Release();
-
 	delete filterEngine;
-
 	InterlockedDecrement(&instCount);
 }
 
-HRESULT __stdcall SoundMateAPO::QueryInterface(const IID& iid, void** ppv)
+STDMETHODIMP SoundMateAPO::QueryInterface(REFIID riid, void** ppv)
 {
-	return pUnkOuter->QueryInterface(iid, ppv);
-}
+	if (ppv == NULL) return E_POINTER;
+    
+    if (riid == __uuidof(IUnknown) || riid == __uuidof(IAudioSystemEffects)) {
+        *ppv = static_cast<IAudioSystemEffects*>(this);
+    } else if (riid == __uuidof(IAudioProcessingObject)) {
+        *ppv = static_cast<IAudioProcessingObject*>(this);
+    } else if (riid == __uuidof(IAudioProcessingObjectRT)) {
+        *ppv = static_cast<IAudioProcessingObjectRT*>(this);
+    } else if (riid == __uuidof(IAudioProcessingObjectConfiguration)) {
+        *ppv = static_cast<IAudioProcessingObjectConfiguration*>(this);
+    } else {
+        *ppv = NULL;
+        return E_NOINTERFACE;
+    }
 
-ULONG __stdcall SoundMateAPO::AddRef()
-{
-	return pUnkOuter->AddRef();
-}
-
-ULONG __stdcall SoundMateAPO::Release()
-{
-	return pUnkOuter->Release();
-}
-
-HRESULT __stdcall SoundMateAPO::NonDelegatingQueryInterface(const IID& iid, void** ppv)
-{
-	if (iid == __uuidof(IUnknown) || iid == __uuidof(INonDelegatingUnknown))
-		*ppv = static_cast<INonDelegatingUnknown*>(this);
-	else if (iid == __uuidof(IAudioSystemEffects))
-		*ppv = static_cast<IAudioSystemEffects*>(this);
-	else
-		return CBaseAudioProcessingObject::QueryInterface(iid, ppv);
-
-	reinterpret_cast<IUnknown*>(*ppv)->AddRef();
+	AddRef();
 	return S_OK;
 }
 
-ULONG __stdcall SoundMateAPO::NonDelegatingAddRef()
+STDMETHODIMP_(ULONG) SoundMateAPO::AddRef()
 {
 	return InterlockedIncrement(&refCount);
 }
 
-ULONG __stdcall SoundMateAPO::NonDelegatingRelease()
+STDMETHODIMP_(ULONG) SoundMateAPO::Release()
 {
-	if (InterlockedDecrement(&refCount) == 0)
-	{
-		delete this;
-		return 0;
-	}
-
-	return refCount;
+	ULONG u = InterlockedDecrement(&refCount);
+    if (u == 0) delete this;
+	return u;
 }
 
 STDMETHODIMP SoundMateAPO::GetLockInterval(HNSTIME* phnsLockInterval)
 {
-	if (phnsLockInterval == NULL)
-		return E_POINTER;
-
+	if (phnsLockInterval == NULL) return E_POINTER;
 	*phnsLockInterval = 0;
-
 	return S_OK;
 }
 
 STDMETHODIMP SoundMateAPO::Initialize(UINT32 cbDataSize, BYTE* pbyData)
 {
-	if (cbDataSize < sizeof(APOInitSystemEffects))
-		return E_INVALIDARG;
-
-	APOInitSystemEffects* pAPOInit = (APOInitSystemEffects*) pbyData;
-	
-	// Copy device ID
-	deviceID = pAPOInit->pDeviceCollection->GetDevice(pAPOInit->nDeviceIndex)->GetId();
-
 	return S_OK;
 }
 
-void SoundMateAPO::Process(UINT32 u32NumInputConnections, APO_CONNECTION_PROPERTY** ppInputConnections, UINT32 u32NumOutputConnections, APO_CONNECTION_PROPERTY** ppOutputConnections)
+void SoundMateAPO::APOProcess(UINT32 u32NumInputConnections, APO_CONNECTION_PROPERTY** ppInputConnections, UINT32 u32NumOutputConnections, APO_CONNECTION_PROPERTY** ppOutputConnections)
 {
-	if (u32NumInputConnections == 0 || u32NumOutputConnections == 0)
-		return;
+	if (u32NumInputConnections == 0 || u32NumOutputConnections == 0) return;
 
-	APO_CONNECTION_PROPERTY* pInputConnection = ppInputConnections[0];
-	APO_CONNECTION_PROPERTY* pOutputConnection = ppOutputConnections[0];
+	APO_CONNECTION_PROPERTY* pIn = ppInputConnections[0];
+	APO_CONNECTION_PROPERTY* pOut = ppOutputConnections[0];
 
-	if (pInputConnection->pBuffer == NULL || pOutputConnection->pBuffer == NULL)
-		return;
+	if (pIn->pBuffer == NULL || pOut->pBuffer == NULL) return;
 
-	// Perform filtering
-	filterEngine->process(pInputConnection->u32ValidFrameCount, (float*) pInputConnection->pBuffer, (float*) pOutputConnection->pBuffer);
+    filterEngine->updateFromSharedMemory();
+	filterEngine->process((float*)pOut->pBuffer, (const float*)pIn->pBuffer, pIn->u32ValidFrameCount);
 
-	pOutputConnection->u32ValidFrameCount = pInputConnection->u32ValidFrameCount;
-	pOutputConnection->u32BufferFlags = pInputConnection->u32BufferFlags;
+	pOut->u32ValidFrameCount = pIn->u32ValidFrameCount;
+	pOut->u32BufferFlags = pIn->u32BufferFlags;
 }

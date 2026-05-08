@@ -67,13 +67,13 @@ HRESULT __stdcall ClassFactory::CreateInstance(IUnknown* pUnknownOuter, const II
 	if (pUnknownOuter != NULL && iid != __uuidof(IUnknown))
 		return E_NOINTERFACE;
 
-	EqualizerAPO* apo = new EqualizerAPO(pUnknownOuter, clsid);
+	SoundMateAPO* apo = new SoundMateAPO(pUnknownOuter, clsid);
 	if (apo == NULL)
 		return E_OUTOFMEMORY;
 
-	HRESULT hr = apo->NonDelegatingQueryInterface(iid, ppv);
+	HRESULT hr = apo->QueryInterface(iid, ppv);
 
-	apo->NonDelegatingRelease();
+	apo->Release();
 	return hr;
 }
 
