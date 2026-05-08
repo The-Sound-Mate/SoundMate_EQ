@@ -193,7 +193,7 @@ bool DeviceAPOInfo::checkAPORegistration(bool fix) {
     if (fix) {
       // Explicitly register the DLL in Program Files to ensure correct
       // permissions
-      wstring dllPath = L"C:\\Program Files\\SoundMate\\SoundMate_APO.dll";
+      wstring dllPath = L"C:\\Program Files\\SoundMate Equalizer\\SoundMate_APO.dll";
       wstring params = L"/s \"" + dllPath + L"\"";
       ShellExecuteW(NULL, L"open", L"regsvr32.exe", params.c_str(), NULL,
                     SW_SHOWNORMAL);

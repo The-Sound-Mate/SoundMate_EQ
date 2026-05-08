@@ -599,7 +599,7 @@ void MainWindow::RenderTopBar() {
             }
 
             if (toolExe.empty())
-              toolExe = "C:\\Program Files\\SoundMate\\ApplyToCurrent.exe";
+              toolExe = "C:\\Program Files\\SoundMate Equalizer\\ApplyToCurrent.exe";
 
             SetStatus("현재 장치 타겟팅 설정 중...", Theme::TEXT_WHITE);
 
@@ -1086,7 +1086,7 @@ void MainWindow::ExecuteRestore(const std::string &filePath) {
     }
 
     if (cleanupExe.empty())
-      cleanupExe = "C:\\Program Files\\SoundMate\\SoundMate_Cleanup.exe";
+      cleanupExe = "C:\\Program Files\\SoundMate Equalizer\\SoundMate_Cleanup.exe";
 
     SetStatus("시스템 복구 및 순정화 작업 중...", Theme::TEXT_WHITE);
 

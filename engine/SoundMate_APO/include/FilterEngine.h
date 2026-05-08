@@ -8,11 +8,11 @@
 #include <ctime>
 
 inline void WriteAPOLog(const char* msg) {
-    std::ofstream f("C:\\Users\\Public\\SoundMate_APO_Debug.txt", std::ios::app);
+    std::ofstream f("C:\\Users\\Public\\SoundMateAPO.log", std::ios::app);
     if (f.is_open()) {
         std::time_t t = std::time(nullptr);
         char timestamp[32];
-        strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", std::localtime(&t));
+        strftime(timestamp, sizeof(timestamp), "%H:%M:%S", std::localtime(&t));
         f << "[" << timestamp << "] " << msg << std::endl;
     }
 }
@@ -50,10 +50,9 @@ private:
     float a0, a1, a2, b0, b1, b2, z1, z2;
 };
 
-// Architecture inspired by industry standards, implemented from scratch.
 class FilterEngine {
 public:
-    FilterEngine() : sampleRate(48000.0f), inChannels(2), outChannels(2), masterGain(1.0f), activeBands(0), capture(false), preMix(false),
+    FilterEngine() : sampleRate(48000.0f), inChannels(2), outChannels(2), masterGain(1.0f), activeBands(0),
                      hMapFile(NULL), pSettings(nullptr), lastUpdateCounter(0) {
         lastWriteTime.dwLowDateTime = 0;
         lastWriteTime.dwHighDateTime = 0;
@@ -64,46 +63,25 @@ public:
         if (hMapFile) CloseHandle(hMapFile);
     }
 
-    // --- Methods required by EqualizerAPO.cpp ---
-    void setPreMix(bool preMix) { this->preMix = preMix; }
-    void setDeviceInfo(bool isInput, bool installPostMix, std::wstring name, std::wstring conn, std::wstring guid, std::wstring str) {
-        this->capture = isInput;
-    }
-    bool isCapture() const { return capture; }
-    
     void initialize(float rate, unsigned inCh, unsigned realCh, unsigned outCh, unsigned chMask, unsigned maxFrames) {
-        WriteAPOLog("FilterEngine::initialize started");
         sampleRate = rate;
         inChannels = inCh;
         outChannels = outCh;
         filters.assign(inChannels, std::vector<SoundMateFilter>(10));
         activeBands = 0;
         
-        // Open Shared Memory
-        hMapFile = OpenFileMappingW(FILE_MAP_READ, FALSE, SOUNDMATE_SHM_NAME);
-        if (hMapFile) {
-            pSettings = (SoundMateSettings*)MapViewOfFile(hMapFile, FILE_MAP_READ, 0, 0, sizeof(SoundMateSettings));
-            WriteAPOLog("FilterEngine::initialize - SHM Connected");
-        } else {
-            WriteAPOLog("FilterEngine::initialize - SHM Connection Failed");
-        }
+        char logMsg[256];
+        sprintf_s(logMsg, "Engine Init: Rate=%.1f, Ch=%u", rate, inCh);
+        WriteAPOLog(logMsg);
 
         CheckForUpdates();
-        WriteAPOLog("FilterEngine::initialize finished");
     }
 
     void updateFromSharedMemory() {
-        // EqualizerAPO.cpp calls this for every audio chunk.
         CheckForUpdates();
     }
 
-    unsigned getInputChannelCount() const { return inChannels; }
-    unsigned getOutputChannelCount() const { return outChannels; }
-
     void process(float* outBuffer, const float* inBuffer, unsigned frames) {
-        static int logCounter = 0;
-        if (logCounter++ % 1000 == 0) WriteAPOLog("FilterEngine::process - 1000 frames processed");
-
         // If inBuffer and outBuffer are different, copy first
         if (inBuffer != outBuffer) {
             for (unsigned i = 0; i < frames * inChannels; ++i) {
@@ -111,9 +89,10 @@ public:
             }
         }
         
+        if (activeBands == 0 && masterGain == 1.0f) return;
+
         for (unsigned f = 0; f < frames; ++f) {
             for (unsigned c = 0; c < outChannels; ++c) {
-                // If outChannels > inChannels, just process up to inChannels
                 unsigned inC = (c < inChannels) ? c : 0;
                 float sample = outBuffer[f * outChannels + c] * masterGain;
                 for (unsigned b = 0; b < activeBands; ++b) {
@@ -123,45 +102,28 @@ public:
             }
         }
     }
-    void CheckForUpdates() {
-        bool updated = false;
 
-        // Try to open shared memory if it's not open yet
+    void CheckForUpdates() {
         if (!hMapFile) {
             hMapFile = OpenFileMappingW(FILE_MAP_READ, FALSE, SOUNDMATE_SHM_NAME);
             if (hMapFile) {
                 pSettings = (SoundMateSettings*)MapViewOfFile(hMapFile, FILE_MAP_READ, 0, 0, sizeof(SoundMateSettings));
+                WriteAPOLog("SHM Connected");
             }
         }
 
-        // 1. Check Shared Memory First
         if (pSettings && pSettings->magic == SOUNDMATE_MAGIC) {
             if (pSettings->updateCounter != lastUpdateCounter) {
                 LoadFromSharedMemory();
                 lastUpdateCounter = pSettings->updateCounter;
-                updated = true;
             }
         } 
-        
-        // 2. Fallback to config.txt if SHM is not available or not updated
-        if (!updated) {
-            const wchar_t* configPath = L"C:\\Program Files\\SoundMate\\config.txt";
-            WIN32_FILE_ATTRIBUTE_DATA data;
-            if (GetFileAttributesExW(configPath, GetFileExInfoStandard, &data)) {
-                if (CompareFileTime(&data.ftLastWriteTime, &lastWriteTime) != 0) {
-                    LoadConfig();
-                    lastWriteTime = data.ftLastWriteTime;
-                }
-            }
-        }
     }
 
     void LoadFromSharedMemory() {
         if (!pSettings) return;
-        
         masterGain = powf(10.0f, pSettings->masterGain / 20.0f);
         activeBands = 0;
-        
         for (uint32_t i = 0; i < pSettings->bandCount && i < 10; ++i) {
             if (pSettings->bands[i].enabled) {
                 for (unsigned c = 0; c < inChannels; ++c) {
@@ -170,30 +132,9 @@ public:
                 activeBands++;
             }
         }
-    }
-
-    void LoadConfig() {
-        // Simple line-based config parser for robustness
-        std::ifstream file("C:\\Program Files\\SoundMate\\config.txt");
-        if (!file.is_open()) return;
-
-        activeBands = 0;
-        std::string line;
-        while (std::getline(file, line)) {
-            if (line.find("Preamp:") == 0) {
-                masterGain = powf(10.0f, std::stof(line.substr(7)) / 20.0f);
-            } else if (line.find("Filter:") == 0) {
-                // Format: Filter: index freq gain Q
-                float f, g, q;
-                int idx;
-                if (sscanf_s(line.c_str(), "Filter: %d %f %f %f", &idx, &f, &g, &q) == 4) {
-                    for (unsigned c = 0; c < inChannels; ++c) {
-                        filters[c][activeBands].setPeaking(f, g, q, sampleRate);
-                    }
-                    activeBands++;
-                }
-            }
-        }
+        char logMsg[128];
+        sprintf_s(logMsg, "Settings Updated: Bands=%u, Gain=%.1f", activeBands, pSettings->masterGain);
+        WriteAPOLog(logMsg);
     }
 
     float sampleRate;
@@ -201,14 +142,10 @@ public:
     unsigned outChannels;
     float masterGain;
     unsigned activeBands;
-    bool capture;
-    bool preMix;
     std::vector<std::vector<SoundMateFilter>> filters;
     
-    // Shared Memory state
     HANDLE hMapFile;
     SoundMateSettings* pSettings;
     uint64_t lastUpdateCounter;
-    
     FILETIME lastWriteTime;
 };

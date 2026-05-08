@@ -89,12 +89,12 @@ int main() {
   std::cout << "\n[Running] Monitoring config.txt..." << std::endl;
 
   FILETIME lastWrite = {0};
-  const wchar_t *pathW = L"C:\\Program Files\\SoundMate\\config.txt";
+  const wchar_t *pathW = L"C:\\Program Files\\SoundMate Equalizer\\config.txt";
   while (true) {
     WIN32_FILE_ATTRIBUTE_DATA data;
     if (GetFileAttributesExW(pathW, GetFileExInfoStandard, &data)) {
       if (CompareFileTime(&data.ftLastWriteTime, &lastWrite) != 0) {
-        std::ifstream file("C:\\Program Files\\SoundMate\\config.txt");
+        std::ifstream file("C:\\Program Files\\SoundMate Equalizer\\config.txt");
         std::string line;
         int bandIdx = 0;
         float preamp = 0.0f;

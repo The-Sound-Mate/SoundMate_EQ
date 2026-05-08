@@ -22,12 +22,13 @@
 #include "ClassFactory.h"
 
 #include "helpers/LogHelper.h"
-#include "EqualizerAPO.h"
+#include "SoundMateAPO.h"
 
 long ClassFactory::lockCount = 0;
 
-ClassFactory::ClassFactory()
+ClassFactory::ClassFactory(const CLSID& clsid)
 {
+	this->clsid = clsid;
 	refCount = 1;
 }
 
@@ -66,13 +67,13 @@ HRESULT __stdcall ClassFactory::CreateInstance(IUnknown* pUnknownOuter, const II
 	if (pUnknownOuter != NULL && iid != __uuidof(IUnknown))
 		return E_NOINTERFACE;
 
-	EqualizerAPO* apo = new EqualizerAPO(pUnknownOuter);
+	SoundMateAPO* apo = new SoundMateAPO(pUnknownOuter, clsid);
 	if (apo == NULL)
 		return E_OUTOFMEMORY;
 
-	HRESULT hr = apo->NonDelegatingQueryInterface(iid, ppv);
+	HRESULT hr = apo->QueryInterface(iid, ppv);
 
-	apo->NonDelegatingRelease();
+	apo->Release();
 	return hr;
 }
 

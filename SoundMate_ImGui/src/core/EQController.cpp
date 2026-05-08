@@ -17,8 +17,8 @@ static const char *CONFIG_FILENAME = "config.txt";
 // 레지스트리 헬퍼: 64비트 우선 조회 (Python get_real_install_path 동일)
 // ──────────────────────────────────────────────────────────────────────────
 std::string EQController::GetRealInstallPath() {
-  const char *subkeys[] = {"SOFTWARE\\EqualizerAPO",
-                           "SOFTWARE\\WOW6432Node\\EqualizerAPO"};
+  const char *subkeys[] = {"SOFTWARE\\SoundMateAPO",
+                           "SOFTWARE\\WOW6432Node\\SoundMateAPO"};
   DWORD flags = KEY_READ | KEY_WOW64_64KEY;
 
   for (auto &subkey : subkeys) {
@@ -35,17 +35,12 @@ std::string EQController::GetRealInstallPath() {
     }
   }
   // 폴백
-  for (auto &path : {"C:\\Program Files\\EqualizerAPO",
-                     "C:\\Program Files (x86)\\EqualizerAPO"}) {
-    if (std::filesystem::exists(path))
-      return path;
-  }
-  return "C:\\Program Files\\EqualizerAPO";
+  return "C:\\Program Files\\SoundMate Equalizer";
 }
 
 std::string EQController::GetRealConfigDir() {
-  const char *subkeys[] = {"SOFTWARE\\EqualizerAPO",
-                           "SOFTWARE\\WOW6432Node\\EqualizerAPO"};
+  const char *subkeys[] = {"SOFTWARE\\SoundMateAPO",
+                           "SOFTWARE\\WOW6432Node\\SoundMateAPO"};
   DWORD flags = KEY_READ | KEY_WOW64_64KEY;
 
   for (auto &subkey : subkeys) {
@@ -66,8 +61,7 @@ std::string EQController::GetRealConfigDir() {
 
 std::string EQController::GetOfficialConfigDir() {
   // 정식 Equalizer APO 설치 경로 확인 (항상 고정)
-  for (auto &path : {"C:\\Program Files\\EqualizerAPO\\config",
-                     "C:\\Program Files (x86)\\EqualizerAPO\\config"}) {
+  for (auto &path : {"C:\\Program Files\\SoundMate Equalizer\\config"}) {
     if (std::filesystem::exists(path))
       return path;
   }
@@ -133,7 +127,7 @@ bool EQController::ApplyEQ(const std::vector<float> &gains,
                            const std::vector<int> &freqs,
                            const std::string &deviceName) {
   // [v12.0] 전용 엔진 경로로 고정 (C:\Program Files\SoundMate\config.txt)
-  std::string targetPath = "C:\\Program Files\\SoundMate\\config.txt";
+  std::string targetPath = "C:\\Program Files\\SoundMate Equalizer\\config.txt";
 
   if (gains.size() != freqs.size())
     return false;
@@ -155,7 +149,7 @@ bool EQController::ApplyEQ(const std::vector<float> &gains,
 
 bool EQController::LoadEQFromFile(std::vector<float> &outGains,
                                   int &outBandCount) {
-  std::string targetPath = "C:\\Program Files\\SoundMate\\config.txt";
+  std::string targetPath = "C:\\Program Files\\SoundMate Equalizer\\config.txt";
   std::ifstream file(targetPath);
   if (!file.is_open())
     return false;
@@ -202,7 +196,7 @@ bool EQController::ApplyFlatEQ(const std::vector<int> &freqs,
 // Python의 _ensure_include_linked() 완전 이식
 // ──────────────────────────────────────────────────────────────────────────
 static void EnsureIncludeInFile(const std::string &configPath) {
-  std::string officialRoot = "C:\\Program Files\\EqualizerAPO\\config\\";
+  std::string officialRoot = "C:\\Program Files\\SoundMate Equalizer\\config\\";
   std::string fullAiPath = officialRoot + std::string(AI_EQ_CONFIG_FILENAME);
   std::string includeLine = "Include: " + fullAiPath;
   std::string deviceLine = "Device: all";
@@ -290,7 +284,7 @@ void EQController::EnsureIncludeLinked() {
     return;
 
   // 1) 공식 경로의 config.txt를 최우선으로 관리
-  std::string officialPath = "C:\\Program Files\\EqualizerAPO\\config\\" +
+  std::string officialPath = "C:\\Program Files\\SoundMate Equalizer\\config\\" +
                              std::string(CONFIG_FILENAME);
   EnsureIncludeInFile(officialPath);
 

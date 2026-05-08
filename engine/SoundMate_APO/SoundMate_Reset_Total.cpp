@@ -75,7 +75,7 @@ int main() {
     RegDeleteKeyW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Classes\\CLSID\\{E7F4E1C5-F95C-4A7A-8EC8-8AEF24F379A1}");
 
     std::cout << " -> Cleaning SoundMate Folder..." << std::endl;
-    system("rmdir /s /q \"C:\\Program Files\\SoundMate\"");
+    system("rmdir /s /q \"C:\\Program Files\\SoundMate Equalizer\"");
 
     RestartAudioService();
 

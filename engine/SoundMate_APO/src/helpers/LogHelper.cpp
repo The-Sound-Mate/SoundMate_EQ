@@ -46,7 +46,7 @@ void LogHelper::log(const char* file, int line, const void* caller, bool trace, 
 		GetTempPathW(sizeof(temp) / sizeof(wchar_t), temp);
 
 		logPath = temp;
-		logPath += L"EqualizerAPO.log";
+		logPath += L"SoundMateAPO.log";
 
 		try
 		{

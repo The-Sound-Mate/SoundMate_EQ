@@ -24,7 +24,8 @@
 class ClassFactory : public IClassFactory
 {
 public:
-	ClassFactory();
+	ClassFactory(const CLSID& clsid);
+    virtual ~ClassFactory() {}
 
 	// IUnknown
 	virtual HRESULT __stdcall QueryInterface(const IID& iid, void** ppv);
@@ -39,4 +40,5 @@ public:
 
 private:
 	long refCount;
+	CLSID clsid;
 };
