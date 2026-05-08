@@ -34,9 +34,10 @@ static HINSTANCE hModule;
 
 BOOL WINAPI DllMain(HINSTANCE hModule, DWORD dwReason, void* lpReserved)
 {
-	if (dwReason == DLL_PROCESS_ATTACH)
+	if (dwReason == DLL_PROCESS_ATTACH) {
 		::hModule = hModule;
-
+		OutputDebugStringW(L"[SoundMate] DLL_PROCESS_ATTACH - Engine Loading...");
+	}
 	return TRUE;
 }
 

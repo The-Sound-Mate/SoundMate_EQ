@@ -95,24 +95,34 @@ void OptimizeDevice(const wchar_t *devGuid) {
   HKEY hKey;
   if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, fxPath.c_str(), 0, KEY_ALL_ACCESS,
                     &hKey) == ERROR_SUCCESS) {
-    // 1. Inject SoundMate GUIDs
-    RegSetValueExW(hKey, L"{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},1", 0,
-                   REG_MULTI_SZ, (BYTE *)PRE_MIX_GUID,
-                   (DWORD)((wcslen(PRE_MIX_GUID) + 2) * sizeof(wchar_t)));
-    RegSetValueExW(hKey, L"{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},2", 0,
-                   REG_MULTI_SZ, (BYTE *)PRE_MIX_GUID,
-                   (DWORD)((wcslen(PRE_MIX_GUID) + 2) * sizeof(wchar_t)));
-    RegSetValueExW(hKey, L"{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},13", 0,
-                   REG_MULTI_SZ, (BYTE *)PRE_MIX_GUID,
-                   (DWORD)((wcslen(PRE_MIX_GUID) + 2) * sizeof(wchar_t)));
+    
+    // Fix: REG_MULTI_SZ needs double null terminator
+    wchar_t multiSzBuffer[256] = {0};
+    wcscpy_s(multiSzBuffer, PRE_MIX_GUID);
+    DWORD bufferSize = (DWORD)((wcslen(multiSzBuffer) + 2) * sizeof(wchar_t)); // +2 for double null
+
+    // 1. Inject SoundMate GUIDs to ALL standard slots
+    const wchar_t *slots[] = {
+        L"{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},1", // SFX
+        L"{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},2", // MFX
+        L"{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},5", // Win10 SFX
+        L"{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},13" // EFX
+    };
+    for (auto slot : slots) {
+      RegSetValueExW(hKey, slot, 0, REG_MULTI_SZ, (BYTE *)multiSzBuffer, bufferSize);
+    }
 
     // 2. Set Device Default Effects (Processing Modes)
     const wchar_t *modes[] = {L"{d3993a3f-99c2-4402-b5ec-a92a0367664b},5",
                               L"{d3993a3f-99c2-4402-b5ec-a92a0367664b},6",
                               L"{d3993a3f-99c2-4402-b5ec-a92a0367664b},7"};
+    
+    wchar_t modeBuffer[256] = {0};
+    wcscpy_s(modeBuffer, DEFAULT_MODE);
+    DWORD modeBufferSize = (DWORD)((wcslen(modeBuffer) + 2) * sizeof(wchar_t));
+
     for (auto modeKey : modes) {
-      RegSetValueExW(hKey, modeKey, 0, REG_MULTI_SZ, (BYTE *)DEFAULT_MODE,
-                     (DWORD)((wcslen(DEFAULT_MODE) + 2) * sizeof(wchar_t)));
+      RegSetValueExW(hKey, modeKey, 0, REG_MULTI_SZ, (BYTE *)modeBuffer, modeBufferSize);
     }
 
     // 3. Force Enable Enhancements (Disable Disable-All)
@@ -142,7 +152,7 @@ void OptimizeDevice(const wchar_t *devGuid) {
 }
 
 int main() {
-  Log("SoundMate Setup v13.0 Starting (Targeted Mode)...");
+  Log("SoundMate Setup v14.0 Starting (Targeted Mode)...");
   CoInitialize(NULL);
 
   // Step -1: Create SoundMateAPO Main Registry Key
@@ -158,7 +168,6 @@ int main() {
   const wchar_t *targetDir = L"C:\\Program Files\\SoundMate Equalizer";
   if (GetFileAttributesW(targetDir) == INVALID_FILE_ATTRIBUTES) {
     CreateDirectoryW(targetDir, NULL);
-    Log("Target directory created.");
   }
 
   // Step 0.1: Auto-copy files to target directory
@@ -174,17 +183,26 @@ int main() {
 
   CopyFileW(sourceDll.c_str(), targetDll.c_str(), FALSE);
   CopyFileW(sourceConfig.c_str(), targetConfig.c_str(), FALSE);
-  Log("Files deployed to Program Files.");
+  Log("Files deployed.");
 
   // Step 1: Trust Registration
   RegisterAPOTrust(PRE_MIX_GUID, L"SoundMateAPO Pre-Mix APO");
   RegisterAPOTrust(POST_MIX_GUID, L"SoundMateAPO Post-Mix APO");
-  Log("Audio Engine Trust Registered.");
 
-  // Step 1.1: System-wide DLL Registration (Synchronous)
+  // Step 1.1: System-wide DLL Registration (Synchronous using CreateProcess)
   Log("Registering DLL to system...");
   std::wstring regCmd = L"regsvr32.exe /s \"" + targetDll + L"\"";
-  _wsystem(regCmd.c_str()); 
+  
+  STARTUPINFOW si = { sizeof(si) };
+  PROCESS_INFORMATION pi;
+  if (CreateProcessW(NULL, (LPWSTR)regCmd.c_str(), NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
+      WaitForSingleObject(pi.hProcess, INFINITE);
+      CloseHandle(pi.hProcess);
+      CloseHandle(pi.hThread);
+      Log("DLL Registration successful.");
+  } else {
+      Log("DLL Registration FAILED!");
+  }
 
   // Step 2: Target ONLY the Default Device
   IMMDeviceEnumerator *pEnumerator = NULL;
