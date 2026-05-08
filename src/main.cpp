@@ -167,8 +167,8 @@ int main() {
   }
 
   // Step 1: Trust Registration (COM 등록)
-  RegisterAPOTrust(PRE_MIX_GUID, L"SoundMate Pre-Mix APO");
-  RegisterAPOTrust(POST_MIX_GUID, L"SoundMate Post-Mix APO");
+  RegisterAPOTrust(PRE_MIX_GUID, L"SoundMateAPO Pre-Mix APO");
+  RegisterAPOTrust(POST_MIX_GUID, L"SoundMateAPO Post-Mix APO");
   Log("Step 1: Audio Engine Trust Registered.");
 
   // Step 1.1: System-wide DLL Registration (VERY IMPORTANT)

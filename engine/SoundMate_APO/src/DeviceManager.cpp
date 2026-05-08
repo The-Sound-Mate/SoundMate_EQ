@@ -64,9 +64,9 @@ bool DeviceManager::FullReset() {
         RegistryHelper::deleteKey(L"HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Audio\\AudioEngine\\AudioProcessingObjects\\{E7F4E1C5-F95C-4A7A-8EC8-8AEF24F379A1}");
         RegistryHelper::deleteKey(L"HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Audio\\AudioEngine\\AudioProcessingObjects\\{E7F4E1C6-F95C-4A7A-8EC8-8AEF24F379A1}");
 
-        // 5. Delete main Equalizer APO registry key
-        if (RegistryHelper::keyExists(L"HKEY_LOCAL_MACHINE\\SOFTWARE\\EqualizerAPO")) {
-            RegistryHelper::deleteKey(L"HKEY_LOCAL_MACHINE\\SOFTWARE\\EqualizerAPO");
+        // 5. Delete main SoundMateAPO registry key
+        if (RegistryHelper::keyExists(L"HKEY_LOCAL_MACHINE\\SOFTWARE\\SoundMateAPO")) {
+            RegistryHelper::deleteKey(L"HKEY_LOCAL_MACHINE\\SOFTWARE\\SoundMateAPO");
             anyChanged = true;
         }
         

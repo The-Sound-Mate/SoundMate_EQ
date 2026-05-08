@@ -89,7 +89,7 @@ STDAPI DllRegisterServer()
 
 		RegistryHelper::createKey(L"HKEY_LOCAL_MACHINE\\SOFTWARE\\Classes\\CLSID\\" + apoClsidString);
 		RegistryHelper::writeValue(
-			L"HKEY_LOCAL_MACHINE\\SOFTWARE\\Classes\\CLSID\\" + apoClsidString, L"", L"EqualizerAPO Post-Mix Class");
+			L"HKEY_LOCAL_MACHINE\\SOFTWARE\\Classes\\CLSID\\" + apoClsidString, L"", L"SoundMateAPO Post-Mix Class");
 		RegistryHelper::createKey(
 			L"HKEY_LOCAL_MACHINE\\SOFTWARE\\Classes\\CLSID\\" + apoClsidString + L"\\InprocServer32");
 		RegistryHelper::writeValue(
@@ -102,7 +102,7 @@ STDAPI DllRegisterServer()
 
 		RegistryHelper::createKey(L"HKEY_LOCAL_MACHINE\\SOFTWARE\\Classes\\CLSID\\" + apoClsidString);
 		RegistryHelper::writeValue(
-			L"HKEY_LOCAL_MACHINE\\SOFTWARE\\Classes\\CLSID\\" + apoClsidString, L"", L"EqualizerAPO Pre-Mix Class");
+			L"HKEY_LOCAL_MACHINE\\SOFTWARE\\Classes\\CLSID\\" + apoClsidString, L"", L"SoundMateAPO Pre-Mix Class");
 		RegistryHelper::createKey(
 			L"HKEY_LOCAL_MACHINE\\SOFTWARE\\Classes\\CLSID\\" + apoClsidString + L"\\InprocServer32");
 		RegistryHelper::writeValue(
