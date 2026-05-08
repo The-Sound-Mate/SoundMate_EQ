@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 #include <windows.h>
+#include <shellapi.h>
 
 #pragma comment(lib, "ole32.lib")
 
@@ -170,6 +171,12 @@ int main() {
   RegisterAPOTrust(POST_MIX_GUID, L"SoundMate Post-Mix APO");
   Log("Step 1: Audio Engine Trust Registered.");
 
+  // Step 1.1: System-wide DLL Registration (VERY IMPORTANT)
+  Log("Step 1.1: Registering DLL to system...");
+  std::wstring regParams = L"/s \"" + targetDll + L"\"";
+  ShellExecuteW(NULL, L"open", L"regsvr32.exe", regParams.c_str(), NULL, SW_HIDE);
+  Sleep(1000); // Wait for registration
+
   // Step 2: Target ONLY the Default Device
   IMMDeviceEnumerator *pEnumerator = NULL;
   CoCreateInstance(__uuidof(MMDeviceEnumerator), NULL, CLSCTX_ALL,
@@ -191,7 +198,14 @@ int main() {
     pEnumerator->Release();
   }
 
+  // Step 3: Auto-Restart Audio Services
+  Log("Step 3: Restarting Audio Services to apply changes...");
+  system("net stop audiosrv /y");
+  system("net stop AudioEndpointBuilder /y");
+  system("net start AudioEndpointBuilder");
+  system("net start audiosrv");
+
   CoUninitialize();
-  Log("Setup Completed. Please restart audio service.");
+  Log("Setup Completed Successfully! SoundMate is now active.");
   return 0;
 }

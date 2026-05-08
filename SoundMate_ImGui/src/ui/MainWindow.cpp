@@ -1086,7 +1086,7 @@ void MainWindow::ExecuteRestore(const std::string &filePath) {
     }
 
     if (cleanupExe.empty())
-      cleanupExe = "C:\\Program Files\\SoundMate\\SoundMate_Cleanup.exe";
+      cleanupExe = "C:\\Program Files\\SoundMate Equalizer\\SoundMate_Cleanup.exe";
 
     SetStatus("시스템 복구 및 순정화 작업 중...", Theme::TEXT_WHITE);
 

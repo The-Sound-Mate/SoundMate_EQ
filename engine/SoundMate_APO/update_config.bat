@@ -6,7 +6,7 @@ echo Filter: 2 62.0 -30.0 0.707
 echo Filter: 3 125.0 -30.0 0.707
 echo Filter: 9 8000.0 -30.0 0.707
 echo Filter: 10 16000.0 -30.0 0.707
-) > "C:\Program Files\SoundMate\config.txt"
+) > "C:\Program Files\SoundMate Equalizer\config.txt"
 if %errorlevel% equ 0 (
     echo [V] Config updated with extreme cuts.
 ) else (
