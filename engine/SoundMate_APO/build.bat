@@ -7,7 +7,7 @@ if not exist build mkdir build
 
 echo [SoundMate Build] Compiling SoundMate APO (Static Link /MT)...
 cl /nologo /O2 /MT /LD /Zi /EHsc /D "NDEBUG" /D "_WINDLL" /D "_UNICODE" /D "UNICODE" ^
-    /I"include" /I"..\shared" ^
+    /I"include" /I"include\helpers" /I"..\shared" ^
     src\AbstractAPOInfo.cpp ^
     src\ClassFactory.cpp ^
     src\DeviceAPOInfo.cpp ^

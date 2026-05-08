@@ -59,8 +59,8 @@ STDMETHODIMP SoundMateAPO::QueryInterface(REFIID riid, void** ppv)
 {
 	if (ppv == NULL) return E_POINTER;
     
-    if (riid == __uuidof(IUnknown) || riid == __uuidof(IAudioSystemEffects)) {
-        *ppv = static_cast<IAudioSystemEffects*>(this);
+    if (riid == __uuidof(IUnknown)) {
+        *ppv = static_cast<IUnknown*>(static_cast<IAudioProcessingObject*>(this));
     } else if (riid == __uuidof(IAudioProcessingObject)) {
         *ppv = static_cast<IAudioProcessingObject*>(this);
     } else if (riid == __uuidof(IAudioProcessingObjectRT)) {
@@ -106,16 +106,10 @@ STDMETHODIMP SoundMateAPO::Initialize(UINT32 cbDataSize, BYTE* pbyData)
 
 STDMETHODIMP SoundMateAPO::IsInputFormatSupported(IAudioMediaType* pOutputFormat, IAudioMediaType* pRequestedInputFormat, IAudioMediaType** ppSupportedInputFormat)
 {
-    // Always report success if it's a valid format.
-    // The base class might be too restrictive.
     WriteAPOLog("IsInputFormatSupported Called");
-    
     if (pRequestedInputFormat == NULL) return E_POINTER;
+    if (ppSupportedInputFormat != NULL) *ppSupportedInputFormat = NULL;
     
-    // We can just use the base class but force success for most cases
-    HRESULT hr = CBaseAudioProcessingObject::IsInputFormatSupported(pOutputFormat, pRequestedInputFormat, ppSupportedInputFormat);
-    
-    // If it's a float format, we definitely support it
     return S_OK; 
 }
 
@@ -147,7 +141,7 @@ void SoundMateAPO::APOProcess(UINT32 u32NumInputConnections, APO_CONNECTION_PROP
 	if (pIn->pBuffer == NULL || pOut->pBuffer == NULL) return;
 
     if (pIn->u32BufferFlags == BUFFER_SILENT) {
-        memset(pIn->pBuffer, 0, pIn->u32ValidFrameCount * filterEngine->inChannels * sizeof(float));
+        memset((void*)pIn->pBuffer, 0, pIn->u32ValidFrameCount * filterEngine->inChannels * sizeof(float));
     }
 
     filterEngine->updateFromSharedMemory();
