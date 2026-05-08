@@ -106,50 +106,72 @@ bool DeviceManager::Install(const std::wstring& deviceID) {
 bool DeviceManager::Uninstall(const std::wstring& deviceID) {
     try {
         std::wstring regPath = L"HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\Render\\" + deviceID + L"\\FxProperties";
-        
-        // Deep Clean: Delete ALL values that start with our SoundMate/EqualizerAPO GUID prefix
+        if (!RegistryHelper::keyExists(regPath)) return false;
+
+        // Take ownership to ensure we can delete
+        try {
+            RegistryHelper::takeOwnership(regPath);
+            RegistryHelper::makeWritable(regPath);
+        } catch(...) {}
+
         std::wstring targetPrefix = L"{d04e05a6-594b-4fb6-a80d-01af5eed7d1d}";
-        
         auto values = RegistryHelper::enumValueNames(regPath);
         bool deletedAny = false;
         for (const auto& valName : values) {
             if (valName.find(targetPrefix) == 0) {
-                std::wcout << L"      -> Deleting: " << valName << std::endl;
                 RegistryHelper::deleteValue(regPath, valName);
                 deletedAny = true;
             }
         }
         return deletedAny;
-    } catch (const std::exception& e) {
-        std::cerr << "      [!] Error during Uninstall: " << e.what() << std::endl;
-        return false;
-    } catch (...) {
-        std::cerr << "      [!] Unknown error during Uninstall." << std::endl;
-        return false;
+    } catch (...) { return false; }
+}
+
+bool StopServiceWithDependents(SC_HANDLE hSCM, const wchar_t* serviceName) {
+    SC_HANDLE hService = OpenServiceW(hSCM, serviceName, SERVICE_STOP | SERVICE_QUERY_STATUS | SERVICE_ENUMERATE_DEPENDENTS);
+    if (!hService) return false;
+
+    DWORD bytesNeeded, numDependents;
+    if (!EnumDependentServicesW(hService, SERVICE_ACTIVE, nullptr, 0, &bytesNeeded, &numDependents)) {
+        if (GetLastError() == ERROR_MORE_DATA) {
+            std::vector<BYTE> buffer(bytesNeeded);
+            LPENUM_SERVICE_STATUSW pDependents = (LPENUM_SERVICE_STATUSW)buffer.data();
+            if (EnumDependentServicesW(hService, SERVICE_ACTIVE, pDependents, bytesNeeded, &bytesNeeded, &numDependents)) {
+                for (DWORD i = 0; i < numDependents; i++) {
+                    StopServiceWithDependents(hSCM, pDependents[i].lpServiceName);
+                }
+            }
+        }
     }
+
+    SERVICE_STATUS status;
+    ControlService(hService, SERVICE_CONTROL_STOP, &status);
+    for (int i = 0; i < 50; i++) {
+        QueryServiceStatus(hService, &status);
+        if (status.dwCurrentState == SERVICE_STOPPED) break;
+        Sleep(100);
+    }
+    CloseServiceHandle(hService);
+    return true;
 }
 
 bool DeviceManager::RestartAudioService() {
     SC_HANDLE hSCM = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_ALL_ACCESS);
     if (!hSCM) return false;
 
-    SC_HANDLE hService = OpenServiceW(hSCM, L"audiosrv", SERVICE_STOP | SERVICE_START | SERVICE_QUERY_STATUS);
-    if (!hService) { CloseServiceHandle(hSCM); return false; }
+    StopServiceWithDependents(hSCM, L"AudioEndpointBuilder");
+    StopServiceWithDependents(hSCM, L"audiosrv");
 
-    SERVICE_STATUS status;
-    ControlService(hService, SERVICE_CONTROL_STOP, &status);
+    Sleep(500);
 
-    for (int i = 0; i < 50; i++) {
-        QueryServiceStatus(hService, &status);
-        if (status.dwCurrentState == SERVICE_STOPPED) break;
-        Sleep(100);
-    }
+    SC_HANDLE hEp = OpenServiceW(hSCM, L"AudioEndpointBuilder", SERVICE_START);
+    if (hEp) { StartServiceW(hEp, 0, nullptr); CloseServiceHandle(hEp); }
 
-    bool success = StartServiceW(hService, 0, nullptr);
-    
-    CloseServiceHandle(hService);
+    SC_HANDLE hSrv = OpenServiceW(hSCM, L"audiosrv", SERVICE_START);
+    bool success = false;
+    if (hSrv) { success = StartServiceW(hSrv, 0, nullptr); CloseServiceHandle(hSrv); }
+
     CloseServiceHandle(hSCM);
-    
     return success;
 }
 

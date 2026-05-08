@@ -74,7 +74,7 @@ std::string EQController::GetOfficialConfigDir() {
 // ──────────────────────────────────────────────────────────────────────────
 EQController::EQController() {}
 
-    // 1. 레지스트리 기반 탐색 (v11.0 최우선 순위: 엔진과 100% 동기화)
+bool EQController::Initialize() {
     std::string configDir = GetRealConfigDir();
 
     // 만약 레지스트리 경로가 유효하지 않을 때만 폴백
