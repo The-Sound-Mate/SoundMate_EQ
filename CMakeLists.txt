@@ -10,43 +10,50 @@ if(MSVC)
     add_compile_options("/W3")
     add_compile_options("/Zi")
     add_link_options("/DEBUG")
+    # [v12.0] Static CRT linking (/MT) - No need for C++ Redistributable
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
 
 set(GUI_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/SoundMate_ImGui")
 set(THIRD_PARTY_DIR "${GUI_SRC_DIR}/third_party")
 set(IMGUI_DIR       "${THIRD_PARTY_DIR}/imgui")
 
-# Setup & Cleanup Targets
-set(SETUP_SOURCES src/main.cpp)
-set(CLEANUP_SOURCES 
-    src/cleanup.cpp
+# Shared sources (No main function)
+set(SHARED_APO_SOURCES
     engine/SoundMate_APO/src/DeviceManager.cpp
     engine/SoundMate_APO/src/DeviceAPOInfo.cpp
     engine/SoundMate_APO/src/AbstractAPOInfo.cpp
+    engine/SoundMate_APO/src/EQController.cpp
     engine/SoundMate_APO/src/helpers/RegistryHelper.cpp
     engine/SoundMate_APO/src/helpers/StringHelper.cpp
 )
 
-add_executable(SoundMate_Setup ${SETUP_SOURCES})
-add_executable(SoundMate_Cleanup ${CLEANUP_SOURCES})
+add_executable(SoundMate_Setup src/main.cpp)
+add_executable(SoundMate_Cleanup src/cleanup.cpp ${SHARED_APO_SOURCES})
+add_executable(ApplyToCurrent engine/SoundMate_APO/ApplyToCurrent.cpp ${SHARED_APO_SOURCES})
+add_executable(ApplyToDevice engine/SoundMate_APO/ApplyToDevice.cpp ${SHARED_APO_SOURCES})
+add_executable(SoundMate_Controller engine/SoundMate_APO/MainController.cpp ${SHARED_APO_SOURCES})
 
 set(COMMON_LIBS advapi32 user32 shell32 ole32 uuid Mmdevapi Shlwapi Comdlg32 version authz)
 target_link_libraries(SoundMate_Setup PRIVATE ${COMMON_LIBS})
 target_link_libraries(SoundMate_Cleanup PRIVATE ${COMMON_LIBS})
+target_link_libraries(ApplyToCurrent PRIVATE ${COMMON_LIBS})
+target_link_libraries(ApplyToDevice PRIVATE ${COMMON_LIBS})
+target_link_libraries(SoundMate_Controller PRIVATE ${COMMON_LIBS})
 
 # Include Directories
-target_include_directories(SoundMate_Setup PRIVATE 
-    engine/SoundMate_APO/include 
-    engine/SoundMate_APO/include/helpers
-)
-target_include_directories(SoundMate_Cleanup PRIVATE 
-    engine/SoundMate_APO/include 
-    engine/SoundMate_APO/include/helpers
-)
+target_include_directories(SoundMate_Setup PRIVATE engine/SoundMate_APO/include engine/SoundMate_APO/include/helpers)
+target_include_directories(SoundMate_Cleanup PRIVATE engine/SoundMate_APO/include engine/SoundMate_APO/include/helpers)
+target_include_directories(ApplyToCurrent PRIVATE engine/SoundMate_APO/include engine/SoundMate_APO/include/helpers)
+target_include_directories(ApplyToDevice PRIVATE engine/SoundMate_APO/include engine/SoundMate_APO/include/helpers)
+target_include_directories(SoundMate_Controller PRIVATE engine/SoundMate_APO/include engine/SoundMate_APO/include/helpers)
 
 if(MSVC)
     set_target_properties(SoundMate_Setup PROPERTIES LINK_FLAGS "/MANIFESTUAC:level='requireAdministrator' /SUBSYSTEM:CONSOLE")
     set_target_properties(SoundMate_Cleanup PROPERTIES LINK_FLAGS "/MANIFESTUAC:level='requireAdministrator' /SUBSYSTEM:CONSOLE")
+    set_target_properties(ApplyToCurrent PROPERTIES LINK_FLAGS "/MANIFESTUAC:level='requireAdministrator' /SUBSYSTEM:CONSOLE")
+    set_target_properties(ApplyToDevice PROPERTIES LINK_FLAGS "/MANIFESTUAC:level='requireAdministrator' /SUBSYSTEM:CONSOLE")
+    set_target_properties(SoundMate_Controller PROPERTIES LINK_FLAGS "/MANIFESTUAC:level='requireAdministrator' /SUBSYSTEM:CONSOLE")
 endif()
 
 # Main GUI Target
@@ -99,7 +106,11 @@ target_link_libraries(SoundMate_EQ PRIVATE
     ${THIRD_PARTY_DIR}/curl/lib/libcurl.lib
 )
 
-set_target_properties(SoundMate_Setup SoundMate_EQ PROPERTIES
+set_target_properties(SoundMate_Setup SoundMate_EQ SoundMate_Controller PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY_DEBUG "${CMAKE_BINARY_DIR}/Debug"
     RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/Release"
 )
+
+if(MSVC)
+    set_target_properties(SoundMate_EQ PROPERTIES LINK_FLAGS "/MANIFESTUAC:level='requireAdministrator' /SUBSYSTEM:WINDOWS")
+endif()

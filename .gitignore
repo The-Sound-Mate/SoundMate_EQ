@@ -17,7 +17,7 @@ install_manifest.txt
 *.vcxproj.user
 *.pdb
 *.ilk
-*.exe
+# *.exe
 *.obj
 *.log
 *.tlog
@@ -39,12 +39,16 @@ SoundMate_APO_Debug.txt
 *.txt.bak
 
 # Compiled Binaries
-*.exe
+# *.exe
 *.dll
 *.lib
 *.exp
 engine/SoundMate_APO/build/
 build/
+!build/Release/*.exe
+!build/Release/*.dll
+!build/Release/*.exe
+!build/Release/*.dll
 
 # Registry related (Local only)
 HKEY_LOCAL_MACHINE/

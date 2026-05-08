@@ -53,7 +53,14 @@ public:
 
 private:
     // Gemini API HTTP POST 요청
-    std::string CallGeminiAPI(const std::string& prompt);
+    // Supabase Edge Function Proxy 호출
+    std::string CallProxyAPI(
+        const std::string& title,
+        const std::string& artist,
+        const std::string& genre,
+        const std::string& userPref,
+        const std::string& systemPref
+    );
 
     // JSON 파싱 헬퍼 (nlohmann/json 사용)
     std::vector<float> ParseGainsFromResponse(const std::string& jsonText);

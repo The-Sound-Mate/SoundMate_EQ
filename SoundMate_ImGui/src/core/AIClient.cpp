@@ -34,84 +34,71 @@ AIClient::AIClient() {
 }
 
 // ─── Gemini REST API 호출 ────────────────────────────────────────────────────
-std::string AIClient::CallGeminiAPI(const std::string& prompt) {
-    if (m_apiKey.empty())
-        throw std::runtime_error("API key not set");
+// ─── Supabase Edge Function Proxy 호출 (Gemini 중계) ───────────────────────────
+std::string AIClient::CallProxyAPI(
+    const std::string& title,
+    const std::string& artist,
+    const std::string& genre,
+    const std::string& userPref,
+    const std::string& systemPref)
+{
+    // [v12.0] 직접 구글을 호출하지 않고 우리 서버(Supabase)를 거칩니다.
+    std::string url = "https://lpcarclwfgzlfczqflgo.supabase.co/functions/v1/generate-eq";
+    
+    // Supabase Key 난독화 (빌드 시 스트링 추출 방지)
+    std::string k1 = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.";
+    std::string k2 = "eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxwY2FyY2x3Zmd6bGZjenFmbGdvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzI1OTUwNTUsImV4cCI6MjA4ODE3MTA1NX0.";
+    std::string k3 = "UzEoMwsb6pKjb4TjvvAkgjypqzLG-hB_sUAIvzB4f04";
+    std::string sKey = k1 + k2 + k3;
 
-    std::string url = "https://generativelanguage.googleapis.com/v1beta/models/"
-                      "gemini-2.5-flash:generateContent?key=" + m_apiKey;
-
-    // JSON 요청 바디 구성
     json body = {
-        {"contents", json::array({
-            {{"parts", json::array({ {{"text", prompt}} })}}
-        })}
+        {"title", title},
+        {"artist", artist},
+        {"genre", genre},
+        {"userPref", userPref},
+        {"systemPref", systemPref}
     };
     std::string bodyStr = body.dump();
 
-    for (int retry = 0; retry < 2; ++retry) {
-        CURL* curl = curl_easy_init();
-        if (!curl) throw std::runtime_error("curl_easy_init failed");
+    CURL* curl = curl_easy_init();
+    if (!curl) throw std::runtime_error("curl_easy_init failed");
 
-        std::string responseStr;
-        struct curl_slist* headers = nullptr;
-        headers = curl_slist_append(headers, "Content-Type: application/json");
+    std::string responseStr;
+    struct curl_slist* headers = nullptr;
+    headers = curl_slist_append(headers, "Content-Type: application/json");
+    headers = curl_slist_append(headers, ("apikey: " + sKey).c_str());
+    headers = curl_slist_append(headers, ("Authorization: Bearer " + sKey).c_str());
 
-        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, bodyStr.c_str());
-        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)bodyStr.size());
-        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
-        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &responseStr);
-        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 60L);
-        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
-        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, bodyStr.c_str());
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)bodyStr.size());
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &responseStr);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
 
-        CURLcode res = curl_easy_perform(curl);
-        long httpCode = 0;
-        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpCode);
-        curl_slist_free_all(headers);
-        curl_easy_cleanup(curl);
+    CURLcode res = curl_easy_perform(curl);
+    long httpCode = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpCode);
+    
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(curl);
 
-        if (res == CURLE_OK) {
-            if (httpCode == 200) return responseStr;
-            if (httpCode == 429 || httpCode == 503) {
-                if (retry == 0) {
-                    Sleep(2000); // 2초 대기 후 재시도
-                    continue;
-                }
-                if (httpCode == 429) throw std::runtime_error("AI_ERR_429");
-            }
-            std::string err = responseStr;
-            if (err.size() > 100) err = err.substr(0, 100) + "...";
-            throw std::runtime_error("HTTP " + std::to_string(httpCode) + ": " + err);
-        } else {
-            if (retry == 0) {
-                Sleep(2000);
-                continue;
-            }
-            throw std::runtime_error(std::string("curl error: ") + curl_easy_strerror(res));
-        }
+    if (res == CURLE_OK && httpCode == 200) {
+        return responseStr;
     }
-    return "";
+    
+    throw std::runtime_error("Proxy Error " + std::to_string(httpCode) + ": " + responseStr);
 }
 
 // ─── Gemini 응답에서 gains 배열 파싱 ─────────────────────────────────────────
 std::vector<float> AIClient::ParseGainsFromResponse(const std::string& jsonText) {
     try {
-        auto root   = json::parse(jsonText);
-        auto text   = root["candidates"][0]["content"]["parts"][0]["text"].get<std::string>();
-
-        // ```json ... ``` 블록 제거
-        size_t s = text.find("```json");
-        if (s != std::string::npos) {
-            text = text.substr(s + 7);
-            size_t e = text.find("```");
-            if (e != std::string::npos) text = text.substr(0, e);
-        }
-
-        auto inner = json::parse(text);
-        auto gains = inner["gains"].get<std::vector<float>>();
+        auto gains = json::parse(jsonText).get<std::vector<float>>();
+        for (auto& g : gains) g = std::round(g * 10.0f) / 10.0f; // 0.1dB 반올림
+        return gains;
         for (auto& g : gains) g = std::round(g * 10.0f) / 10.0f; // 0.1dB 반올림
         return gains;
     }
@@ -149,21 +136,10 @@ EQBands AIClient::GenerateAllBandsEQ(
         }}
     };
 
-    std::string prompt =
-        "Act as a multi-platinum award-winning audio engineer and EQ specialist.\n\n"
-        "[CONTEXT]\n" + musicInfo.dump(2) + "\n"
-        "- User's Global Sound Profile: \"" + systemPref + "\"\n"
-        "- Current Interaction Preference: \"" + userPref + "\"\n\n"
-        "[TASK]\n"
-        "Analyze the likely frequency response and suggest a 31-band graphic equalizer setting.\n"
-        "The goal is to optimize the song to match the User's Profile.\n\n"
-        "[FREQUENCIES]\n" + freqStr.str() + " Hz\n\n"
-        "[OUTPUT FORMAT]\n"
-        "Return ONLY a raw JSON object with the key \"gains\" containing 31 float values "
-        "in dB (-12.0 to 12.0). Smooth curves are essential.";
+    // [v12.0] 프롬프트는 이제 서버(Edge Function)에서 생성합니다.
 
     try {
-        std::string response = CallGeminiAPI(prompt);
+        std::string response = CallProxyAPI(title, artist, genre, userPref, systemPref);
         result.bands31 = ParseGainsFromResponse(response);
 
         // 보간으로 나머지 밴드 계산
@@ -221,31 +197,8 @@ std::pair<std::string,std::string> AIClient::NormalizeMetadata(
     const std::string& title,
     const std::string& artist)
 {
-    std::string prompt =
-        "Extract the clean SONG TITLE and ARTIST NAME from the following raw metadata:\n"
-        "Title: \"" + title + "\"\n"
-        "Artist/Channel: \"" + artist + "\"\n\n"
-        "[RULES]\n"
-        "1. Remove noise like (Official MV), [Lyric], (가사), (Lyrics), (Feat. X), etc.\n"
-        "2. If the 'Artist/Channel' is a generic lyric channel, find the real artist in 'Title'.\n"
-        "3. Return ONLY a JSON object: {\"title\": \"Song Title\", \"artist\": \"Artist name\"}";
-
-    try {
-        std::string response = CallGeminiAPI(prompt);
-        auto root = json::parse(response);
-        auto text = root["candidates"][0]["content"]["parts"][0]["text"].get<std::string>();
-        size_t s = text.find("```json");
-        if (s != std::string::npos) {
-            text = text.substr(s + 7);
-            size_t e = text.find("```");
-            if (e != std::string::npos) text = text.substr(0, e);
-        }
-        auto inner = json::parse(text);
-        return { inner["title"].get<std::string>(), inner["artist"].get<std::string>() };
-    }
-    catch (...) {
-        return { title, artist };
-    }
+    // [v12.0] Proxy 지원 전까지는 원본 반환
+    return { title, artist };
 }
 
 // ─── Cubic Spline (Python CubicSpline1D 완전 이식) ───────────────────────────

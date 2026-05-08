@@ -138,7 +138,11 @@ private:
     std::atomic<bool>  m_pendingSongChange{ false };
     SongInfo           m_pendingSong;
 
-    // AI 처리 상태
+    // AI/Cache 처리 상태
+    std::atomic<bool>  m_pendingEQUpdate{ false };
+    std::vector<float> m_queuedGains;
+    std::mutex         m_eqUpdateMutex;
+
     std::atomic<bool>  m_aiProcessing{ false };
     std::thread        m_aiThread;
     std::thread        m_transitionThread;

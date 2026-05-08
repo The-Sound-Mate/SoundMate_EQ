@@ -2,96 +2,105 @@
 // Python의 core/record_manager.py 를 C++로 완전 이식
 // 로컬 캐시(JSON), Supabase REST API, 세션 토큰 관리
 #pragma once
-#include <string>
-#include <vector>
+#include <functional>
 #include <map>
 #include <mutex>
-#include <functional>
 #include <nlohmann/json.hpp>
+#include <string>
+#include <vector>
+
 
 struct EQEntry {
-    std::string title, artist, genre, source;
-    std::vector<float> gains5, gains10, gains15, gains31;
-    std::string deviceName, prompt, timestamp;
+  std::string title, artist, genre, source;
+  std::vector<float> gains5, gains10, gains15, gains31;
+  std::string deviceName, prompt, timestamp;
 };
 
 struct SessionState {
-    std::vector<float> gains;
-    std::vector<int>   bands;
-    std::string device, preset, timestamp;
-    bool valid = false;
+  std::vector<float> gains;
+  std::vector<int> bands;
+  std::string device, preset, timestamp;
+  bool valid = false;
 };
 
 class RecordManager {
 public:
-    RecordManager();
+  RecordManager();
 
-    // ── 사용자 ID ──────────────────────────────────────────────────
-    void SetUserId(const std::string& uid);
-    std::string GetUserIdFromToken();
-    std::pair<std::string,std::string> GetUserInfo();  // {name, plan}
-    std::string GetUserPlanType();
+  // ── 사용자 ID ──────────────────────────────────────────────────
+  void SetUserId(const std::string &uid);
+  std::string GetUserIdFromToken();
+  std::pair<std::string, std::string> GetUserInfo(); // {name, plan}
+  std::string GetUserPlanType();
 
-    // ── 세션 상태 ──────────────────────────────────────────────────
-    void        SaveSessionState(const std::vector<float>& gains, const std::vector<int>& bands,
-                                 const std::string& device, const std::string& preset);
-    SessionState LoadSessionState();
+  // ── 세션 상태 ──────────────────────────────────────────────────
+  void SaveSessionState(const std::vector<float> &gains,
+                        const std::vector<int> &bands,
+                        const std::string &device, const std::string &preset);
+  SessionState LoadSessionState();
 
-    // ── 로컬 캐시 ──────────────────────────────────────────────────
-    EQEntry*    GetCachedEQ(const std::string& title, const std::string& artist);
-    void        SaveInteraction(const EQEntry& entry);
-    bool        ClearManualEQ(const std::string& title, const std::string& artist);
-    bool        ClearPromptEQ(const std::string& title, const std::string& artist);
+  // ── 로컬 캐시 ──────────────────────────────────────────────────
+  EQEntry *GetCachedEQ(const std::string &title, const std::string &artist);
+  void SaveInteraction(const EQEntry &entry);
+  bool ClearManualEQ(const std::string &title, const std::string &artist);
+  bool ClearPromptEQ(const std::string &title, const std::string &artist);
 
-    // ── 사용자 취향 ────────────────────────────────────────────────
-    std::string GetUserTendency();
-    void        SaveUserTendency(const std::string& tendency, const nlohmann::json& prefsDict = {});
+  // ── 사용자 취향 ────────────────────────────────────────────────
+  std::string GetUserTendency();
+  void SaveUserTendency(const std::string &tendency,
+                        const nlohmann::json &prefsDict = {});
 
-    // ── Supabase (REST) ───────────────────────────────────────────
-    std::vector<float> GetGlobalSongAverage(const std::string& title, const std::string& artist, int bandCount=5);
-    std::vector<float> GetGlobalGenreAverage(const std::string& genre, int bandCount=5);
-    bool CheckUserHistory(const std::string& title, const std::string& artist);
-    bool SyncToDB();
-    void ProcessBatchSync(bool forceAll=false);  // Python의 process_batch_sync()
+  // ── Supabase (REST) ───────────────────────────────────────────
+  std::vector<float> GetGlobalSongAverage(const std::string &title,
+                                          const std::string &artist,
+                                          int bandCount = 5);
+  std::vector<float> GetGlobalGenreAverage(const std::string &genre,
+                                           int bandCount = 5);
+  bool CheckUserHistory(const std::string &title, const std::string &artist);
+  bool SyncToDB();
+  void ProcessBatchSync(bool forceAll = false); // Python의 process_batch_sync()
 
-    // ── AI 에러 로그 ───────────────────────────────────────────────
-    void LogAiError(const std::string& title, const std::string& artist,
-                    const std::string& code, const std::string& reason);
+  // ── AI 에러 로그 ───────────────────────────────────────────────
+  void LogAiError(const std::string &title, const std::string &artist,
+                  const std::string &code, const std::string &reason);
 
 private:
-    std::string  NormalizeKey(const std::string& title, const std::string& artist);
-    std::string  GenerateTrackHash(const std::string& title, const std::string& artist);
-    std::string  RefreshAccessToken(const std::string& refreshToken);
-    void         EnsureRecordDir();
-    void         LoadCache();
-    void         SaveCache();
-    void         LoadIntegratedHistory();
-    bool         ConsolidateLocalRecords(bool forceAll=false);
-    std::string  SupabaseRequest(const std::string& method, const std::string& endpoint,
-                                  const std::string& body="", const std::string& accessToken="");
+  std::string NormalizeKey(const std::string &title, const std::string &artist);
+  std::string GenerateTrackHash(const std::string &title,
+                                const std::string &artist);
+  std::string RefreshAccessToken(const std::string &refreshToken);
+  void EnsureRecordDir();
+  void LoadCache();
+  void SaveCache();
+  void LoadIntegratedHistory();
+  bool ConsolidateLocalRecords(bool forceAll = false);
+  std::string SupabaseRequest(const std::string &method,
+                              const std::string &endpoint,
+                              const std::string &body = "",
+                              const std::string &accessToken = "");
 
-    std::string m_userId;
-    std::string m_accessToken;  // JWT access_token for Supabase auth
-    std::string m_recordDir;
-    std::string m_cacheFile;
-    std::string m_historyFile;
-    std::string m_sessionFile;
-    std::string m_tokenFile;
-    std::string m_logFile;
+  std::string m_userId;
+  std::string m_accessToken; // JWT access_token for Supabase auth
+  std::string m_recordDir;
+  std::string m_cacheFile;
+  std::string m_historyFile;
+  std::string m_sessionFile;
+  std::string m_tokenFile;
+  std::string m_logFile;
 
-    // Supabase 설정
-    static const char* SUPABASE_URL;
-    static const char* SUPABASE_KEY;
+  // Supabase 설정
+  static const char *SUPABASE_URL;
+  static const char *SUPABASE_KEY;
 
-    // 메모리 캐시
-    nlohmann::json m_cache;           // song_cache.json 전체
-    // history_map: key="title_artist" -> {source -> record}
-    std::map<std::string, std::map<std::string, nlohmann::json>> m_historyMap;
+  // 메모리 캐시
+  nlohmann::json m_cache; // song_cache.json 전체
+  // history_map: key="title_artist" -> {source -> record}
+  std::map<std::string, std::map<std::string, nlohmann::json>> m_historyMap;
 
-    // EQ 엔트리 검색 결과를 반환하기 위한 임시 저장소
-    std::map<std::string, EQEntry> m_entryCache;
+  // EQ 엔트리 검색 결과를 반환하기 위한 임시 저장소
+  std::map<std::string, EQEntry> m_entryCache;
 
-    mutable std::mutex m_mutex;
+  mutable std::mutex m_mutex;
 };
 
 // 전역 싱글톤 (Python의 record_manager = RecordManager())

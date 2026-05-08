@@ -26,6 +26,9 @@ public:
     // config.txt 에 Include 줄을 맨 위에 보장 (Python의 _ensure_include_linked)
     void EnsureIncludeLinked();
 
+    // config.txt 읽기 (엔진 -> UI 동기화용)
+    bool LoadEQFromFile(std::vector<float>& outGains, int& outBandCount);
+
     // 복원 상태 설정 (복원 시 EQ 재적용 차단)
     void SetRestored(bool restored);
     bool IsRestored() const { return m_isRestored; }
