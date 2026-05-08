@@ -22,6 +22,7 @@
 #define INITGUID
 #include <mmdeviceapi.h>
 #include <audioenginebaseapo.h>
+#include <audiomediatype.h>
 
 #include "helpers/LogHelper.h"
 #include "helpers/RegistryHelper.h"
@@ -97,6 +98,25 @@ STDMETHODIMP SoundMateAPO::GetLockInterval(HNSTIME* phnsLockInterval)
 STDMETHODIMP SoundMateAPO::Initialize(UINT32 cbDataSize, BYTE* pbyData)
 {
 	return S_OK;
+}
+
+STDMETHODIMP SoundMateAPO::LockForProcess(UINT32 u32NumInputConnections, APO_CONNECTION_DESCRIPTOR** ppInputConnections, UINT32 u32NumOutputConnections, APO_CONNECTION_DESCRIPTOR** ppOutputConnections)
+{
+    if (u32NumInputConnections == 0 || ppInputConnections[0] == NULL) return E_INVALIDARG;
+
+    // Get format from IAudioMediaType
+    const WAVEFORMATEX* pWfx = ppInputConnections[0]->pFormat->GetAudioFormat();
+    if (pWfx) {
+        // Initialize filter engine with actual format
+        filterEngine->initialize((float)pWfx->nSamplesPerSec, pWfx->nChannels, pWfx->nChannels, pWfx->nChannels, 0, ppInputConnections[0]->u32MaxFrameCount);
+    }
+    
+    return CBaseAudioProcessingObject::LockForProcess(u32NumInputConnections, ppInputConnections, u32NumOutputConnections, ppOutputConnections);
+}
+
+STDMETHODIMP SoundMateAPO::UnlockForProcess(void)
+{
+    return CBaseAudioProcessingObject::UnlockForProcess();
 }
 
 void SoundMateAPO::APOProcess(UINT32 u32NumInputConnections, APO_CONNECTION_PROPERTY** ppInputConnections, UINT32 u32NumOutputConnections, APO_CONNECTION_PROPERTY** ppOutputConnections)

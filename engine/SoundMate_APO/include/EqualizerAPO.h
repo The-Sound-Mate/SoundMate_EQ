@@ -41,6 +41,10 @@ public:
 	// IAudioProcessingObject
 	STDMETHOD(Initialize)(UINT32 cbDataSize, BYTE* pbyData);
 
+	// IAudioProcessingObjectConfiguration
+	STDMETHOD(LockForProcess)(UINT32 u32NumInputConnections, APO_CONNECTION_DESCRIPTOR** ppInputConnections, UINT32 u32NumOutputConnections, APO_CONNECTION_DESCRIPTOR** ppOutputConnections);
+	STDMETHOD(UnlockForProcess)(void);
+
 	// IAudioProcessingObjectRT
 	STDMETHOD_(void, APOProcess)(UINT32 u32NumInputConnections, APO_CONNECTION_PROPERTY** ppInputConnections, UINT32 u32NumOutputConnections, APO_CONNECTION_PROPERTY** ppOutputConnections);
 
