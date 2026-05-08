@@ -145,7 +145,7 @@ public:
         
         // 2. Fallback to config.txt if SHM is not available or not updated
         if (!updated) {
-            const wchar_t* configPath = L"C:\\Program Files\\SoundMate\\config.txt";
+            const wchar_t* configPath = L"C:\\Program Files\\SoundMate Equalizer\\config.txt";
             WIN32_FILE_ATTRIBUTE_DATA data;
             if (GetFileAttributesExW(configPath, GetFileExInfoStandard, &data)) {
                 if (CompareFileTime(&data.ftLastWriteTime, &lastWriteTime) != 0) {
@@ -174,7 +174,7 @@ public:
 
     void LoadConfig() {
         // Simple line-based config parser for robustness
-        std::ifstream file("C:\\Program Files\\SoundMate\\config.txt");
+        std::ifstream file("C:\\Program Files\\SoundMate Equalizer\\config.txt");
         if (!file.is_open()) return;
 
         activeBands = 0;

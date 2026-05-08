@@ -140,10 +140,10 @@ int main() {
   CoInitialize(NULL);
 
   // Step 0: Ensure Directory Exists
-  const wchar_t *targetDir = L"C:\\Program Files\\SoundMate";
+  const wchar_t *targetDir = L"C:\\Program Files\\SoundMate Equalizer";
   if (GetFileAttributesW(targetDir) == INVALID_FILE_ATTRIBUTES) {
     CreateDirectoryW(targetDir, NULL);
-    Log("Target directory 'C:\\Program Files\\SoundMate' created.");
+    Log("Target directory 'C:\\Program Files\\SoundMate Equalizer' created.");
   }
 
   // Step 0.1: Auto-copy files to target directory

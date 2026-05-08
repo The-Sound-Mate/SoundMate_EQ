@@ -599,7 +599,7 @@ void MainWindow::RenderTopBar() {
             }
 
             if (toolExe.empty())
-              toolExe = "C:\\Program Files\\SoundMate\\ApplyToCurrent.exe";
+              toolExe = "C:\\Program Files\\SoundMate Equalizer\\ApplyToCurrent.exe";
 
             SetStatus("현재 장치 타겟팅 설정 중...", Theme::TEXT_WHITE);
 

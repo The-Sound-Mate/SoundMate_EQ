@@ -133,7 +133,7 @@ bool EQController::ApplyEQ(const std::vector<float> &gains,
                            const std::vector<int> &freqs,
                            const std::string &deviceName) {
   // [v12.0] 전용 엔진 경로로 고정 (C:\Program Files\SoundMate\config.txt)
-  std::string targetPath = "C:\\Program Files\\SoundMate\\config.txt";
+  std::string targetPath = "C:\\Program Files\\SoundMate Equalizer\\config.txt";
 
   if (gains.size() != freqs.size())
     return false;
@@ -155,7 +155,7 @@ bool EQController::ApplyEQ(const std::vector<float> &gains,
 
 bool EQController::LoadEQFromFile(std::vector<float> &outGains,
                                   int &outBandCount) {
-  std::string targetPath = "C:\\Program Files\\SoundMate\\config.txt";
+  std::string targetPath = "C:\\Program Files\\SoundMate Equalizer\\config.txt";
   std::ifstream file(targetPath);
   if (!file.is_open())
     return false;
