@@ -43,7 +43,7 @@ BOOL WINAPI DllMain(HINSTANCE hModule, DWORD dwReason, void* lpReserved)
 
 STDAPI DllCanUnloadNow()
 {
-	if (EqualizerAPO::instCount == 0 && ClassFactory::lockCount == 0)
+	if (SoundMateAPO::instCount == 0 && ClassFactory::lockCount == 0)
 		return S_OK;
 	else
 		return S_FALSE;
@@ -54,7 +54,7 @@ STDAPI DllGetClassObject(const CLSID& clsid, const IID& iid, void** ppv)
 	if (clsid != EQUALIZERAPO_POST_MIX_GUID && clsid != EQUALIZERAPO_PRE_MIX_GUID)
 		return CLASS_E_CLASSNOTAVAILABLE;
 
-	ClassFactory* factory = new ClassFactory();
+	ClassFactory* factory = new ClassFactory(clsid);
 	if (factory == NULL)
 		return E_OUTOFMEMORY;
 
@@ -69,14 +69,14 @@ STDAPI DllRegisterServer()
 	wchar_t filename[1024];
 	GetModuleFileNameW(hModule, filename, sizeof(filename) / sizeof(wchar_t));
 
-	HRESULT hr = RegisterAPO(EqualizerAPO::regPostMixProperties);
+	HRESULT hr = RegisterAPO(SoundMateAPO::regPostMixProperties);
 	if (FAILED(hr))
 	{
 		UnregisterAPO(EQUALIZERAPO_POST_MIX_GUID);
 		return hr;
 	}
 
-	hr = RegisterAPO(EqualizerAPO::regPreMixProperties);
+	hr = RegisterAPO(SoundMateAPO::regPreMixProperties);
 	if (FAILED(hr))
 	{
 		UnregisterAPO(EQUALIZERAPO_POST_MIX_GUID);

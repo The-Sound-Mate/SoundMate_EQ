@@ -33,11 +33,11 @@ class INonDelegatingUnknown
 	virtual ULONG __stdcall NonDelegatingRelease() = 0;
 };
 
-class EqualizerAPO : public CBaseAudioProcessingObject, public IAudioSystemEffects, public INonDelegatingUnknown
+class SoundMateAPO : public CBaseAudioProcessingObject, public IAudioSystemEffects, public INonDelegatingUnknown
 {
 public:
-	EqualizerAPO(IUnknown* pUnkOuter);
-	virtual ~EqualizerAPO();
+	SoundMateAPO(IUnknown* pUnkOuter, const CLSID& clsid);
+	virtual ~SoundMateAPO();
 
 	// IUnknown
 	virtual HRESULT __stdcall QueryInterface(const IID& iid, void** ppv);
