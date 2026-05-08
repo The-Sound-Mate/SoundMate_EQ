@@ -27,7 +27,7 @@
 #include "helpers/LogHelper.h"
 #include "helpers/RegistryHelper.h"
 #include "helpers/StringHelper.h"
-#include "EqualizerAPO.h"
+#include "SoundMateAPO.h"
 
 using namespace std;
 
@@ -97,17 +97,35 @@ STDMETHODIMP SoundMateAPO::GetLockInterval(HNSTIME* phnsLockInterval)
 
 STDMETHODIMP SoundMateAPO::Initialize(UINT32 cbDataSize, BYTE* pbyData)
 {
+    char logMsg[128];
+    sprintf_s(logMsg, "SoundMate APO Initialize Called. cbDataSize: %u", cbDataSize);
+    OutputDebugStringA(logMsg);
+    WriteAPOLog(logMsg);
 	return S_OK;
+}
+
+STDMETHODIMP SoundMateAPO::IsInputFormatSupported(IAudioMediaType* pOutputFormat, IAudioMediaType* pRequestedInputFormat, IAudioMediaType** ppSupportedInputFormat)
+{
+    // Always report success if it's a valid format.
+    // The base class might be too restrictive.
+    WriteAPOLog("IsInputFormatSupported Called");
+    
+    if (pRequestedInputFormat == NULL) return E_POINTER;
+    
+    // We can just use the base class but force success for most cases
+    HRESULT hr = CBaseAudioProcessingObject::IsInputFormatSupported(pOutputFormat, pRequestedInputFormat, ppSupportedInputFormat);
+    
+    // If it's a float format, we definitely support it
+    return S_OK; 
 }
 
 STDMETHODIMP SoundMateAPO::LockForProcess(UINT32 u32NumInputConnections, APO_CONNECTION_DESCRIPTOR** ppInputConnections, UINT32 u32NumOutputConnections, APO_CONNECTION_DESCRIPTOR** ppOutputConnections)
 {
+    WriteAPOLog("LockForProcess Called");
     if (u32NumInputConnections == 0 || ppInputConnections[0] == NULL) return E_INVALIDARG;
 
-    // Get format from IAudioMediaType
     const WAVEFORMATEX* pWfx = ppInputConnections[0]->pFormat->GetAudioFormat();
     if (pWfx) {
-        // Initialize filter engine with actual format
         filterEngine->initialize((float)pWfx->nSamplesPerSec, pWfx->nChannels, pWfx->nChannels, pWfx->nChannels, 0, ppInputConnections[0]->u32MaxFrameCount);
     }
     
@@ -128,9 +146,13 @@ void SoundMateAPO::APOProcess(UINT32 u32NumInputConnections, APO_CONNECTION_PROP
 
 	if (pIn->pBuffer == NULL || pOut->pBuffer == NULL) return;
 
+    if (pIn->u32BufferFlags == BUFFER_SILENT) {
+        memset(pIn->pBuffer, 0, pIn->u32ValidFrameCount * filterEngine->inChannels * sizeof(float));
+    }
+
     filterEngine->updateFromSharedMemory();
 	filterEngine->process((float*)pOut->pBuffer, (const float*)pIn->pBuffer, pIn->u32ValidFrameCount);
 
 	pOut->u32ValidFrameCount = pIn->u32ValidFrameCount;
-	pOut->u32BufferFlags = pIn->u32BufferFlags;
+	pOut->u32BufferFlags = BUFFER_VALID; 
 }

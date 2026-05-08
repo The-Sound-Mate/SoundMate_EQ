@@ -40,6 +40,7 @@ public:
 
 	// IAudioProcessingObject
 	STDMETHOD(Initialize)(UINT32 cbDataSize, BYTE* pbyData);
+    STDMETHOD(IsInputFormatSupported)(IAudioMediaType* pOutputFormat, IAudioMediaType* pRequestedInputFormat, IAudioMediaType** ppSupportedInputFormat);
 
 	// IAudioProcessingObjectConfiguration
 	STDMETHOD(LockForProcess)(UINT32 u32NumInputConnections, APO_CONNECTION_DESCRIPTOR** ppInputConnections, UINT32 u32NumOutputConnections, APO_CONNECTION_DESCRIPTOR** ppOutputConnections);
