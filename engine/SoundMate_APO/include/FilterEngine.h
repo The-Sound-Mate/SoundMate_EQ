@@ -67,11 +67,38 @@ public:
         sampleRate = rate;
         inChannels = inCh;
         outChannels = outCh;
-        filters.assign(inChannels, std::vector<SoundMateFilter>(10));
+        filters.assign(inChannels, std::vector<SoundMateFilter>(SOUNDMATE_MAX_BANDS));
         activeBands = 0;
         
+        // Open Shared Memory
+        hMapFile = OpenFileMappingW(FILE_MAP_READ, FALSE, SOUNDMATE_SHM_NAME);
+        if (!hMapFile) {
+            // APO가 직접 생성 (LOCAL SERVICE는 Global 권한 있음)
+            SECURITY_DESCRIPTOR sd;
+            InitializeSecurityDescriptor(&sd, SECURITY_DESCRIPTOR_REVISION);
+            SetSecurityDescriptorDacl(&sd, TRUE, NULL, FALSE);
+            SECURITY_ATTRIBUTES sa;
+            sa.nLength = sizeof(sa);
+            sa.lpSecurityDescriptor = &sd;
+            sa.bInheritHandle = FALSE;
+            
+            hMapFile = CreateFileMappingW(INVALID_HANDLE_VALUE, &sa, PAGE_READWRITE, 0, sizeof(SoundMateSettings), SOUNDMATE_SHM_NAME);
+            
+            if (hMapFile) {
+                pSettings = (SoundMateSettings*)MapViewOfFile(hMapFile, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(SoundMateSettings));
+                if (pSettings) {
+                    ZeroMemory(pSettings, sizeof(SoundMateSettings));
+                    pSettings->magic = SOUNDMATE_MAGIC;
+                }
+            }
+        }
+        
+        if (hMapFile) {
+            if (!pSettings) pSettings = (SoundMateSettings*)MapViewOfFile(hMapFile, FILE_MAP_READ, 0, 0, sizeof(SoundMateSettings));
+        }
+
         char logMsg[256];
-        sprintf_s(logMsg, "Engine Init: Rate=%.1f, Ch=%u", rate, inCh);
+        sprintf_s(logMsg, "Engine Init: Rate=%.1f, Ch=%u, SHM=%s", rate, inCh, (hMapFile ? "OK" : "FAIL"));
         WriteAPOLog(logMsg);
 
         CheckForUpdates();
@@ -124,7 +151,7 @@ public:
         if (!pSettings) return;
         masterGain = powf(10.0f, pSettings->masterGain / 20.0f);
         activeBands = 0;
-        for (uint32_t i = 0; i < pSettings->bandCount && i < 10; ++i) {
+        for (uint32_t i = 0; i < pSettings->bandCount && i < SOUNDMATE_MAX_BANDS; ++i) {
             if (pSettings->bands[i].enabled) {
                 for (unsigned c = 0; c < inChannels; ++c) {
                     filters[c][activeBands].setPeaking(pSettings->bands[i].frequency, pSettings->bands[i].gain, pSettings->bands[i].q, sampleRate);

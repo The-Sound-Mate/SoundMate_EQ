@@ -7,7 +7,7 @@
 // This structure is shared between the GUI and the APO Engine.
 
 #define SOUNDMATE_SHM_NAME L"Global\\SoundMate_APO_SHM"
-#define SOUNDMATE_MAX_BANDS 10
+#define SOUNDMATE_MAX_BANDS 31
 
 struct BandConfig {
     bool enabled;
