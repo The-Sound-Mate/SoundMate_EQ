@@ -99,8 +99,6 @@ std::vector<float> AIClient::ParseGainsFromResponse(const std::string& jsonText)
         auto gains = json::parse(jsonText).get<std::vector<float>>();
         for (auto& g : gains) g = std::round(g * 10.0f) / 10.0f; // 0.1dB 반올림
         return gains;
-        for (auto& g : gains) g = std::round(g * 10.0f) / 10.0f; // 0.1dB 반올림
-        return gains;
     }
     catch (...) {
         return std::vector<float>(31, 0.0f);

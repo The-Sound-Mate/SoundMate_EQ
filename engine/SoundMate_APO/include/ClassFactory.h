@@ -24,7 +24,7 @@
 class ClassFactory : public IClassFactory
 {
 public:
-	ClassFactory(const CLSID& clsid);
+	ClassFactory();
     virtual ~ClassFactory() {}
 
 	// IUnknown
@@ -40,5 +40,4 @@ public:
 
 private:
 	long refCount;
-	CLSID clsid;
 };

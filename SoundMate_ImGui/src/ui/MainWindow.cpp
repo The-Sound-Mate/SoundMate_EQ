@@ -77,26 +77,36 @@ void MainWindow::Initialize(EQController *eq, AIClient *ai,
     }
   }
 
-  // [v12.0] UI 실행 시 컨트롤러를 백그라운드에서 자동 실행
+  // [v12.0] UI 실행 시 컨트롤러를 백그라운드에서 자동 실행.
+  // 탐색 우선순위:
+  //   1) installed location ("C:\Program Files\SoundMate Equalizer\")
+  //   2) GUI 실행 파일 옆 (build output, dev workflow)
+  //   3) build 트리의 engine/ 하위
   std::thread([]() {
-    char exeP[MAX_PATH];
-    GetModuleFileNameA(nullptr, exeP, MAX_PATH);
-    std::filesystem::path curDir = std::filesystem::path(exeP).parent_path();
     std::string controllerPath = "";
 
-    // 컨트롤러 경로 탐색
-    for (int i = 0; i < 5; ++i) {
-      if (std::filesystem::exists(curDir / "SoundMate_Controller.exe")) {
-        controllerPath = (curDir / "SoundMate_Controller.exe").string();
-        break;
+    // (1) installed location — installer가 여기에 SoundMate_Controller.exe 복사함
+    const char* installed = "C:\\Program Files\\SoundMate Equalizer\\SoundMate_Controller.exe";
+    if (std::filesystem::exists(installed)) {
+      controllerPath = installed;
+    } else {
+      // (2)(3) dev/build 워크플로 fallback
+      char exeP[MAX_PATH];
+      GetModuleFileNameA(nullptr, exeP, MAX_PATH);
+      std::filesystem::path curDir = std::filesystem::path(exeP).parent_path();
+      for (int i = 0; i < 5; ++i) {
+        if (std::filesystem::exists(curDir / "SoundMate_Controller.exe")) {
+          controllerPath = (curDir / "SoundMate_Controller.exe").string();
+          break;
+        }
+        if (std::filesystem::exists(
+                curDir / "engine/SoundMate_APO/SoundMate_Controller.exe")) {
+          controllerPath =
+              (curDir / "engine/SoundMate_APO/SoundMate_Controller.exe").string();
+          break;
+        }
+        curDir = curDir.parent_path();
       }
-      if (std::filesystem::exists(
-              curDir / "engine/SoundMate_APO/SoundMate_Controller.exe")) {
-        controllerPath =
-            (curDir / "engine/SoundMate_APO/SoundMate_Controller.exe").string();
-        break;
-      }
-      curDir = curDir.parent_path();
     }
 
     if (!controllerPath.empty()) {
@@ -575,7 +585,9 @@ void MainWindow::RenderTopBar() {
         },
         [this](const AppSettings &s) { m_settings = s; },
         [this]() {
-          // Auto Device Setup - ApplyToCurrent.exe 호출 (v12.0)
+          // Device retargeting — run SoundMate_setup.exe so it picks up the
+          // CURRENT default render endpoint and re-installs our APO there.
+          // The installer's Step 4 (GetDefaultAudioEndpoint) handles the swap.
           std::thread([this]() {
             char exeP[MAX_PATH];
             GetModuleFileNameA(nullptr, exeP, MAX_PATH);
@@ -583,25 +595,29 @@ void MainWindow::RenderTopBar() {
                 std::filesystem::path(exeP).parent_path();
             std::string toolExe = "";
 
-            // 도구 경로 탐색
-            for (int i = 0; i < 5; ++i) {
-              if (std::filesystem::exists(curDir / "ApplyToCurrent.exe")) {
-                toolExe = (curDir / "ApplyToCurrent.exe").string();
-                break;
+            // 1) installed location
+            const char* installed =
+                "C:\\Program Files\\SoundMate Equalizer\\SoundMate_setup.exe";
+            if (std::filesystem::exists(installed)) {
+              toolExe = installed;
+            } else {
+              // 2) dev / build folder fallback
+              for (int i = 0; i < 5; ++i) {
+                if (std::filesystem::exists(curDir / "SoundMate_setup.exe")) {
+                  toolExe = (curDir / "SoundMate_setup.exe").string();
+                  break;
+                }
+                curDir = curDir.parent_path();
               }
-              if (std::filesystem::exists(
-                      curDir / "engine/SoundMate_APO/ApplyToCurrent.exe")) {
-                toolExe = (curDir / "engine/SoundMate_APO/ApplyToCurrent.exe")
-                              .string();
-                break;
-              }
-              curDir = curDir.parent_path();
             }
 
-            if (toolExe.empty())
-              toolExe = "C:\\Program Files\\SoundMate Equalizer\\ApplyToCurrent.exe";
+            if (toolExe.empty()) {
+              SetStatus("SoundMate_setup.exe를 찾을 수 없습니다",
+                        Theme::COLOR_RED);
+              return;
+            }
 
-            SetStatus("현재 장치 타겟팅 설정 중...", Theme::TEXT_WHITE);
+            SetStatus("현재 장치에 EQ 엔진 설치 중...", Theme::TEXT_WHITE);
 
             SHELLEXECUTEINFOA sei = {sizeof(sei)};
             sei.cbSize = sizeof(sei);
@@ -1071,22 +1087,33 @@ void MainWindow::ExecuteRestore(const std::string &filePath) {
     std::filesystem::path curDir = std::filesystem::path(exeP).parent_path();
     std::string cleanupExe = "";
 
-    // Cleanup 도구 경로 탐색
-    for (int i = 0; i < 4; ++i) {
-      if (std::filesystem::exists(curDir / "SoundMate_Cleanup.exe")) {
-        cleanupExe = (curDir / "SoundMate_Cleanup.exe").string();
-        break;
+    // SoundMate_reset.exe is OUR cleanup tool — strips our APO from every
+    // render device's FxProperties, restores Realtek originals from the
+    // PreMixChild/PostMixChild backups, deletes CLSID + AudioProcessingObjects
+    // entries, and restarts the audio services.
+    const char* installed =
+        "C:\\Program Files\\SoundMate Equalizer\\SoundMate_reset.exe";
+    if (std::filesystem::exists(installed)) {
+      cleanupExe = installed;
+    } else {
+      for (int i = 0; i < 4; ++i) {
+        if (std::filesystem::exists(curDir / "SoundMate_reset.exe")) {
+          cleanupExe = (curDir / "SoundMate_reset.exe").string();
+          break;
+        }
+        if (std::filesystem::exists(curDir /
+                                    "build/Release/SoundMate_reset.exe")) {
+          cleanupExe = (curDir / "build/Release/SoundMate_reset.exe").string();
+          break;
+        }
+        curDir = curDir.parent_path();
       }
-      if (std::filesystem::exists(curDir /
-                                  "build/Release/SoundMate_Cleanup.exe")) {
-        cleanupExe = (curDir / "build/Release/SoundMate_Cleanup.exe").string();
-        break;
-      }
-      curDir = curDir.parent_path();
     }
 
-    if (cleanupExe.empty())
-      cleanupExe = "C:\\Program Files\\SoundMate Equalizer\\SoundMate_Cleanup.exe";
+    if (cleanupExe.empty()) {
+      SetStatus("SoundMate_reset.exe를 찾을 수 없습니다", Theme::COLOR_RED);
+      return;
+    }
 
     SetStatus("시스템 복구 및 순정화 작업 중...", Theme::TEXT_WHITE);
 

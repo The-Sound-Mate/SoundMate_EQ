@@ -26,9 +26,8 @@
 
 long ClassFactory::lockCount = 0;
 
-ClassFactory::ClassFactory(const CLSID& clsid)
+ClassFactory::ClassFactory()
 {
-	this->clsid = clsid;
 	refCount = 1;
 }
 
@@ -67,13 +66,13 @@ HRESULT __stdcall ClassFactory::CreateInstance(IUnknown* pUnknownOuter, const II
 	if (pUnknownOuter != NULL && iid != __uuidof(IUnknown))
 		return E_NOINTERFACE;
 
-	SoundMateAPO* apo = new SoundMateAPO(pUnknownOuter, clsid);
+	SoundMateAPO* apo = new SoundMateAPO(pUnknownOuter);
 	if (apo == NULL)
 		return E_OUTOFMEMORY;
 
-	HRESULT hr = apo->QueryInterface(iid, ppv);
+	HRESULT hr = apo->NonDelegatingQueryInterface(iid, ppv);
 
-	apo->Release();
+	apo->NonDelegatingRelease();
 	return hr;
 }
 

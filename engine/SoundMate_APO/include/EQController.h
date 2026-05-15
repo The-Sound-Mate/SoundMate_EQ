@@ -1,29 +1,39 @@
 #pragma once
 #include "SoundMate_Shared.h"
 #include <string>
+#include <windows.h>
 
 class EQController {
 public:
     EQController();
     ~EQController();
 
-    // 공유 메모리 초기화 및 연결
+    // Opens (or creates) shared memory. Returns false on failure.
     bool Initialize();
 
-    // 이퀄라이저 설정 업데이트
-    // index: 밴드 번호 (0-9)
-    // freq: 주파수 (Hz)
-    // gain: 이득 (dB)
-    // q: Q값 (보통 1.0)
+    // Sets one EQ band. Call SetBand() for all bands, then Apply() once.
+    // index: 0-9, freq: Hz, gain: dB, q: Q factor
     bool SetBand(int index, float freq, float gain, float q = 1.0f, bool enabled = true);
 
-    // 마스터 프리앰프 설정
+    // Resets bandCount to 0. Call before a full re-parse of config.txt so
+    // stale high-index bands from a previous config are cleared.
+    void ResetBands();
+
+    // Sets master pre-amp gain (dB, 0.0 = unity)
     bool SetMasterGain(float gainDb);
 
-    // 설정 적용 (updateCounter 증가)
+    // Call BeginWrite() BEFORE any SetBand/SetMasterGain calls to prevent
+    // the APO from reading partial data during a multi-band update.
+    bool BeginWrite();
+
+    // Commits the current settings: increments updateCounter, clears
+    // writeInProgress, and signals the named event.
     void Apply();
 
+    bool IsReady() const { return pSettings != nullptr; }
+
 private:
-    HANDLE hMapFile;
+    HANDLE             hMapFile;
+    HANDLE             hEvent;
     SoundMateSettings* pSettings;
 };
