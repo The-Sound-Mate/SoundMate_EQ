@@ -63,3 +63,9 @@ equalizerapo-code/
 .claude/
 test_env/
 
+# External Dependencies (Whitelisting necessary binaries)
+!SoundMate_ImGui/third_party/curl/
+!SoundMate_ImGui/third_party/curl/include/
+!SoundMate_ImGui/third_party/curl/lib/*.lib
+!SoundMate_ImGui/third_party/curl/bin/*.dll
+
