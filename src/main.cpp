@@ -194,6 +194,44 @@ static bool IsOurGuid(const wstring& g) {
     return u == pre || u == post;
 }
 
+// Lookup HKLM\SOFTWARE\Classes\CLSID\<guid>\(Default) to identify which APO
+// owns this slot. If the friendly name matches a known competitor (Equalizer
+// APO, FxSound, Voicemeeter, etc.) we warn the user — installing on top of
+// these chains *will* run both EQs in series, which is rarely what the user
+// wants. Returns empty string if the CLSID isn't registered or has no name.
+static wstring LookupClsidFriendlyName(const wstring& guidStr) {
+    if (guidStr.empty()) return L"";
+    wstring keyPath = L"SOFTWARE\\Classes\\CLSID\\" + guidStr;
+    HKEY hKey;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, keyPath.c_str(), 0,
+                      KEY_QUERY_VALUE | KEY_WOW64_64KEY, &hKey) != ERROR_SUCCESS)
+        return L"";
+    wchar_t buf[256] = {};
+    DWORD cb = sizeof(buf);
+    DWORD type = 0;
+    LSTATUS s = RegQueryValueExW(hKey, L"", NULL, &type, (BYTE*)buf, &cb);
+    RegCloseKey(hKey);
+    if (s != ERROR_SUCCESS || type != REG_SZ) return L"";
+    return wstring(buf);
+}
+
+// Returns a human-readable competitor name if the GUID belongs to a known
+// third-party APO product. Empty string = unknown / OEM (Realtek etc., safe).
+static wstring DetectKnownCompetitor(const wstring& guidStr) {
+    wstring name = LookupClsidFriendlyName(guidStr);
+    wstring upper = name; for (auto& c : upper) c = towupper(c);
+
+    if (upper.find(L"EQUALIZER APO")   != wstring::npos) return L"Equalizer APO";
+    if (upper.find(L"EQUALIZERAPO")    != wstring::npos) return L"Equalizer APO";
+    if (upper.find(L"FXSOUND")         != wstring::npos) return L"FxSound";
+    if (upper.find(L"VOICEMEETER")     != wstring::npos) return L"Voicemeeter";
+    if (upper.find(L"BOOM 3D")         != wstring::npos) return L"Boom 3D";
+    if (upper.find(L"DTS SOUND UNBOUND") != wstring::npos) return L"DTS Sound Unbound";
+    if (upper.find(L"NAHIMIC")         != wstring::npos) return L"Nahimic";
+    if (upper.find(L"SOUNDMATE")       != wstring::npos) return L""; // self — caller handles
+    return L"";
+}
+
 static void DeleteRegValue(const wstring& keyPath, const wchar_t* name) {
     HKEY hKey;
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, keyPath.c_str(), 0,
@@ -560,6 +598,28 @@ static void ProcessDevice(const wchar_t* deviceGuid) {
 
     if (IsOurGuid(origPreMix))  origPreMix.clear();
     if (IsOurGuid(origPostMix)) origPostMix.clear();
+
+    // CONFLICT DETECTION — warn before we silently chain to a known third-party
+    // APO. We don't refuse the install (user may legitimately want chaining)
+    // but the user must see *something* so they're not surprised when two EQs
+    // run in series. The check is conservative: only logs a warning, never
+    // aborts, and works on any driver because it inspects CLSID friendly names
+    // rather than relying on a hard-coded GUID list.
+    {
+        wstring conflictPre  = DetectKnownCompetitor(origPreMix);
+        wstring conflictPost = DetectKnownCompetitor(origPostMix);
+        if (!conflictPre.empty() || !conflictPost.empty()) {
+            const wstring& which = !conflictPre.empty() ? conflictPre : conflictPost;
+            Log("WARNING: detected another APO product in this device's chain.");
+            wcerr << L" [!] " << which.c_str()
+                  << L" is currently installed on this device.\n"
+                  << L"     SoundMate will chain to it — both EQs will run in series.\n"
+                  << L"     If you want SoundMate only, uninstall the other product first.\n";
+            // Best-effort UI cue when running under conhost: pause briefly so the
+            // line is visible. No-op when launched from Inno Setup with --silent.
+            Sleep(1500);
+        }
+    }
 
     // RE-INSTALL safety: if all live slots already hold our GUID (= we're
     // reinstalling on the same device), origPreMix/origPostMix end up empty.

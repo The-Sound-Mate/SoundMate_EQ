@@ -1,2 +1,2 @@
-﻿Include: C:\Program Files\EqualizerAPO\config\ai_eq_config.txt
+Include: C:\Program Files\SoundMate Equalizer\config\ai_eq_config.txt
 Device: all

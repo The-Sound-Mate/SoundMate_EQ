@@ -18,6 +18,7 @@
 #pragma comment(lib, "propsys.lib")
 #include "../core/GenreManager.h"
 #include "../core/RecordManager.h"
+#include "../core/FeatureFlags.h"
 
 
 // ── 밴드 정의 ────────────────────────────────────────────────────────────────
@@ -347,6 +348,16 @@ void MainWindow::ChangeBands(int bandIdx) {
 void MainWindow::Render() {
   m_deltaTime = ImGui::GetIO().DeltaTime;
 
+  // ── 엔진 헬스 체크 (3초마다, G1_1/G1_2 가 켜져 있을 때만) ──
+  if constexpr (SoundMate::Features::kG1_1_HealthIndicator ||
+                SoundMate::Features::kG1_2_DiagnosticPanel) {
+    m_healthCheckTimer += m_deltaTime;
+    if (m_healthCheckTimer >= 3.0f) {
+      m_healthReport = m_health.check();
+      m_healthCheckTimer = 0.0f;
+    }
+  }
+
   // ── 스무스 트랜지션 업데이트 ──
   if (m_transitionProgress < 1.0f) {
     m_transitionProgress += m_deltaTime / m_transitionDuration;
@@ -496,6 +507,11 @@ void MainWindow::Render() {
 
   // 복원 백업 선택 팝업
   RenderRestorePopup();
+
+  // G1_2: 진단 패널 (헬스 점 클릭으로 m_diagnosticOpen=true 되면 표시)
+  if constexpr (SoundMate::Features::kG1_2_DiagnosticPanel_Effective) {
+    if (m_diagnosticOpen) RenderDiagnosticPanel();
+  }
 }
 
 // ── 상단 바 ──────────────────────────────────────────────────────────────────
@@ -675,6 +691,12 @@ void MainWindow::RenderTopBar() {
     }
   }
   ImGui::PopStyleColor(2);
+
+  // G1_1: 엔진 헬스 점 (POWER 버튼 우측)
+  if constexpr (SoundMate::Features::kG1_1_HealthIndicator) {
+    ImGui::SameLine(0, 10);
+    RenderHealthDot();
+  }
 }
 
 // ── 비주얼라이저 ─────────────────────────────────────────────────────────────
@@ -784,6 +806,20 @@ void MainWindow::RenderEQPanel() {
     // Gain 레이블
     ImGui::TextColored(col, "%s",
                        StringUtils::FormatGain(m_eqGains[i]).c_str());
+
+    // G1_3: 위상 왜곡 경고 — 저역 + 큰 부스트 시 베이스 타이밍 늘어짐
+    if constexpr (SoundMate::Features::kG1_3_PhaseWarning) {
+      if (IsPhaseWarningTriggered(i)) {
+        ImGui::SameLine(0, 4);
+        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1.0f), "!");
+        if (ImGui::IsItemHovered()) {
+          ImGui::BeginTooltip();
+          ImGui::Text("저역 + 큰 부스트는 베이스 타이밍을 늘어지게 만들 수 있습니다.");
+          ImGui::Text("(킥/베이스 어택이 ~3-5ms 늦게 도착)");
+          ImGui::EndTooltip();
+        }
+      }
+    }
 
     // 수직 슬라이더
     ImGui::SetCursorScreenPos(
@@ -939,7 +975,7 @@ void MainWindow::RenderStatusBar() {
 // ── 백업 스캔 ────────────────────────────────────────────────────────────────
 void MainWindow::ScanBackups() {
   m_backupList.clear();
-  std::string backupDir = "C:\\SoundMate_App\\engine\\EqualizerAPO\\backups";
+  std::string backupDir = "C:\\Program Files\\SoundMate Equalizer\\backups";
   if (!std::filesystem::exists(backupDir))
     return;
 
@@ -1134,4 +1170,121 @@ void MainWindow::ExecuteRestore(const std::string &filePath) {
       SetStatus("복구 도구 실행 실패 (권한 거부)", Theme::COLOR_RED);
     }
   }).detach();
+}
+
+// ============================================================================
+// G1_3: 위상 왜곡 임계 검사
+// 200Hz 이하 밴드를 ±9dB 이상 부스트/컷 → 베이스 트랜지언트 늘어짐 위험
+// ============================================================================
+bool MainWindow::IsPhaseWarningTriggered(int bandIdx) const {
+  if (bandIdx < 0 || bandIdx >= (int)m_currentBands.size()) return false;
+  if (bandIdx >= (int)m_eqGains.size()) return false;
+  int   freq = m_currentBands[bandIdx];
+  float gain = m_eqGains[bandIdx];
+  return (freq <= 200) && (std::fabs(gain) >= 9.0f);
+}
+
+// ============================================================================
+// G1_1: 엔진 헬스 점 + 호버 툴팁 + 클릭 시 진단 패널 (G1_2 켜졌을 때만)
+// ============================================================================
+void MainWindow::RenderHealthDot() {
+  // 색상 결정
+  ImU32 color;
+  const char* label;
+  switch (m_healthReport.status) {
+    case SoundMate::EngineHealthMonitor::Status::Green:
+      color = IM_COL32(80, 220, 100, 255);  label = "정상"; break;
+    case SoundMate::EngineHealthMonitor::Status::Yellow:
+      color = IM_COL32(240, 200, 60, 255);  label = "대기"; break;
+    default:
+      color = IM_COL32(230, 70, 70, 255);   label = "문제 있음"; break;
+  }
+
+  // 16px 컬러 원
+  ImDrawList* dl = ImGui::GetWindowDrawList();
+  ImVec2 cursor = ImGui::GetCursorScreenPos();
+  float radius = 8.0f;
+  ImVec2 center = ImVec2(cursor.x + radius, cursor.y + ImGui::GetTextLineHeight() * 0.5f + 4);
+  dl->AddCircleFilled(center, radius, color);
+  dl->AddCircle(center, radius, IM_COL32(0, 0, 0, 120), 0, 1.5f);
+
+  // 클릭 / 호버 감지를 위한 invisible button
+  ImGui::InvisibleButton("##healthdot", ImVec2(radius * 2 + 6, radius * 2 + 6));
+
+  if (ImGui::IsItemHovered()) {
+    ImGui::BeginTooltip();
+    ImGui::Text("엔진 상태: %s", label);
+    ImGui::Separator();
+    ImGui::Text("현재 장치:   %s",
+                m_healthReport.currentDeviceTargeted ? "SoundMate 설치됨" : "미설치");
+    if (!m_healthReport.currentDeviceName.empty()) {
+      ImGui::TextDisabled("(%s)", m_healthReport.currentDeviceName.c_str());
+    }
+    ImGui::Text("오디오 흐름: %s  (%s)",
+                m_healthReport.audioFlowing ? "감지됨" : "없음",
+                m_healthReport.normLogLastSeen.c_str());
+    if constexpr (SoundMate::Features::kG1_2_DiagnosticPanel_Effective) {
+      ImGui::Separator();
+      ImGui::TextDisabled("클릭하면 상세 진단");
+    }
+    ImGui::EndTooltip();
+  }
+
+  if constexpr (SoundMate::Features::kG1_2_DiagnosticPanel_Effective) {
+    if (ImGui::IsItemClicked()) {
+      m_diagnosticOpen = true;
+    }
+  }
+}
+
+// ============================================================================
+// G1_2: 진단 패널 (Phase 1 stub — Phase 2 에서 재설치/복원 버튼 본격 추가 예정)
+// ============================================================================
+void MainWindow::RenderDiagnosticPanel() {
+  ImGui::SetNextWindowSize(ImVec2(520, 360), ImGuiCond_FirstUseEver);
+  if (ImGui::Begin("엔진 진단", &m_diagnosticOpen,
+                   ImGuiWindowFlags_NoCollapse)) {
+    ImGui::Text("종합 상태");
+    ImGui::Separator();
+    const char* statusName = "?";
+    switch (m_healthReport.status) {
+      case SoundMate::EngineHealthMonitor::Status::Green:  statusName = "🟢 정상"; break;
+      case SoundMate::EngineHealthMonitor::Status::Yellow: statusName = "🟡 대기"; break;
+      case SoundMate::EngineHealthMonitor::Status::Red:    statusName = "🔴 문제"; break;
+    }
+    ImGui::TextUnformatted(statusName);
+    ImGui::Spacing();
+
+    ImGui::Text("개별 체크");
+    ImGui::Separator();
+    ImGui::BulletText("현재 장치:    %s",
+                      m_healthReport.currentDeviceTargeted ? "SoundMate 설치됨"
+                                                            : "SoundMate 없음");
+    ImGui::BulletText("오디오 흐름:  %s  (마지막: %s)",
+                      m_healthReport.audioFlowing ? "흐름 감지" : "정지",
+                      m_healthReport.normLogLastSeen.c_str());
+    if (!m_healthReport.currentDeviceName.empty()) {
+      ImGui::Indent();
+      ImGui::TextDisabled("이름: %s", m_healthReport.currentDeviceName.c_str());
+      ImGui::TextDisabled("GUID: %s", m_healthReport.currentDeviceGuid.c_str());
+      ImGui::Unindent();
+    }
+    ImGui::Spacing();
+
+    if (!m_healthReport.issues.empty()) {
+      ImGui::Text("진단 결과");
+      ImGui::Separator();
+      for (const auto& issue : m_healthReport.issues) {
+        ImGui::TextWrapped("• %s", issue.c_str());
+      }
+      ImGui::Spacing();
+    }
+
+    ImGui::TextDisabled("(Phase 2 에서 [현재 장치 재설치] / [모두 복원] 버튼 + "
+                        "WASAPI Exclusive 탐지 + FAQ 링크 추가 예정)");
+
+    ImGui::Spacing();
+    if (ImGui::Button("닫기", ImVec2(120, 0))) m_diagnosticOpen = false;
+  }
+  ImGui::End();
 }

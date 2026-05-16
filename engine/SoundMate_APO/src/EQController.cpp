@@ -57,11 +57,11 @@ bool EQController::Initialize() {
     if (pSettings->magic != SOUNDMATE_MAGIC) {
         memset(pSettings, 0, sizeof(SoundMateSettings));
         pSettings->magic      = SOUNDMATE_MAGIC;
-        pSettings->version    = 1;
+        pSettings->version    = SOUNDMATE_VERSION;
         pSettings->masterGain = 0.f;  // 0 dB = unity gain
         pSettings->bandCount  = 0;
-        pSettings->updateCounter   = 0;
-        pSettings->writeInProgress = 0;
+        pSettings->updateCounter.store(0,   std::memory_order_relaxed);
+        pSettings->writeInProgress.store(0, std::memory_order_relaxed);
     }
 
     // Named event — APO side can wait on this for instant notification (future use)
@@ -108,25 +108,28 @@ bool EQController::SetMasterGain(float gainDb) {
 
 bool EQController::BeginWrite() {
     if (!pSettings) return false;
-    InterlockedExchange((LONG*)&pSettings->writeInProgress, 1);
-    MemoryBarrier();
+    // 시작 알림 — APO 가 read 를 skip 하도록.
+    // relaxed 면 충분: 이후 bands[] 쓰기들은 일반 store,
+    // 마지막 writeInProgress.store(0, release) 가 모든 이전 쓰기를 publish.
+    pSettings->writeInProgress.store(1, std::memory_order_relaxed);
     return true;
 }
 
 void EQController::Apply() {
     if (!pSettings) return;
 
-    // writeInProgress must already be set (via BeginWrite) before any
-    // SetBand/SetMasterGain calls so the APO never reads partial data.
-    // If the caller didn't call BeginWrite, set it now as a safety net.
-    if (!pSettings->writeInProgress)
-        InterlockedExchange((LONG*)&pSettings->writeInProgress, 1);
+    // BeginWrite 가 호출되지 않았으면 안전망으로 여기서 set.
+    if (pSettings->writeInProgress.load(std::memory_order_relaxed) == 0)
+        pSettings->writeInProgress.store(1, std::memory_order_relaxed);
 
-    MemoryBarrier();
-    InterlockedIncrement64((LONGLONG*)&pSettings->updateCounter);
-    MemoryBarrier();
+    // updateCounter 는 relaxed — bands 와 같이 release 로 일괄 publish.
+    uint64_t prev = pSettings->updateCounter.load(std::memory_order_relaxed);
+    pSettings->updateCounter.store(prev + 1, std::memory_order_relaxed);
 
-    InterlockedExchange((LONG*)&pSettings->writeInProgress, 0);
+    // RELEASE — APO 의 writeInProgress.load(acquire) 와 짝.
+    // 이 store 이전의 모든 쓰기 (bands, bandCount, masterGain, updateCounter)
+    // 가 APO 에게 일괄 가시화됨 보장. 31밴드 (496 bytes) tearing 원천 차단.
+    pSettings->writeInProgress.store(0, std::memory_order_release);
 
     if (hEvent) SetEvent(hEvent);
 }

@@ -5,6 +5,7 @@
 #include "../core/EQController.h"
 #include "../core/AIClient.h"
 #include "../core/MediaMonitor.h"
+#include "../core/EngineHealthMonitor.h"
 #include <string>
 #include <vector>
 #include <map>
@@ -44,6 +45,11 @@ private:
     void RenderEQPanel();          // 우측 EQ 슬라이더 패널
     void RenderBottomBar();        // 하단 (프롬프트 입력, 초기화 버튼)
     void RenderStatusBar();        // 상태 메시지
+
+    // ── 엔진 헬스 (G1_1 / G1_2 / G1_3) — FeatureFlags.h 로 ON/OFF ─
+    void RenderHealthDot();          // G1_1: 타이틀바 컬러 점 + 호버 툴팁
+    void RenderDiagnosticPanel();    // G1_2: 점 클릭 시 모달 (Phase 1 stub)
+    bool IsPhaseWarningTriggered(int bandIdx) const;  // G1_3: 위상 왜곡 임계
 
     // ── EQ 슬라이더 관련 ─────────────────────────────────────────
     void SetupEQBands(const std::vector<int>& bands);
@@ -149,6 +155,12 @@ private:
     std::atomic<bool>  m_running{ true };
 
     float m_deltaTime = 0.0f;  // ImGui 프레임 시간 (초)
+
+    // ── 엔진 헬스 모니터 (G1_1/G1_2) ────────────────────────────
+    SoundMate::EngineHealthMonitor m_health;
+    SoundMate::EngineHealthMonitor::Report m_healthReport;
+    float m_healthCheckTimer = 999.f;  // 첫 프레임에 즉시 검사하도록 큰 값
+    bool  m_diagnosticOpen   = false;  // G1_2 모달 열림 상태
 
     SettingsWindow m_settingsWin;
     SurveyWindow   m_surveyWin;

@@ -14,6 +14,7 @@
 #include <iostream>
 #include <string>
 #include <cstdio>
+#include <cmath>
 
 static const wchar_t* CONFIG_PATH =
     L"C:\\Program Files\\SoundMate Equalizer\\config.txt";
@@ -47,11 +48,29 @@ static bool ParseAndApply(EQController& eq) {
     int   bandIdx = 0;
     std::string line;
 
+    // Validation bounds — anything outside these ranges is either physically
+    // pointless (gain > +24 dB causes hard clipping no matter what the limiter
+    // does) or mathematically dangerous (Q < 0.1 produces extremely wide bands
+    // with huge cumulative phase shift, Q > 10 yields ringing that the biquad
+    // implementation can't keep numerically stable). NaN/inf in any field
+    // would propagate through the filter state and silence the channel.
+    auto sanitizeFloat = [](float v, float lo, float hi, float fallback) -> float {
+        if (!std::isfinite(v)) return fallback;
+        if (v < lo) return lo;
+        if (v > hi) return hi;
+        return v;
+    };
+
+    int skippedBands = 0;
+
     while (std::getline(file, line) && bandIdx < SOUNDMATE_MAX_BANDS) {
         if (line.empty() || line[0] == '#') continue;
 
         if (line.rfind("Preamp:", 0) == 0) {
-            sscanf_s(line.c_str(), "Preamp: %f dB", &preamp);
+            float v = 0.f;
+            if (sscanf_s(line.c_str(), "Preamp: %f dB", &v) == 1) {
+                preamp = sanitizeFloat(v, -30.f, 12.f, 0.f);
+            }
         }
         else if (line.rfind("Filter:", 0) == 0) {
             int   id   = 0;
@@ -59,14 +78,28 @@ static bool ParseAndApply(EQController& eq) {
             // Format: Filter: <id> <freq> <gain> <q>
             if (sscanf_s(line.c_str(), "Filter: %d %f %f %f",
                          &id, &freq, &gain, &q) == 4) {
+                if (!std::isfinite(freq) || !std::isfinite(gain) || !std::isfinite(q)) {
+                    ++skippedBands;
+                    continue;
+                }
+                freq = sanitizeFloat(freq,    20.f, 20000.f, 1000.f);
+                gain = sanitizeFloat(gain,   -24.f,    24.f,    0.f);
+                q    = sanitizeFloat(q,        0.1f,   10.f,    1.f);
                 eq.SetBand(bandIdx, freq, gain, q, true);
                 ++bandIdx;
+            } else {
+                ++skippedBands;
             }
         }
     }
 
     eq.SetMasterGain(preamp);
     eq.Apply();
+
+    if (skippedBands > 0) {
+        std::cerr << " [!] " << skippedBands
+                  << " filter line(s) skipped (out-of-range or malformed)\n";
+    }
 
     std::cout << " [V] Config applied — preamp=" << preamp
               << " dB, " << bandIdx << " band(s)\n";

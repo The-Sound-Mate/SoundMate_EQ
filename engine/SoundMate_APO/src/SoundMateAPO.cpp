@@ -458,6 +458,15 @@ void SoundMateAPO::APOProcess(
 	UINT32 u32NumInputConnections, APO_CONNECTION_PROPERTY** ppInputConnections,
 	UINT32 u32NumOutputConnections, APO_CONNECTION_PROPERTY** ppOutputConnections)
 {
+	// 입력 가드 — 비정상 호출 (드라이버 버그, audiodg race) 대비.
+	// audiodg 가 정상이면 한 번도 발동 안 함. 비용 거의 0.
+	if (!ppInputConnections || !ppOutputConnections) return;
+	if (u32NumInputConnections == 0 || u32NumOutputConnections == 0) return;
+	if (!ppInputConnections[0] || !ppOutputConnections[0]) return;
+	if (!ppInputConnections[0]->pBuffer || !ppOutputConnections[0]->pBuffer) return;
+	if (ppInputConnections[0]->u32ValidFrameCount == 0) return;
+	if (engine.outChannels == 0 || engine.inChannels == 0) return;
+
 	UINT32 flags = ppInputConnections[0]->u32BufferFlags;
 
 	// Only handle the two well-known buffer states. For any other flag we
@@ -476,11 +485,32 @@ void SoundMateAPO::APOProcess(
 		memset(inputFrames, 0, frameCount * engine.inChannels * sizeof(float));
 	}
 
-	// Run child APO first (if chained), then apply our EQ
+	// Run child APO first (if chained), then apply our EQ.
+	//
+	// SEH guard around child->APOProcess: if a third-party child (Realtek,
+	// EqualizerAPO when chained, etc.) faults inside its RT path, the AV would
+	// kill audiodg.exe and silence the whole system until the user reboots or
+	// runs SoundMate_reset.exe. Catching the AV here lets us null the child for
+	// the rest of this session, fall through to passthrough+our-EQ, and the
+	// user keeps hearing audio. We deliberately leak the COM references on
+	// childAPO/childRT/childCfg — calling Release() in RT context can take
+	// loader locks and is unsafe; audiodg's process lifetime cleans them up.
 	if (childRT) {
-		childRT->APOProcess(
-			u32NumInputConnections, ppInputConnections,
-			u32NumOutputConnections, ppOutputConnections);
+		volatile bool crashed = false;
+		__try {
+			childRT->APOProcess(
+				u32NumInputConnections, ppInputConnections,
+				u32NumOutputConnections, ppOutputConnections);
+		}
+		__except (EXCEPTION_EXECUTE_HANDLER) {
+			crashed = true;
+		}
+		if (crashed) {
+			childRT  = NULL;
+			childAPO = NULL;
+			childCfg = NULL;
+			memcpy(outputFrames, inputFrames, frameCount * engine.outChannels * sizeof(float));
+		}
 		// After child: input and output buffers may alias; read from output
 		engine.updateFromSharedMemory();
 		engine.process(outputFrames, outputFrames, frameCount);

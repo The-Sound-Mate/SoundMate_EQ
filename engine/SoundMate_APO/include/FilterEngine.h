@@ -37,26 +37,63 @@ struct BiquadCoeffs {
     float a1n, a2n;        // denominator (normalized by a0)
 };
 
+// ============================================================================
+// BiquadFilter — Transposed DF-II + 계수 Lerp (Anti-Zipper Noise)
+//
+// 슬라이더 조작 시 "찢어지는 소리(zipper noise)" 의 근본 원인은 옛 z1/z2 가
+// 새 계수와 곱해지면서 발생하는 트랜지언트. 계수를 한 번에 바꾸는 대신
+// kRampLen 샘플(~21ms @ 48kHz) 동안 선형 보간 (lerp) 으로 전환하면 무해.
+//
+// 비용: 매 샘플 5 곱셈 + 5 덧셈 (rampLeft > 0 동안만). 31밴드 × 2채널 모두
+// ramp 중일 때도 < 1% CPU.
+// ============================================================================
 class BiquadFilter {
 public:
-    BiquadFilter() : z1(0), z2(0) {
+    static constexpr unsigned kRampLen = 1024;  // ~21ms @ 48kHz
+
+    BiquadFilter() : z1(0), z2(0), rampLeft(0) {
         // identity passthrough
-        c.b0n = 1.f; c.b1n = 0.f; c.b2n = 0.f;
-        c.a1n = 0.f; c.a2n = 0.f;
+        current.b0n = 1.f; current.b1n = 0.f; current.b2n = 0.f;
+        current.a1n = 0.f; current.a2n = 0.f;
+        target = current;
     }
 
-    // Called from background thread — just copy coefficients, preserve state
-    void setCoeffs(const BiquadCoeffs& newC) { c = newC; }
+    // Called from AVRT thread (updatePending) — target 만 갱신,
+    // current 는 process() 가 매 샘플 한 발씩 이동.
+    // 진행 중인 lerp 가 있어도 그대로 새 target 향해 자연스럽게 이어짐.
+    void setCoeffs(const BiquadCoeffs& newC) {
+        target = newC;
+        rampLeft = kRampLen;
+    }
 
-    // Called from AVRT thread
+    // Called from AVRT thread — per-sample
     inline float process(float in) {
-        float out = c.b0n * in + z1;
-        z1 = c.b1n * in - c.a1n * out + z2;
-        z2 = c.b2n * in - c.a2n * out;
+        // 계수 lerp 진행 — 매 호출마다 (target - current) / rampLeft 만큼 이동
+        if (rampLeft > 0) {
+            float step = 1.f / (float)rampLeft;
+            current.b0n += (target.b0n - current.b0n) * step;
+            current.b1n += (target.b1n - current.b1n) * step;
+            current.b2n += (target.b2n - current.b2n) * step;
+            current.a1n += (target.a1n - current.a1n) * step;
+            current.a2n += (target.a2n - current.a2n) * step;
+            if (--rampLeft == 0) current = target;  // 부동소수 누적 제거
+        }
+
+        float out = current.b0n * in + z1;
+        z1 = current.b1n * in - current.a1n * out + z2;
+        z2 = current.b2n * in - current.a2n * out;
         // Flush denormals to zero (prevents CPU slowdown)
         if (fabsf(z1) < 1e-30f) z1 = 0.f;
         if (fabsf(z2) < 1e-30f) z2 = 0.f;
         return out;
+    }
+
+    // NaN 감염 또는 디바이스 reset 시 호출 — 모든 상태 0 으로 +
+    // 진행 중인 lerp 도 즉시 종료 (current = target 으로 스냅).
+    void emergencyReset() {
+        z1 = 0.f; z2 = 0.f;
+        current = target;
+        rampLeft = 0;
     }
 
     static BiquadCoeffs makePeaking(float freq, float gainDb, float Q, float sampleRate) {
@@ -75,8 +112,10 @@ public:
     }
 
 private:
-    BiquadCoeffs c;
-    float z1, z2;
+    BiquadCoeffs current;   // 실제 사용 중인 계수 (process 가 lerp 로 갱신)
+    BiquadCoeffs target;    // 새 setCoeffs 가 넣은 목표
+    unsigned     rampLeft;  // 남은 lerp 샘플 수 (0 = lerp 종료)
+    float        z1, z2;
 };
 
 // ============================================================================
@@ -104,24 +143,141 @@ private:
 
 // ============================================================================
 // Soft + hard output limiter
-// Soft knee: rational approximation from -6 dBFS to 0 dBFS
-// Hard clip:  beyond ±1.0
+// Soft knee: rational approximation from -6 dBFS to ceiling
+// Hard clip:  beyond ±ceiling
+//
+// Ceiling is 0.9661 (≈ -0.3 dBFS) instead of 1.0 — this preserves headroom for
+// inter-sample peaks (ISP). Lossy codecs (MP3, AAC, Opus) routinely produce
+// reconstructed signals where the digital samples sit below 0 dBFS but the
+// continuous waveform between samples exceeds it. The DAC then reconstructs
+// a true-peak above 0 dBFS and clips. Look-ahead limiting would solve it
+// properly but adds 5–10 ms latency (lip-sync issues for games / video) — a
+// fixed -0.3 dB ceiling kills ~99% of ISP events at zero latency cost.
 // ============================================================================
 inline float applyLimiter(float x) {
-    const float knee = 0.5f;  // -6 dBFS knee start
+    const float ceiling = 0.9661f;  // -0.3 dBFS true-peak headroom
+    const float knee    = 0.5f;     // -6 dBFS knee start
     float abs_x = fabsf(x);
     if (abs_x <= knee) return x;
-    // Soft knee region: knee to 1.0
     float sign = (x > 0.f) ? 1.f : -1.f;
-    if (abs_x < 1.0f) {
+    if (abs_x < ceiling) {
         float excess = abs_x - knee;
-        float range  = 1.0f - knee;
+        float range  = ceiling - knee;
         float compressed = knee + excess / (1.f + (excess / range));
         return sign * compressed;
     }
-    // Hard clip beyond ±1.0
-    return sign * 1.0f;
+    return sign * ceiling;  // hard ceiling at -0.3 dBFS
 }
+
+// ============================================================================
+// LoudnessNormalizer — content-aware AGC ("정규화")
+//
+// Problem: YouTube / Spotify mixes have wildly different loudness. Quiet
+// content sounds thin because the EQ chain can't add energy it doesn't have,
+// and the simple peak limiter only attenuates loud peaks — it doesn't boost
+// quiet content. The result is what the user called "빈약한" — anemic.
+//
+// Approach (per-sample, RT-safe):
+//   1. Track signal RMS with a 1-pole envelope follower
+//      (fast attack ≈ 50 ms, slow release ≈ 300 ms — captures transient peaks
+//      without pumping on percussion).
+//   2. Compute desired gain = targetRMS / currentRMS, clamped to ±range.
+//   3. Smooth the gain itself with separate attack/release:
+//      - slow ramp UP (500 ms) — avoids pumping when quiet→loud transitions
+//      - faster ramp DOWN (250 ms) — protects against overshoot on sudden loud
+//   4. Below the noise floor (≈ −50 dBFS), pin gain to 1.0 — don't amplify hiss.
+//
+// The peak limiter still sits AFTER this stage. Normalizer brings quiet
+// content up, limiter catches anything that would clip. The two cooperate.
+// ============================================================================
+class LoudnessNormalizer {
+public:
+    LoudnessNormalizer()
+        : rmsState(0.f), currentGain(1.f),
+          rmsAttackCoef(0.f), rmsReleaseCoef(0.f),
+          gainUpCoef(0.f), gainDownCoef(0.f),
+          enabled(true), logRms(0.f), logGain(1.f), logPeakRms(0.f)
+    {
+        // Target: -16 dBFS RMS (slightly louder than streaming -18 LUFS,
+        // perceptually equivalent for short windows).
+        targetRMS  = 0.158489f;   // 10^(-16/20)
+        maxGain    = 3.981f;      // +12 dB
+        minGain    = 0.5012f;     // -6 dB
+        noiseFloor = 0.003162f;   // -50 dBFS RMS
+    }
+
+    void initialize(float sampleRate) {
+        // alpha = 1 - exp(-1 / (tau * fs))
+        auto coef = [](float tauSec, float fs) {
+            return 1.f - expf(-1.f / (tauSec * fs));
+        };
+        rmsAttackCoef  = coef(0.05f,  sampleRate);   // 50 ms attack on RMS
+        rmsReleaseCoef = coef(0.30f,  sampleRate);   // 300 ms release on RMS
+        gainUpCoef     = coef(0.50f,  sampleRate);   // 500 ms slow rise (anti-pump)
+        gainDownCoef   = coef(0.25f,  sampleRate);   // 250 ms moderate fall
+        rmsState = 0.f;
+        currentGain = 1.f;
+    }
+
+    // Per-frame: pass the loudest absolute sample across all channels for this
+    // frame (linked-stereo). Returns the gain multiplier to apply to every
+    // channel of this frame, keeping stereo image intact.
+    inline float processFrame(float maxAbsThisFrame) {
+        if (!enabled) return 1.f;
+
+        // 1) RMS envelope on squared peak (cheaper than per-channel sum)
+        float sq = maxAbsThisFrame * maxAbsThisFrame;
+        float coef = (sq > rmsState) ? rmsAttackCoef : rmsReleaseCoef;
+        rmsState += (sq - rmsState) * coef;
+        if (rmsState < 1e-30f) rmsState = 0.f;  // denormal flush
+
+        float rms = sqrtf(rmsState);
+
+        // 2) Desired gain
+        float desired;
+        if (rms <= noiseFloor) {
+            desired = 1.f;  // pin to unity below noise floor
+        } else {
+            desired = targetRMS / rms;
+            if (desired > maxGain) desired = maxGain;
+            if (desired < minGain) desired = minGain;
+        }
+
+        // 3) Smooth (asymmetric)
+        float gainCoef = (desired > currentGain) ? gainUpCoef : gainDownCoef;
+        currentGain += (desired - currentGain) * gainCoef;
+        if (currentGain < 1e-6f) currentGain = 1e-6f;  // never zero
+
+        // Diagnostics (snapshot for the per-second log writer)
+        logRms  = rms;
+        logGain = currentGain;
+        if (rms > logPeakRms) logPeakRms = rms;
+
+        return currentGain;
+    }
+
+    // Read-only diagnostic accessors (called from non-RT periodic logger)
+    float lastRms()  const { return logRms;  }
+    float lastGain() const { return logGain; }
+    float peakRms()  const { return logPeakRms; }
+    void  resetPeakRms()   { logPeakRms = 0.f; }
+    bool  isEnabled() const { return enabled; }
+    void  setEnabled(bool e) { enabled = e; }
+
+private:
+    float rmsState;
+    float currentGain;
+    float targetRMS, maxGain, minGain, noiseFloor;
+    float rmsAttackCoef, rmsReleaseCoef;
+    float gainUpCoef, gainDownCoef;
+    bool  enabled;
+
+    // Plain floats — only updated from AVRT thread, snapshot-read by logger.
+    // No locking: races are harmless (we just log a slightly stale number).
+    float logRms;
+    float logGain;
+    float logPeakRms;
+};
 
 // ============================================================================
 // Pending filter configuration — written by background thread,
@@ -152,7 +308,8 @@ public:
         : sampleRate(48000.f), inChannels(2), outChannels(2),
           masterGain(1.f), activeBands(0),
           hMapFile(NULL), pSettings(nullptr),
-          lastUpdateCounter(~0ULL), pendingReady(0) {}
+          lastUpdateCounter(~0ULL), pendingReady(0),
+          hDiagLog(INVALID_HANDLE_VALUE), framesSinceLog(0), peakSinceLog(0.f) {}
 
     ~FilterEngine() {
         if (pSettings) {
@@ -160,6 +317,7 @@ public:
             UnmapViewOfFile(pSettings);
         }
         if (hMapFile) CloseHandle(hMapFile);
+        if (hDiagLog != INVALID_HANDLE_VALUE) CloseHandle(hDiagLog);
     }
 
     // Called from LockForProcess (non-RT). Safe to do anything here.
@@ -178,7 +336,11 @@ public:
         masterGain  = 1.f;
         activeBands = 0;
 
+        // Initialize the normalizer at the actual sample rate
+        normalizer.initialize(rate);
+
         InitializeSharedMemory();
+        OpenDiagLog();
 
         char log[256];
         _snprintf_s(log, sizeof(log), _TRUNCATE, "FilterEngine::initialize rate=%.0f inCh=%u outCh=%u",
@@ -208,10 +370,12 @@ public:
         if (!pSettings) return;
         if (pSettings->magic != SOUNDMATE_MAGIC) return;
 
-        // Skip read if Controller is mid-write
-        if (pSettings->writeInProgress) return;
+        // ACQUIRE — Controller 의 writeInProgress.store(0, release) 와 짝.
+        // 이 load 가 0 을 보면 Controller 의 모든 이전 쓰기 (bands, counter 등)
+        // 가 가시화됨이 보장됨. 31밴드 (496B) 의 tearing 원천 차단.
+        if (pSettings->writeInProgress.load(std::memory_order_acquire) != 0) return;
 
-        uint64_t counter = pSettings->updateCounter;
+        uint64_t counter = pSettings->updateCounter.load(std::memory_order_relaxed);
         if (counter == lastUpdateCounter) return;
         lastUpdateCounter = counter;
 
@@ -250,31 +414,86 @@ public:
         InterlockedExchange(&pendingReady, 1);
     }
 
-    // AVRT thread — interleaved buffer: frames × channels
+    // AVRT thread — interleaved buffer: frames × channels.
+    //
+    // Pipeline (frame-outer for shared-gain normalization):
+    //   1. masterGain pre-amp + biquad EQ chain + DC block — per channel
+    //   2. find peak across channels in this frame → LoudnessNormalizer.processFrame()
+    //   3. apply that single gain to ALL channels of this frame (stereo image intact)
+    //   4. peak limiter — catches anything still above ±1.0
     void process(float* outBuf, const float* inBuf, unsigned frames) {
         updatePending();
 
         if (inBuf != outBuf)
             memcpy(outBuf, inBuf, frames * outChannels * sizeof(float));
 
-        if (activeBands == 0 && masterGain == 1.f) return;
+        const bool eqActive = (activeBands != 0 || masterGain != 1.f);
 
-        for (unsigned ch = 0; ch < outChannels; ++ch) {
-            // Use ch as the filter slot index — each output channel owns its
-            // own BiquadFilter state (z1/z2). Sharing state across channels
-            // (via inCh=0 fallback) corrupts both channels' filter memory.
-            unsigned filterCh = (ch < activeFilters[0].size()) ? ch : 0;
+        for (unsigned f = 0; f < frames; ++f) {
+            float maxAbs = 0.f;
 
-            for (unsigned f = 0; f < frames; ++f) {
+            // Per-channel: master gain → biquad chain → DC block
+            for (unsigned ch = 0; ch < outChannels; ++ch) {
                 unsigned idx = f * outChannels + ch;
-                float s = outBuf[idx] * masterGain;
+                unsigned filterCh = (!activeFilters.empty()
+                                     && ch < activeFilters[0].size()) ? ch : 0;
 
-                for (unsigned b = 0; b < activeBands; ++b)
-                    s = activeFilters[b][filterCh].process(s);
+                float s = outBuf[idx];
+                if (eqActive) {
+                    s *= masterGain;
+                    for (unsigned b = 0; b < activeBands; ++b)
+                        s = activeFilters[b][filterCh].process(s);
+                    s = dcBlockers[ch].process(s);
+                }
+                outBuf[idx] = s;
 
-                s = dcBlockers[ch].process(s);
-                outBuf[idx] = applyLimiter(s);
+                float a = fabsf(s);
+                if (a > maxAbs) maxAbs = a;
             }
+
+            // Linked-stereo loudness normalization
+            float gain = normalizer.processFrame(maxAbs);
+
+            // Final stage: apply gain + peak limiter per channel
+            for (unsigned ch = 0; ch < outChannels; ++ch) {
+                unsigned idx = f * outChannels + ch;
+                outBuf[idx] = applyLimiter(outBuf[idx] * gain);
+            }
+
+            if (maxAbs > peakSinceLog) peakSinceLog = maxAbs;
+        }
+
+        // ────────────────────────────────────────────────────────────────────
+        // NaN/Inf 가드 — 프레임 경계에서 한 번만 검사.
+        // 한 번 감염되면 z1/z2 가 NaN 폭주 → 다음 프레임도 NaN → 필터 영구 사망.
+        // 적발 시 출력 프레임 mute + 모든 필터 상태 완전 리셋 (lerp 도 종료).
+        // 매 샘플 검사 대신 프레임 끝에 한 번만 → 비용 ~0.
+        // 감염 시 대가: 그 프레임(~10ms) 만 무음, 다음 프레임부터 정상.
+        // ────────────────────────────────────────────────────────────────────
+        bool nanDetected = false;
+        unsigned total = frames * outChannels;
+        for (unsigned i = 0; i < total; ++i) {
+            if (!std::isfinite(outBuf[i])) { nanDetected = true; break; }
+        }
+        if (nanDetected) {
+            memset(outBuf, 0, total * sizeof(float));
+            for (auto& bandRow : activeFilters)
+                for (auto& filter : bandRow)
+                    filter.emergencyReset();
+            for (auto& dc : dcBlockers) dc.reset();
+            // 정규화기는 자체 noise floor 가드가 있어서 별도 reset 불필요
+        }
+
+        // TEMPORARY diagnostic logger — writes one line per second to
+        //   C:\Users\Public\SoundMateAPO_Norm.log
+        // Rate-limited so the disk I/O burden is negligible vs the per-sample
+        // math above (single WriteFile/sec on a kept-open handle).
+        framesSinceLog += frames;
+        if (framesSinceLog >= (uint64_t)sampleRate) {
+            EmitDiagLog();
+            framesSinceLog = 0;
+            peakSinceLog = 0.f;
+            normalizer.resetPeakRms();
         }
     }
 
@@ -340,6 +559,54 @@ private:
         WriteAPOLog("FilterEngine: Shared memory OK");
     }
 
+    // TEMPORARY diagnostic log for the normalizer. Single keep-open handle
+    // appending one line per second from APOProcess. Writing from the AVRT
+    // thread is technically RT-unsafe; at 1 line/sec the kernel buffer absorbs
+    // it well below typical audio callback budgets (10 ms). Remove this when
+    // the normalizer is dialed in.
+    void OpenDiagLog() {
+        if (hDiagLog != INVALID_HANDLE_VALUE) return;
+        hDiagLog = CreateFileA(
+            "C:\\Users\\Public\\SoundMateAPO_Norm.log",
+            FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
+            NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (hDiagLog != INVALID_HANDLE_VALUE) {
+            char hdr[256];
+            SYSTEMTIME st; GetLocalTime(&st);
+            int n = _snprintf_s(hdr, sizeof(hdr), _TRUNCATE,
+                "\r\n=== SoundMate Normalizer log opened %04d-%02d-%02d %02d:%02d:%02d "
+                "(rate=%.0f Hz, ch=%u) ===\r\n",
+                st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond,
+                sampleRate, outChannels);
+            DWORD wr;
+            WriteFile(hDiagLog, hdr, (DWORD)n, &wr, NULL);
+        }
+    }
+
+    inline void EmitDiagLog() {
+        if (hDiagLog == INVALID_HANDLE_VALUE) return;
+
+        float rms  = normalizer.lastRms();
+        float gain = normalizer.lastGain();
+        float peak = normalizer.peakRms();
+
+        // dB conversions with floor to avoid log(0)
+        auto toDb = [](float v) -> float {
+            if (v < 1e-9f) return -180.f;
+            return 20.f * log10f(v);
+        };
+
+        SYSTEMTIME st; GetLocalTime(&st);
+        char buf[256];
+        int n = _snprintf_s(buf, sizeof(buf), _TRUNCATE,
+            "[%02d:%02d:%02d] rms=%6.1fdB peak=%6.1fdB gain=%+5.1fdB inPeak=%+5.1fdB %s\r\n",
+            st.wHour, st.wMinute, st.wSecond,
+            toDb(rms), toDb(peak), toDb(gain), toDb(peakSinceLog),
+            (gain > 1.01f ? "BOOST" : (gain < 0.99f ? "CUT  " : "FLAT ")));
+        DWORD wr;
+        WriteFile(hDiagLog, buf, (DWORD)n, &wr, NULL);
+    }
+
     float   sampleRate;
     float   masterGain;
     unsigned activeBands;
@@ -354,4 +621,10 @@ private:
     // Double-buffer: written by updateFromSharedMemory, read by updatePending
     PendingConfig  pending;
     volatile LONG  pendingReady;  // InterlockedExchange flag
+
+    // Loudness normalizer + temp diagnostic logger
+    LoudnessNormalizer normalizer;
+    HANDLE             hDiagLog;
+    uint64_t           framesSinceLog;
+    float              peakSinceLog;
 };

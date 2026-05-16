@@ -154,6 +154,7 @@ set(GUI_SOURCES
     ${GUI_SRC_DIR}/src/core/AIClient.cpp
     ${GUI_SRC_DIR}/src/core/RecordManager.cpp
     ${GUI_SRC_DIR}/src/core/GenreManager.cpp
+    ${GUI_SRC_DIR}/src/core/EngineHealthMonitor.cpp
 )
 
 add_executable(SoundMate_EQ WIN32

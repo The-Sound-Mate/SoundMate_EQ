@@ -343,7 +343,7 @@ bool DeviceAPOInfo::load(const wstring &deviceGuid, wstring defaultDeviceGuid) {
           if (version != installVersion)
             throw RegistryException(
                 L"Unsupported version of APO installation detected! Please "
-                L"uninstall newer Equalizer APO before using this version of "
+                L"uninstall the newer SoundMate APO before using this version of "
                 L"Device Selector.");
         } else {
           version = L"1";
@@ -557,7 +557,7 @@ void DeviceAPOInfo::install() {
     }
 
     RegistryHelper::writeValue(keyPath + L"\\FxProperties", fxTitleValueName,
-                               L"Equalizer APO");
+                               L"SoundMate APO");
 
     for (int i = 0; i < allGuidValueNameCount; i++) {
       RegistryHelper::writeValue(childApoPath L"\\" + deviceGuid,

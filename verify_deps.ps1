@@ -41,14 +41,9 @@ Write-Host "  MSVCP140.dll:    $(if ($hasMsvcp140) {'YES (dynamic CRT)'}    else
 Write-Host "  VCRUNTIME140:    $(if ($hasVcRuntime){'YES'}                  else {'no'})"
 
 Write-Host ''
-Write-Host '=== File size compared to Equalizer ==='
+Write-Host '=== Built DLL size ==='
 $size = (Get-Item $ourDll).Length
-Write-Host "  Our DLL:       $size bytes"
-$eqDll = 'C:\Program Files\EqualizerAPO\EqualizerAPO.dll'
-if (Test-Path $eqDll) {
-    $eqSize = (Get-Item $eqDll).Length
-    Write-Host "  Equalizer DLL: $eqSize bytes (reference)"
-}
+Write-Host "  SoundMate_APO.dll: $size bytes"
 
 Write-Host ''
 Write-Host '=== Verdict ===' -ForegroundColor Yellow

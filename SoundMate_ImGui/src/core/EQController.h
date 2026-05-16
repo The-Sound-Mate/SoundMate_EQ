@@ -37,7 +37,7 @@ public:
     std::string GetConfigFilePath() const { return m_targetFilePath; }
 
 private:
-    // 레지스트리에서 Equalizer APO 설치 경로 탐색
+    // HKLM\SOFTWARE\SoundMateAPO 의 InstallPath/ConfigPath 탐색 (없으면 폴백)
     std::string GetRealConfigDir();
     std::string GetRealInstallPath();
     std::string GetOfficialConfigDir();
