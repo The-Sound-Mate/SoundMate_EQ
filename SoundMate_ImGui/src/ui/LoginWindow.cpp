@@ -5,18 +5,15 @@
 #include <windows.h>
 #include <shellapi.h>
 #include <winsock2.h>
+#include <wincrypt.h>
 #include <nlohmann/json.hpp>
 #include <fstream>
 #include <filesystem>
 #include <thread>
 #pragma comment(lib, "ws2_32.lib")
+#pragma comment(lib, "crypt32.lib")
 
 using json = nlohmann::json;
-
-static std::string GetLocalAppData() {
-    char buf[MAX_PATH]; GetEnvironmentVariableA("LOCALAPPDATA",buf,MAX_PATH);
-    return buf;
-}
 
 LoginWindow::LoginWindow() {}
 LoginWindow::~LoginWindow() {
@@ -24,8 +21,61 @@ LoginWindow::~LoginWindow() {
     if (m_serverThread.joinable()) m_serverThread.detach();
 }
 
+// [Phase 2-A] 토큰 경로 — Program Files 통합. RecordManager::m_tokenFile 과 동일.
 std::string LoginWindow::GetTokenFilePath() {
-    return GetLocalAppData() + "\\SoundMateEqualizer\\record\\session_token.json";
+    return "C:\\Program Files\\SoundMate Equalizer\\record\\session_token.json";
+}
+
+// [Phase 2-A] DPAPI 암호화 — user-bound 키. 다른 user 계정에서 복호화 불가.
+// 결과는 base64 문자열 (JSON 안에 안전히 저장 가능). 실패 시 빈 문자열.
+std::string LoginWindow::EncryptDPAPI(const std::string& plain) {
+    if (plain.empty()) return "";
+    DATA_BLOB in;
+    in.pbData = (BYTE*)plain.data();
+    in.cbData = (DWORD)plain.size();
+    DATA_BLOB out{};
+    if (!CryptProtectData(&in, L"SoundMate Token", NULL, NULL, NULL, 0, &out)) {
+        return "";
+    }
+    // bytes → base64
+    DWORD b64Len = 0;
+    CryptBinaryToStringA(out.pbData, out.cbData,
+                         CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF,
+                         NULL, &b64Len);
+    std::string b64(b64Len, '\0');
+    CryptBinaryToStringA(out.pbData, out.cbData,
+                         CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF,
+                         &b64[0], &b64Len);
+    LocalFree(out.pbData);
+    // null terminator 제거
+    while (!b64.empty() && b64.back() == '\0') b64.pop_back();
+    return b64;
+}
+
+// [Phase 2-A] DPAPI 복호화. 실패 시 빈 문자열 반환 (caller 가 토큰 삭제 + 재로그인 처리).
+std::string LoginWindow::DecryptDPAPI(const std::string& b64Cipher) {
+    if (b64Cipher.empty()) return "";
+    // base64 → bytes
+    DWORD binLen = 0;
+    if (!CryptStringToBinaryA(b64Cipher.c_str(), (DWORD)b64Cipher.size(),
+                              CRYPT_STRING_BASE64, NULL, &binLen, NULL, NULL)) {
+        return "";
+    }
+    std::vector<BYTE> bin(binLen);
+    if (!CryptStringToBinaryA(b64Cipher.c_str(), (DWORD)b64Cipher.size(),
+                              CRYPT_STRING_BASE64, bin.data(), &binLen, NULL, NULL)) {
+        return "";
+    }
+    DATA_BLOB in;
+    in.pbData = bin.data();
+    in.cbData = binLen;
+    DATA_BLOB out{};
+    if (!CryptUnprotectData(&in, NULL, NULL, NULL, NULL, 0, &out)) {
+        return "";  // 복호화 실패 — 다른 user 계정 / OS 재설치 / 비밀번호 재설정 등
+    }
+    std::string plain((char*)out.pbData, out.cbData);
+    LocalFree(out.pbData);
+    return plain;
 }
 
 void LoginWindow::Open(LoginSuccessCallback cb) {
@@ -35,51 +85,107 @@ void LoginWindow::Open(LoginSuccessCallback cb) {
     std::thread([this]{ TryAutoLogin(); }).detach();
 }
 
-// ── 자동 로그인 (Python _try_auto_login 이식) ─────────────────────────────
+// ── 자동 로그인 ──────────────────────────────────────────────────────────
+// [Phase 2-A]
+//   1. 토큰 파일 없음        → 정상 로그인 창 (조용히)
+//   2. v1 (평문) 발견         → 1회 마이그레이션: 그대로 v2 로 재암호화 저장 후 재시도
+//   3. v2 (암호화) 발견       → DPAPI 복호화 시도
+//        - 성공: GetUserIdFromToken 으로 만료 검사 + refresh, JWT 파싱하여 uid/email
+//        - 실패: 토큰 파일 silent delete + "세션이 만료되었습니다" + 로그인 창
 void LoginWindow::TryAutoLogin() {
     std::string tokenPath = GetTokenFilePath();
     if (!std::filesystem::exists(tokenPath)) {
         m_statusMsg = "";
         return;
     }
+
+    // 토큰 파일 형식 판별 (v1 평문 vs v2 암호화)
+    std::string at, rt;
+    bool needRewriteAsV2 = false;
     try {
         std::ifstream f(tokenPath);
         auto token = json::parse(f);
-        std::string at = token.value("access_token","");
-        if (at.empty()) { m_statusMsg=""; return; }
+        int v = token.value("v", 1);
 
-        std::string validToken = g_recordManager.GetUserIdFromToken();
-        if (!validToken.empty()) {
-            auto p1 = validToken.find('.'), p2 = validToken.find('.',p1+1);
-            std::string payload = validToken.substr(p1+1, p2-p1-1);
-            while(payload.size()%4) payload+='=';
-            for(auto& c:payload){if(c=='-')c='+';else if(c=='_')c='/';}
-            static const std::string b64="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-            std::string decoded; int val=0,bits=-8;
-            for(char c:payload){
-                auto pos=b64.find(c); if(pos==std::string::npos)continue;
-                val=(val<<6)|(int)pos; bits+=6;
-                if(bits>=0){decoded+=(char)((val>>bits)&0xFF);bits-=8;}
-            }
-            auto claims = json::parse(decoded);
-            std::string uid   = claims.value("sub","");
-            std::string email = claims.value("email","");
-            if (!uid.empty()) {
-                g_recordManager.SetUserId(uid);
-                m_open = false;
-                if (m_onSuccess) m_onSuccess(uid, email, false);
+        if (v >= 2) {
+            // v2: encrypted base64 → DPAPI 복호화
+            std::string b64 = token.value("encrypted", "");
+            std::string plain = DecryptDPAPI(b64);
+            if (plain.empty()) {
+                // 복호화 실패 — 다른 user 계정 / OS 재설치 / 비밀번호 재설정 등.
+                // 토큰 silent delete 후 명시적 재로그인 UX.
+                std::error_code ec;
+                std::filesystem::remove(tokenPath, ec);
+                m_statusMsg = "세션이 만료되었습니다. 다시 로그인해주세요.";
+                m_statusIsErr = true;
                 return;
             }
+            auto inner = json::parse(plain);
+            at = inner.value("access_token", "");
+            rt = inner.value("refresh_token", "");
         } else {
-            // 토큰 만료 → 자동으로 브라우저 로그인 화면 표시
-            m_statusMsg = "세션이 만료되었습니다. 다시 로그인해주세요.";
-            m_statusIsErr = true;
-            // 자동으로 로그인 버튼 클릭 효과
-            OpenBrowser();
-            return;
+            // v1: 평문 — 옛 빌드 호환. 읽은 후 v2 로 재기록.
+            at = token.value("access_token", "");
+            rt = token.value("refresh_token", "");
+            needRewriteAsV2 = !at.empty();
         }
-    } catch(...) {}
-    m_statusMsg = "";
+    } catch (...) {
+        // 파일 손상 — silent delete + 재로그인
+        std::error_code ec;
+        std::filesystem::remove(tokenPath, ec);
+        m_statusMsg = "";
+        return;
+    }
+
+    if (at.empty()) {
+        m_statusMsg = "";
+        return;
+    }
+
+    // v1 → v2 자동 마이그레이션
+    if (needRewriteAsV2) {
+        SaveToken(at, rt);
+    }
+
+    // RecordManager 로 만료 검사 + refresh 처리 (내부에서 m_userId 설정).
+    // GetUserIdFromToken 은 새 형식(v2) 도 처리하도록 다음 단계에서 함께 갱신.
+    std::string validToken = g_recordManager.GetUserIdFromToken();
+    if (validToken.empty()) {
+        // 만료 + refresh 실패 — 토큰 정리 후 명시적 재로그인 안내.
+        std::error_code ec;
+        std::filesystem::remove(tokenPath, ec);
+        m_statusMsg = "세션이 만료되었습니다. 다시 로그인해주세요.";
+        m_statusIsErr = true;
+        return;
+    }
+
+    // JWT payload 파싱하여 uid / email 추출.
+    try {
+        auto p1 = validToken.find('.'), p2 = validToken.find('.', p1 + 1);
+        if (p1 == std::string::npos || p2 == std::string::npos) return;
+        std::string payload = validToken.substr(p1 + 1, p2 - p1 - 1);
+        while (payload.size() % 4) payload += '=';
+        for (auto& c : payload) { if (c == '-') c = '+'; else if (c == '_') c = '/'; }
+        static const std::string b64 =
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        std::string decoded;
+        int val = 0, bits = -8;
+        for (char c : payload) {
+            auto pos = b64.find(c);
+            if (pos == std::string::npos) continue;
+            val = (val << 6) | (int)pos;
+            bits += 6;
+            if (bits >= 0) { decoded += (char)((val >> bits) & 0xFF); bits -= 8; }
+        }
+        auto claims = json::parse(decoded);
+        std::string uid   = claims.value("sub", "");
+        std::string email = claims.value("email", "");
+        if (!uid.empty()) {
+            g_recordManager.SetUserId(uid);
+            m_open = false;
+            if (m_onSuccess) m_onSuccess(uid, email, false);
+        }
+    } catch (...) {}
 }
 
 // ── 로컬 HTTP 서버 (2단계 JS 브릿지로 hash fragment 캡처) ───────────────────
@@ -200,11 +306,26 @@ void LoginWindow::OpenBrowser() {
     m_statusIsErr = false;
 }
 
+// [Phase 2-A] 토큰 저장 — v2 (DPAPI 암호화) 형식.
+// 파일 구조:
+//   { "v": 2, "encrypted": "<base64 of DPAPI-encrypted JSON>" }
+// 평문 JSON("{access_token,refresh_token}")을 통째 DPAPI 로 암호화 후 base64.
 void LoginWindow::SaveToken(const std::string& at, const std::string& rt) {
     std::string path = GetTokenFilePath();
     std::filesystem::create_directories(std::filesystem::path(path).parent_path());
-    json token = {{"access_token",at},{"refresh_token",rt}};
-    std::ofstream f(path); f << token.dump(4);
+
+    json inner = {{"access_token", at}, {"refresh_token", rt}};
+    std::string innerStr = inner.dump();
+    std::string b64 = EncryptDPAPI(innerStr);
+    if (b64.empty()) {
+        // DPAPI 실패 — 매우 드문 케이스 (예: SeIncreaseQuotaPrivilege 박탈).
+        // fallback 으로 평문 저장은 보안상 부적절하므로 저장 자체 포기.
+        // 다음 실행 시 토큰 없음으로 인식 → 재로그인.
+        return;
+    }
+    json file = {{"v", 2}, {"encrypted", b64}};
+    std::ofstream f(path);
+    f << file.dump(4);
 }
 
 void LoginWindow::HandleWebLogin(const std::string& at, const std::string& rt) {

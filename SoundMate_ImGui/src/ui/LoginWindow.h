@@ -21,7 +21,18 @@ public:
     void Render();
     bool IsOpen() const { return m_open; }
 
+    // [Phase 2-A] 토큰 파일 경로 — Program Files 통합 정책으로 RecordManager 와 일치.
+    // 이전 경로(%LOCALAPPDATA%\SoundMateEqualizer\record\)에 남은 토큰은
+    // RecordManager 가 시작 시 자동 흡수 (silent migration).
     static std::string GetTokenFilePath();
+
+    // [Phase 2-A] DPAPI 암호화/복호화 헬퍼 (RecordManager 와 공유).
+    // - 키: 현재 Windows 사용자 계정 (user-bound)
+    // - 다른 user 가 토큰 파일을 복사해도 복호화 불가 → Program Files 통합
+    //   하에서도 멀티 user 격리 자연 달성.
+    // 성공 시 base64 문자열 반환, 실패 시 빈 문자열.
+    static std::string EncryptDPAPI(const std::string& plain);
+    static std::string DecryptDPAPI(const std::string& b64Cipher);
 
 private:
     void TryAutoLogin();

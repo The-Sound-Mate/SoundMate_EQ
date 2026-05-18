@@ -1690,7 +1690,10 @@ void MainWindow::CheckForUpdates() {
     if (!curl) return;
 
     std::string response;
-    std::string url = std::string(RecordManager::SUPABASE_URL) + "/rest/v1/app_version?select=version_string,download_url,release_notes,is_mandatory&order=created_at.desc&limit=1";
+    // app_releases: windows 플랫폼의 최신(is_latest=true) 릴리즈 1건 조회
+    std::string url = std::string(RecordManager::SUPABASE_URL)
+        + "/rest/v1/app_releases?select=version,file_path,release_notes"
+          "&platform=eq.windows&is_latest=eq.true&order=created_at.desc&limit=1";
 
     struct curl_slist *headers = NULL;
     headers = curl_slist_append(headers, ("apikey: " + std::string(RecordManager::SUPABASE_KEY)).c_str());
@@ -1707,13 +1710,13 @@ void MainWindow::CheckForUpdates() {
             auto arr = nlohmann::json::parse(response);
             if (arr.is_array() && arr.size() > 0) {
                 auto& latest = arr[0];
-                m_latestVersion = latest.value("version_string", "");
-                
+                m_latestVersion = latest.value("version", "");
+
                 // 단순 버전 비교 로직 (실제 서비스에서는 시맨틱 버저닝 파싱 권장)
                 if (!m_latestVersion.empty() && m_latestVersion != APP_VERSION) {
-                    m_downloadUrl = latest.value("download_url", "");
+                    m_downloadUrl = latest.value("file_path", "");
                     m_releaseNotes = latest.value("release_notes", "");
-                    m_isMandatoryUpdate = latest.value("is_mandatory", false);
+                    m_isMandatoryUpdate = false; // app_releases 스키마에는 강제 업데이트 플래그가 없음
                     m_updateAvailable = true;
                     m_showUpdatePopup = true;
                 }

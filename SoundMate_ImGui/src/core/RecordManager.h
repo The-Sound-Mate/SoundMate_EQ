@@ -75,6 +75,8 @@ private:
   void SaveCache();
   void LoadIntegratedHistory();
   bool ConsolidateLocalRecords(bool forceAll = false);
+  // [Phase 2-A] LocalAppData 잔재 토큰을 Program Files 로 silent migrate (1회성).
+  void MigrateLegacyTokenFromLocalAppData();
   std::string SupabaseRequest(const std::string &method,
                               const std::string &endpoint,
                               const std::string &body = "",

@@ -1,6 +1,7 @@
 // src/core/RecordManager.cpp
 #include "RecordManager.h"
 #include "../utils/StringUtils.h"
+#include "../ui/LoginWindow.h"   // [Phase 2-A] DPAPI 헬퍼 공유
 #include <chrono>
 #include <curl/curl.h>
 #include <filesystem>
@@ -37,8 +38,42 @@ RecordManager::RecordManager() {
   m_tokenFile = m_recordDir + "\\session_token.json";
   m_logFile = m_recordDir + "\\app.log";
   EnsureRecordDir();
+
+  // [Phase 2-A] LocalAppData 잔재 silent migration.
+  // 이전 빌드에서 LoginWindow 가 토큰을 %LOCALAPPDATA%\SoundMateEqualizer\record\
+  // 에 저장했었음. Program Files 통합 정책으로 흡수.
+  MigrateLegacyTokenFromLocalAppData();
+
   LoadCache();
   LoadIntegratedHistory();
+}
+
+// [Phase 2-A] LocalAppData → Program Files 토큰 이전 (1회성).
+// 새 토큰 파일이 이미 있으면 무시 (덮어쓰기 방지).
+// 실패는 비차단 — 사용자는 1회 재로그인으로 복구.
+void RecordManager::MigrateLegacyTokenFromLocalAppData() {
+  namespace fs = std::filesystem;
+  char appData[MAX_PATH];
+  if (!GetEnvironmentVariableA("LOCALAPPDATA", appData, MAX_PATH))
+    return;
+
+  std::string legacyDir = std::string(appData) + "\\SoundMateEqualizer\\record";
+  std::string legacyToken = legacyDir + "\\session_token.json";
+
+  if (!fs::exists(legacyToken))
+    return;
+  if (fs::exists(m_tokenFile))
+    return; // 새 위치에 이미 있음 — 옛것 흡수 안 함
+
+  try {
+    fs::copy_file(legacyToken, m_tokenFile);
+    fs::remove(legacyToken);
+    std::error_code ec;
+    fs::remove(legacyDir, ec);
+    fs::remove(std::string(appData) + "\\SoundMateEqualizer", ec);
+  } catch (...) {
+    // 비차단 — 사용자는 재로그인으로 새 위치에 자동 저장
+  }
 }
 
 void RecordManager::EnsureRecordDir() {
@@ -245,14 +280,16 @@ std::string RecordManager::RefreshAccessToken(const std::string &refreshToken) {
     std::string newAt = resp.value("access_token", "");
     std::string newRt = resp.value("refresh_token", "");
     if (!newAt.empty()) {
-      // Save updated tokens back to file
-      std::ifstream fi(m_tokenFile);
-      auto tokenJson = json::parse(fi);
-      tokenJson["access_token"] = newAt;
-      if (!newRt.empty())
-        tokenJson["refresh_token"] = newRt;
-      std::ofstream fo(m_tokenFile);
-      fo << tokenJson.dump(2);
+      // [Phase 2-A] 새 토큰을 v2 (DPAPI 암호화) 형식으로 저장.
+      // refresh_token 이 없으면 (서버가 안 줬을 때) 기존 것 재사용.
+      std::string rtToSave = newRt.empty() ? refreshToken : newRt;
+      json inner = {{"access_token", newAt}, {"refresh_token", rtToSave}};
+      std::string b64 = LoginWindow::EncryptDPAPI(inner.dump());
+      if (!b64.empty()) {
+        json file = {{"v", 2}, {"encrypted", b64}};
+        std::ofstream fo(m_tokenFile);
+        fo << file.dump(2);
+      }
       return newAt;
     }
   } catch (...) {
@@ -262,14 +299,34 @@ std::string RecordManager::RefreshAccessToken(const std::string &refreshToken) {
 
 // Returns access_token (JWT), auto-refreshes if expired. Sets m_userId from sub
 // claim.
+// [Phase 2-A]
+//   - v2 (DPAPI 암호화) 토큰 형식 처리. 복호화 실패 시 빈 문자열.
+//   - v1 (평문) 발견 시 그대로 읽고 m_pendingV1Migration = true 표시 →
+//     상위 caller(LoginWindow::TryAutoLogin) 가 SaveToken 으로 재기록.
 std::string RecordManager::GetUserIdFromToken() {
   if (!std::filesystem::exists(m_tokenFile))
     return "";
   try {
     std::ifstream f(m_tokenFile);
     auto token = json::parse(f);
-    std::string at = token.value("access_token", "");
-    std::string rt = token.value("refresh_token", "");
+
+    std::string at, rt;
+    int v = token.value("v", 1);
+    if (v >= 2) {
+      // v2: DPAPI 복호화
+      std::string b64 = token.value("encrypted", "");
+      std::string plain = LoginWindow::DecryptDPAPI(b64);
+      if (plain.empty())
+        return ""; // 복호화 실패 — caller 가 토큰 파일 삭제 처리
+      auto inner = json::parse(plain);
+      at = inner.value("access_token", "");
+      rt = inner.value("refresh_token", "");
+    } else {
+      // v1: 평문 — 옛 빌드 호환
+      at = token.value("access_token", "");
+      rt = token.value("refresh_token", "");
+    }
+
     if (at.empty())
       return "";
 
