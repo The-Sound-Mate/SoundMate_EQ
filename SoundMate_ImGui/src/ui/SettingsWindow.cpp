@@ -127,6 +127,9 @@ void SettingsWindow::Render() {
     ImGui::TextColored(Theme::TEXT_GRAY, "기본 출력 장치");
     ImGui::SameLine(rightCol);
     ImGui::SetNextItemWidth(150);
+    if (m_selectedDevice >= (int)m_devices.size() || m_selectedDevice < 0) {
+        m_selectedDevice = 0;
+    }
     std::string devLabel = m_devices.empty() ? "없음" : m_devices[m_selectedDevice];
     if (ImGui::BeginCombo("##setdev", devLabel.c_str())) {
         for (int i=0; i<(int)m_devices.size(); i++) {
@@ -196,9 +199,19 @@ void SettingsWindow::Render() {
     RenderSection("EQ 제어");
 
     ImGui::TextColored(Theme::TEXT_GRAY, "밴드 수 변환");
-    ImGui::SameLine(cw - 280.0f);
     static const char* bandNames[] = {"5-Band","10-Band","15-Band","31-Band"};
     static const int   bandCounts[]= {5,10,15,31};
+
+    // 글꼴 및 DPI 스케일에 맞게 각 버튼 너비를 자동 계산하여 잘림 현상 방지
+    float maxTextW = 0.0f;
+    for (int i = 0; i < 4; i++) {
+        maxTextW = std::max(maxTextW, ImGui::CalcTextSize(bandNames[i]).x);
+    }
+    float btnW = maxTextW + ImGui::GetStyle().FramePadding.x * 2.0f + 8.0f;
+    float totalBtnW = btnW * 4.0f + ImGui::GetStyle().ItemSpacing.x * 3.0f;
+
+    ImGui::SameLine(cw - totalBtnW);
+
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 8.0f);
     for (int i=0; i<4; i++) {
         if (i>0) ImGui::SameLine(0, 4);
@@ -211,7 +224,7 @@ void SettingsWindow::Render() {
             ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(80, 70, 120, 255));
             ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(200, 200, 200, 255));
         }
-        if (ImGui::Button(bandNames[i], {65, 28})) {
+        if (ImGui::Button(bandNames[i], {btnW, 28})) {
             m_bandIdx = i;
             m_settings.defaultBands = bandCounts[i];
             SaveSettings(m_settings);

@@ -25,7 +25,7 @@
 #include <comdef.h>
 #include <mmdeviceapi.h>
 #include <mmreg.h>
-#include <shellapi.h>
+// shellapi.h removed — SHELL32.dll not available in audiodg.exe
 
 #include "helpers/RegistryHelper.h"
 #include "helpers/StringHelper.h"
@@ -178,25 +178,22 @@ bool DeviceAPOInfo::checkAPORegistration(bool fix) {
 
   if (!RegistryHelper::keyExists(
           apoRegistrationKeyPath L"\\" +
-          RegistryHelper::getGuidString(EQUALIZERAPO_PRE_MIX_GUID)) ||
+          RegistryHelper::getGuidString(SOUNDMATE_PRE_MIX_GUID)) ||
       !RegistryHelper::keyExists(
           apoRegistrationKeyPath L"\\" +
-          RegistryHelper::getGuidString(EQUALIZERAPO_POST_MIX_GUID)) ||
+          RegistryHelper::getGuidString(SOUNDMATE_POST_MIX_GUID)) ||
       !RegistryHelper::keyExists(
           clsidKeyPath L"\\" +
-          RegistryHelper::getGuidString(EQUALIZERAPO_PRE_MIX_GUID)) ||
+          RegistryHelper::getGuidString(SOUNDMATE_PRE_MIX_GUID)) ||
       !RegistryHelper::keyExists(
           clsidKeyPath L"\\" +
-          RegistryHelper::getGuidString(EQUALIZERAPO_POST_MIX_GUID))) {
+          RegistryHelper::getGuidString(SOUNDMATE_POST_MIX_GUID))) {
     result = false;
 
     if (fix) {
-      // Explicitly register the DLL in Program Files to ensure correct
-      // permissions
-      wstring dllPath = L"C:\\Program Files\\SoundMate Equalizer\\SoundMate_APO.dll";
-      wstring params = L"/s \"" + dllPath + L"\"";
-      ShellExecuteW(NULL, L"open", L"regsvr32.exe", params.c_str(), NULL,
-                    SW_SHOWNORMAL);
+      // NOTE: Cannot call ShellExecuteW from audiodg.exe (SHELL32.dll blocked).
+      // Registration is handled by the setup EXE, not the APO DLL at runtime.
+      OutputDebugStringW(L"[SoundMate] APO registration check failed - re-run SoundMate_Setup.exe");
     }
   }
 
@@ -288,12 +285,25 @@ bool DeviceAPOInfo::load(const wstring &deviceGuid, wstring defaultDeviceGuid) {
     for (int i = 0; i < allGuidValueNameCount; i++) {
       if (RegistryHelper::valueExists(keyPath + L"\\FxProperties",
                                       allGuidValueNames[i])) {
-        wstring originalApoGuid = RegistryHelper::readValue(
-            keyPath + L"\\FxProperties", allGuidValueNames[i]);
+        wstring originalApoGuid;
+        try {
+            originalApoGuid = RegistryHelper::readValue(
+                keyPath + L"\\FxProperties", allGuidValueNames[i]);
+        } catch (RegistryException&) {
+            try {
+                vector<wstring> multi = RegistryHelper::readMultiValue(
+                    keyPath + L"\\FxProperties", allGuidValueNames[i]);
+                if (!multi.empty()) originalApoGuid = multi[0];
+                else originalApoGuid = APOGUID_NOVALUE;
+            } catch (RegistryException&) {
+                originalApoGuid = APOGUID_NOVALUE;
+            }
+        }
+        
         if (originalApoGuid ==
-                RegistryHelper::getGuidString(EQUALIZERAPO_PRE_MIX_GUID) ||
+                RegistryHelper::getGuidString(SOUNDMATE_PRE_MIX_GUID) ||
             originalApoGuid ==
-                RegistryHelper::getGuidString(EQUALIZERAPO_POST_MIX_GUID))
+                RegistryHelper::getGuidString(SOUNDMATE_POST_MIX_GUID))
           originalApoGuid = APOGUID_NOVALUE;
         originalApoGuids[i] = originalApoGuid;
       } else {
@@ -313,8 +323,8 @@ bool DeviceAPOInfo::load(const wstring &deviceGuid, wstring defaultDeviceGuid) {
 
         GUID apoGuid;
         if (SUCCEEDED(CLSIDFromString(apoGuidString.c_str(), &apoGuid))) {
-          if (apoGuid == EQUALIZERAPO_PRE_MIX_GUID ||
-              apoGuid == EQUALIZERAPO_POST_MIX_GUID) {
+          if (apoGuid == SOUNDMATE_PRE_MIX_GUID ||
+              apoGuid == SOUNDMATE_POST_MIX_GUID) {
             foundAt[i] = true;
             found = true;
           }
@@ -333,7 +343,7 @@ bool DeviceAPOInfo::load(const wstring &deviceGuid, wstring defaultDeviceGuid) {
           if (version != installVersion)
             throw RegistryException(
                 L"Unsupported version of APO installation detected! Please "
-                L"uninstall newer Equalizer APO before using this version of "
+                L"uninstall the newer SoundMate APO before using this version of "
                 L"Device Selector.");
         } else {
           version = L"1";
@@ -547,7 +557,7 @@ void DeviceAPOInfo::install() {
     }
 
     RegistryHelper::writeValue(keyPath + L"\\FxProperties", fxTitleValueName,
-                               L"Equalizer APO");
+                               L"SoundMate APO");
 
     for (int i = 0; i < allGuidValueNameCount; i++) {
       RegistryHelper::writeValue(childApoPath L"\\" + deviceGuid,
@@ -607,11 +617,11 @@ void DeviceAPOInfo::install() {
     if (selectedInstallState.installPreMix)
       RegistryHelper::writeValue(
           keyPath + L"\\FxProperties", lfxGuidValueName,
-          RegistryHelper::getGuidString(EQUALIZERAPO_PRE_MIX_GUID));
+          RegistryHelper::getGuidString(SOUNDMATE_PRE_MIX_GUID));
     if (selectedInstallState.installPostMix && !input)
       RegistryHelper::writeValue(
           keyPath + L"\\FxProperties", gfxGuidValueName,
-          RegistryHelper::getGuidString(EQUALIZERAPO_POST_MIX_GUID));
+          RegistryHelper::getGuidString(SOUNDMATE_POST_MIX_GUID));
     if (RegistryHelper::valueExists(keyPath + L"\\FxProperties",
                                     sfxGuidValueName))
       RegistryHelper::deleteValue(keyPath + L"\\FxProperties",
@@ -636,7 +646,7 @@ void DeviceAPOInfo::install() {
     if (selectedInstallState.installPreMix) {
       RegistryHelper::writeValue(
           keyPath + L"\\FxProperties", sfxGuidValueName,
-          RegistryHelper::getGuidString(EQUALIZERAPO_PRE_MIX_GUID));
+          RegistryHelper::getGuidString(SOUNDMATE_PRE_MIX_GUID));
       if (!RegistryHelper::valueExists(keyPath + L"\\FxProperties",
                                        sfxProcessingModesValueName))
         RegistryHelper::writeMultiValue(keyPath + L"\\FxProperties",
@@ -646,7 +656,7 @@ void DeviceAPOInfo::install() {
     if (selectedInstallState.installPostMix && !input) {
       RegistryHelper::writeValue(
           keyPath + L"\\FxProperties", mfxGuidValueName,
-          RegistryHelper::getGuidString(EQUALIZERAPO_POST_MIX_GUID));
+          RegistryHelper::getGuidString(SOUNDMATE_POST_MIX_GUID));
       if (!RegistryHelper::valueExists(keyPath + L"\\FxProperties",
                                        mfxProcessingModesValueName))
         RegistryHelper::writeMultiValue(keyPath + L"\\FxProperties",
@@ -666,7 +676,7 @@ void DeviceAPOInfo::install() {
     if (selectedInstallState.installPreMix) {
       RegistryHelper::writeValue(
           keyPath + L"\\FxProperties", sfxGuidValueName,
-          RegistryHelper::getGuidString(EQUALIZERAPO_PRE_MIX_GUID));
+          RegistryHelper::getGuidString(SOUNDMATE_PRE_MIX_GUID));
       if (!RegistryHelper::valueExists(keyPath + L"\\FxProperties",
                                        sfxProcessingModesValueName))
         RegistryHelper::writeMultiValue(keyPath + L"\\FxProperties",
@@ -677,7 +687,7 @@ void DeviceAPOInfo::install() {
     if (selectedInstallState.installPostMix && !input) {
       RegistryHelper::writeValue(
           keyPath + L"\\FxProperties", efxGuidValueName,
-          RegistryHelper::getGuidString(EQUALIZERAPO_POST_MIX_GUID));
+          RegistryHelper::getGuidString(SOUNDMATE_POST_MIX_GUID));
       if (!RegistryHelper::valueExists(keyPath + L"\\FxProperties",
                                        efxProcessingModesValueName))
         RegistryHelper::writeMultiValue(keyPath + L"\\FxProperties",

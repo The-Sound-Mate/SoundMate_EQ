@@ -38,6 +38,13 @@ Deno.serve(async (req: Request) => {
     );
 
     const data = await response.json();
+
+    if (!response.ok) {
+      return new Response(JSON.stringify({ error: data.error?.message || 'AI Provider Error' }), {
+        status: response.status,
+        headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
+      });
+    }
     
     // Simple parsing (Gemini result extraction)
     const textResult = data.candidates?.[0]?.content?.parts?.[0]?.text || "[]";

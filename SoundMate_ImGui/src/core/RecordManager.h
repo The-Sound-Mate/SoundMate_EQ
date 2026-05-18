@@ -44,6 +44,7 @@ public:
   void SaveInteraction(const EQEntry &entry);
   bool ClearManualEQ(const std::string &title, const std::string &artist);
   bool ClearPromptEQ(const std::string &title, const std::string &artist);
+  void ClearAllEQCache(); // 로컬 EQ 캐시 전체 초기화
 
   // ── 사용자 취향 ────────────────────────────────────────────────
   std::string GetUserTendency();
@@ -87,12 +88,12 @@ private:
   std::string m_sessionFile;
   std::string m_tokenFile;
   std::string m_logFile;
-
+public:
   // Supabase 설정
   static const char *SUPABASE_URL;
   static const char *SUPABASE_KEY;
 
-  // 메모리 캐시
+private:
   nlohmann::json m_cache; // song_cache.json 전체
   // history_map: key="title_artist" -> {source -> record}
   std::map<std::string, std::map<std::string, nlohmann::json>> m_historyMap;

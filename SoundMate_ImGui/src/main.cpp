@@ -48,6 +48,7 @@ static std::string LoadEnvKey(const std::string& key) {
     if (pos != std::string::npos) dir = dir.substr(0, pos+1);
 
     std::ifstream f(dir + ".env");
+    if (!f.is_open()) f.open("C:\\SoundMate_EQ\\AIeq\\AI_eq\\.env");
     if (!f.is_open()) f.open("C:\\SoundMate_EQ\\AI_eq\\AI_eq\\.env");
     if (!f.is_open()) f.open(".env");
     std::string line;

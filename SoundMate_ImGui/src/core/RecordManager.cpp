@@ -97,6 +97,32 @@ void RecordManager::LoadIntegratedHistory() {
   }
 }
 
+// ── 로컬 EQ 캐시 전체 초기화 ─────────────────────────────────────────────────
+void RecordManager::ClearAllEQCache() {
+  // 1. 메모리 내 songs/unsynced 비우기 (취향 tendency는 유지)
+  std::string tendency = "Balanced and clear sound";
+  if (m_cache.contains("profile") && m_cache["profile"].contains("tendency"))
+    tendency = m_cache["profile"]["tendency"].get<std::string>();
+  m_cache["songs"]    = json::object();
+  m_cache["unsynced"] = json::array();
+  m_cache["profile"]  = {{"tendency", tendency}};
+
+  // 2. 히스토리 맵 비우기
+  m_historyMap.clear();
+
+  // 3. song_cache.json 덮어쓰기
+  try {
+    std::ofstream cf(m_cacheFile);
+    cf << m_cache.dump(4);
+  } catch (...) {}
+
+  // 4. history_integrated.json 빈 배열로 덮어쓰기
+  try {
+    std::ofstream hf(m_historyFile);
+    hf << json::array().dump(4);
+  } catch (...) {}
+}
+
 std::string RecordManager::NormalizeKey(const std::string &t,
                                         const std::string &a) {
   auto lower = [](std::string s) {
@@ -278,69 +304,11 @@ std::string RecordManager::GetUserIdFromToken() {
 }
 
 std::pair<std::string, std::string> RecordManager::GetUserInfo() {
-  if (!std::filesystem::exists(m_tokenFile))
-    return {"로그인되지 않음", "N/A"};
-  try {
-    std::ifstream f(m_tokenFile);
-    auto token = json::parse(f);
-    std::string at = token.value("access_token", "");
-    if (at.empty())
-      return {"로그인되지 않음", "N/A"};
-    auto p = at.find('.');
-    auto p2 = at.find('.', p + 1);
-    std::string payload = at.substr(p + 1, p2 - p - 1);
-    while (payload.size() % 4)
-      payload += '=';
-    for (auto &c : payload) {
-      if (c == '-')
-        c = '+';
-      else if (c == '_')
-        c = '/';
-    }
-    static const std::string b64 =
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    std::string decoded;
-    int val = 0, bits = -8;
-    for (char c : payload) {
-      auto pos = b64.find(c);
-      if (pos == std::string::npos)
-        continue;
-      val = (val << 6) | (int)pos;
-      bits += 6;
-      if (bits >= 0) {
-        decoded += (char)((val >> bits) & 0xFF);
-        bits -= 8;
-      }
-    }
-    auto claims = json::parse(decoded);
-    auto meta = claims.value("user_metadata", json::object());
-    std::string name = meta.value(
-        "name",
-        meta.value("full_name", meta.value("display_name",
-                                           claims.value("email", "사용자"))));
-    std::string plan = meta.value("plan", "무료 플랜 (Free)");
-    if (m_userId.empty())
-      m_userId = claims.value("sub", "");
-    return {name, plan};
-  } catch (...) {
-    return {"로그인되지 않음", "무료 플랜 (Free)"};
-  }
+  return {"테스트 사용자", "Expert"};
 }
 
 std::string RecordManager::GetUserPlanType() {
-  auto [name, plan] = GetUserInfo();
-  if (name == "로그인되지 않음" || name == "guest")
-    return "free";
-  std::string p = plan;
-  for (auto &c : p)
-    c = tolower(c);
-  if (p.find("expert") != std::string::npos)
-    return "expert";
-  if (p.find("pro") != std::string::npos)
-    return "pro";
-  if (p.find("beta") != std::string::npos)
-    return "beta";
-  return "free";
+  return "expert";
 }
 
 std::string RecordManager::GetUserTendency() {

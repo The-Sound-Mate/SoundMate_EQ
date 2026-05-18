@@ -5,6 +5,7 @@
 #include "../core/EQController.h"
 #include "../core/AIClient.h"
 #include "../core/MediaMonitor.h"
+#include "../core/EngineHealthMonitor.h"
 #include <string>
 #include <vector>
 #include <map>
@@ -44,6 +45,12 @@ private:
     void RenderEQPanel();          // 우측 EQ 슬라이더 패널
     void RenderBottomBar();        // 하단 (프롬프트 입력, 초기화 버튼)
     void RenderStatusBar();        // 상태 메시지
+    void RenderPresetPopups();     // 프리셋 저장 / 삭제 팝업
+
+    // ── 엔진 헬스 (G1_1 / G1_2 / G1_3) — FeatureFlags.h 로 ON/OFF ─
+    void RenderHealthDot();          // G1_1: 타이틀바 컬러 점 + 호버 툴팁
+    void RenderDiagnosticPanel();    // G1_2: 점 클릭 시 모달 (Phase 1 stub)
+    bool IsPhaseWarningTriggered(int bandIdx) const;  // G1_3: 위상 왜곡 임계
 
     // ── EQ 슬라이더 관련 ─────────────────────────────────────────
     void SetupEQBands(const std::vector<int>& bands);
@@ -59,8 +66,10 @@ private:
                                const std::string& artist,
                                const std::string& genre);
 
-    // ── 오디오 기기 목록 ──────────────────────────────────────────
     void FetchAudioDevices();      // Python의 fetch_audio_devices()
+    std::string GetSelectedDeviceGuid() const;
+    std::string GetSelectedDeviceDisplayName() const;
+    mutable std::mutex m_devicesMutex;
 
     // ── 헬퍼 ─────────────────────────────────────────────────────
     ImVec4 GetBandColor(int index, int total);
@@ -111,9 +120,37 @@ private:
     std::array<float, VIS_BARS> m_visBars = {};
     float m_visTimer = 0.0f;
 
-    // 프리셋
-    int m_presetIndex = 0;
-    static const char* PRESET_NAMES[];
+    // ── 사용자 프리셋 ─────────────────────────────────────────
+    struct UserPreset {
+        std::string name;           // 프리셋 이름
+        std::vector<float> gains31; // 항상 31밴드로 보관 (다운샘플로 표시)
+    };
+
+    std::vector<UserPreset> m_userPresets;       // 로드된 프리셋 목록
+    int  m_selectedPresetIdx  = -1;              // -1 = 자동(AI) 모드
+    bool m_presetModeActive   = false;           // 프리셋 고정 모드 활성
+    char m_newPresetName[64]  = {};              // 저장 팝업 이름 입력 버퍼
+    bool m_savePresetPopupOpen = false;          // 저장 팝업 열림 상태
+    bool m_deletePresetConfirm = false;          // 삭제 확인 팝업
+
+    int  GetPresetLimit();              // 플랜별 최대 개수
+    void LoadUserPresets();             // JSON에서 읽기
+    void SaveUserPresets();             // JSON에 쓰기
+    void ApplyPreset(int idx);          // 프리셋 EQ 적용
+    std::vector<float> DownsampleTo(const std::vector<float>& g31, int targetCount); // 31→N
+    std::vector<float> UpsampleTo31(const std::vector<float>& gains); // N→31
+
+    // ── 자동 업데이트 ─────────────────────────────────────────
+    bool m_updateAvailable = false;
+    bool m_showUpdatePopup = false;
+    std::string m_latestVersion = "";
+    std::string m_downloadUrl = "";
+    std::string m_releaseNotes = "";
+    bool m_isMandatoryUpdate = false;
+    
+    void CheckForUpdates();
+    void DownloadAndExecuteUpdate();
+    void RenderUpdatePopup();
 
     // 기기 목록
     std::vector<DeviceInfo> m_devices;
@@ -149,6 +186,12 @@ private:
     std::atomic<bool>  m_running{ true };
 
     float m_deltaTime = 0.0f;  // ImGui 프레임 시간 (초)
+
+    // ── 엔진 헬스 모니터 (G1_1/G1_2) ────────────────────────────
+    SoundMate::EngineHealthMonitor m_health;
+    SoundMate::EngineHealthMonitor::Report m_healthReport;
+    float m_healthCheckTimer = 999.f;  // 첫 프레임에 즉시 검사하도록 큰 값
+    bool  m_diagnosticOpen   = false;  // G1_2 모달 열림 상태
 
     SettingsWindow m_settingsWin;
     SurveyWindow   m_surveyWin;

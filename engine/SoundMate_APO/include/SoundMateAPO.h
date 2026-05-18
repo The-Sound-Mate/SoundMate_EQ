@@ -1,22 +1,3 @@
-/*
-    This file is part of EqualizerAPO, a system-wide equalizer.
-    Copyright (C) 2012  Jonas Thedering
-
-    This program is free software; you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation; either version 2 of the License, or
-    (at your option) any later version.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License along
-    with this program; if not, write to the Free Software Foundation, Inc.,
-    51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
-*/
-
 #pragma once
 
 #include <audioenginebaseapo.h>
@@ -27,38 +8,72 @@
 
 #include "FilterEngine.h"
 
-class SoundMateAPO : public CBaseAudioProcessingObject, public IAudioSystemEffects
+// Non-Delegating Unknown — matches Equalizer APO exactly.
+class INonDelegatingUnknown
+{
+	virtual HRESULT __stdcall NonDelegatingQueryInterface(const IID& iid, void** ppv) = 0;
+	virtual ULONG __stdcall NonDelegatingAddRef() = 0;
+	virtual ULONG __stdcall NonDelegatingRelease() = 0;
+};
+
+// EXACTLY 3 base classes — matches Equalizer APO line-by-line.
+//
+// Why minimal?  Adding "modern" interfaces (IAudioSystemEffects2/3,
+// IAudioProcessingObjectNotifications, IApoAcousticEchoCancellation, etc.)
+// makes the audio engine flag us as a "Modern AEC APO" and probe for
+// {69E1F79F} (an undocumented, SDK-undefined Win11 26200 interface) that
+// we cannot implement. Equalizer APO works precisely BECAUSE it only
+// implements IAudioSystemEffects (marker, no methods) — the engine then
+// treats it as a basic APO and never asks for {69E1F79F}.
+class SoundMateAPO : public CBaseAudioProcessingObject,
+                     public IAudioSystemEffects,
+                     public INonDelegatingUnknown
 {
 public:
-	SoundMateAPO(IUnknown* pUnkOuter, const CLSID& clsid);
+	SoundMateAPO(IUnknown* pUnkOuter);
 	virtual ~SoundMateAPO();
 
-	// IUnknown
-	STDMETHOD(QueryInterface)(REFIID riid, void** ppv);
-	STDMETHOD_(ULONG, AddRef)();
-	STDMETHOD_(ULONG, Release)();
+	// IUnknown (delegating)
+	virtual HRESULT __stdcall QueryInterface(const IID& iid, void** ppv);
+	virtual ULONG __stdcall AddRef();
+	virtual ULONG __stdcall Release();
 
 	// IAudioProcessingObject
-	STDMETHOD(Initialize)(UINT32 cbDataSize, BYTE* pbyData);
-    STDMETHOD(IsInputFormatSupported)(IAudioMediaType* pOutputFormat, IAudioMediaType* pRequestedInputFormat, IAudioMediaType** ppSupportedInputFormat);
+	virtual HRESULT __stdcall GetLatency(HNSTIME* pTime);
+	virtual HRESULT __stdcall Initialize(UINT32 cbDataSize, BYTE* pbyData);
+	virtual HRESULT __stdcall IsInputFormatSupported(IAudioMediaType* pOutputFormat,
+		IAudioMediaType* pRequestedInputFormat, IAudioMediaType** ppSupportedInputFormat);
 
 	// IAudioProcessingObjectConfiguration
-	STDMETHOD(LockForProcess)(UINT32 u32NumInputConnections, APO_CONNECTION_DESCRIPTOR** ppInputConnections, UINT32 u32NumOutputConnections, APO_CONNECTION_DESCRIPTOR** ppOutputConnections);
-	STDMETHOD(UnlockForProcess)(void);
+	virtual HRESULT __stdcall LockForProcess(UINT32 u32NumInputConnections,
+		APO_CONNECTION_DESCRIPTOR** ppInputConnections, UINT32 u32NumOutputConnections,
+		APO_CONNECTION_DESCRIPTOR** ppOutputConnections);
+	virtual HRESULT __stdcall UnlockForProcess(void);
 
 	// IAudioProcessingObjectRT
-	STDMETHOD_(void, APOProcess)(UINT32 u32NumInputConnections, APO_CONNECTION_PROPERTY** ppInputConnections, UINT32 u32NumOutputConnections, APO_CONNECTION_PROPERTY** ppOutputConnections);
+	virtual void __stdcall APOProcess(UINT32 u32NumInputConnections,
+		APO_CONNECTION_PROPERTY** ppInputConnections, UINT32 u32NumOutputConnections,
+		APO_CONNECTION_PROPERTY** ppOutputConnections);
 
-    // IAudioSystemEffects
-    STDMETHOD(GetLockInterval)(HNSTIME* phnsLockInterval);
+	// INonDelegatingUnknown
+	virtual HRESULT __stdcall NonDelegatingQueryInterface(const IID& iid, void** ppv);
+	virtual ULONG __stdcall NonDelegatingAddRef();
+	virtual ULONG __stdcall NonDelegatingRelease();
 
 	static long instCount;
 	static const CRegAPOProperties<1> regPostMixProperties;
 	static const CRegAPOProperties<1> regPreMixProperties;
 
 private:
+	void resetChild();
+
 	long refCount;
 	IUnknown* pUnkOuter;
-	FilterEngine* filterEngine;
-    std::wstring deviceID;
+	FilterEngine engine;
+	bool allowSilentBufferModification;
+
+	// Child APO chain
+	IAudioProcessingObject* childAPO;
+	IAudioProcessingObjectRT* childRT;
+	IAudioProcessingObjectConfiguration* childCfg;
 };

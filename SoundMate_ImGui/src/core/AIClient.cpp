@@ -58,6 +58,9 @@ std::string AIClient::CallProxyAPI(
         {"userPref", userPref},
         {"systemPref", systemPref}
     };
+    if (!m_apiKey.empty()) {
+        body["apiKey"] = m_apiKey;
+    }
     std::string bodyStr = body.dump();
 
     CURL* curl = curl_easy_init();
@@ -97,8 +100,20 @@ std::string AIClient::CallProxyAPI(
 std::vector<float> AIClient::ParseGainsFromResponse(const std::string& jsonText) {
     try {
         auto gains = json::parse(jsonText).get<std::vector<float>>();
-        for (auto& g : gains) g = std::round(g * 10.0f) / 10.0f; // 0.1dB 반올림
-        return gains;
+        if (gains.size() != 31) {
+            std::vector<float> resized(31, 0.0f);
+            if (!gains.empty()) {
+                int src = (int)gains.size();
+                for (int i = 0; i < 31; i++) {
+                    float t = (float)i / 30.0f * (src - 1);
+                    int lo = (int)t;
+                    int hi = std::min(lo + 1, src - 1);
+                    float frac = t - lo;
+                    resized[i] = gains[lo] * (1.0f - frac) + gains[hi] * frac;
+                }
+            }
+            gains = resized;
+        }
         for (auto& g : gains) g = std::round(g * 10.0f) / 10.0f; // 0.1dB 반올림
         return gains;
     }
@@ -226,10 +241,14 @@ void AIClient::CubicSpline::Build(const std::vector<double>& xs, const std::vect
 }
 
 double AIClient::CubicSpline::Eval(double xVal) const {
+    if (x.empty()) return 0.0;
     if (xVal <= x.front()) return a.front();
     if (xVal >= x.back())  return a.back();
     auto it = std::lower_bound(x.begin(), x.end(), xVal);
     int idx = std::max(0, (int)(it - x.begin()) - 1);
+    int n = (int)x.size();
+    if (idx >= n - 1) idx = n - 2;
+    if (idx < 0) return 0.0;
     double dx = xVal - x[idx];
     return a[idx] + b[idx]*dx + c[idx]*dx*dx + d[idx]*dx*dx*dx;
 }

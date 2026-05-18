@@ -60,7 +60,7 @@ std::string EQController::GetRealConfigDir() {
 }
 
 std::string EQController::GetOfficialConfigDir() {
-  // 정식 Equalizer APO 설치 경로 확인 (항상 고정)
+  // SoundMate Equalizer 정식 설치 경로 (Controller 가 감시하는 위치와 동일)
   for (auto &path : {"C:\\Program Files\\SoundMate Equalizer\\config"}) {
     if (std::filesystem::exists(path))
       return path;
@@ -74,9 +74,9 @@ EQController::EQController() {}
 bool EQController::Initialize() {
   std::string configDir = GetRealConfigDir();
 
-  // 만약 레지스트리 경로가 유효하지 않을 때만 폴백
+  // 레지스트리 경로가 유효하지 않을 때만 정식 설치 경로로 폴백
   if (configDir.empty() || !std::filesystem::exists(configDir)) {
-    std::string appPath = "C:\\SoundMate_App\\engine\\EqualizerAPO\\config";
+    std::string appPath = "C:\\Program Files\\SoundMate Equalizer\\config";
     if (std::filesystem::exists(appPath)) {
       configDir = appPath;
     }
