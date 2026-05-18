@@ -12,6 +12,7 @@
 #include <shellapi.h>
 #include <sstream>
 #include <thread>
+#include <tlhelp32.h>   // CreateToolhelp32Snapshot — Controller 프로세스 감지
 #include <winreg.h>
 
 #pragma comment(lib, "ole32.lib")
@@ -239,10 +240,38 @@ std::string MainWindow::GetSelectedDeviceDisplayName() const {
   return "-- 선택 --";
 }
 
+// ── Controller 프로세스 존재 확인 (GUI-only, Process Enumeration) ───────────
+// CreateToolhelp32Snapshot 으로 시스템 프로세스 목록을 훑어 SoundMate_Controller.exe
+// 가 살아있는지 확인. 5초마다 호출되므로 부담 무시 가능 (수 ms).
+bool MainWindow::IsControllerRunning() const {
+  HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+  if (snap == INVALID_HANDLE_VALUE) return true;   // 검사 불가 시 false alarm 피함
+  PROCESSENTRY32W pe{};
+  pe.dwSize = sizeof(pe);
+  bool found = false;
+  if (Process32FirstW(snap, &pe)) {
+    do {
+      if (_wcsicmp(pe.szExeFile, L"SoundMate_Controller.exe") == 0 ||
+          _wcsicmp(pe.szExeFile, L"MainController.exe") == 0) {
+        found = true;
+        break;
+      }
+    } while (Process32NextW(snap, &pe));
+  }
+  CloseHandle(snap);
+  return found;
+}
+
 // ── EQ 적용 ──────────────────────────────────────────────────────────────────
 void MainWindow::ApplyEQNoSave() {
-  if (!m_eqCtrl || !m_isEqEnabled)
+  if (!m_eqCtrl)
     return;
+  // 토글 OFF 일 때는 단순히 호출 생략이 아니라 명시적 Bypass 작성.
+  // (호출 생략하면 config.txt 에 마지막 EQ 가 그대로 남아 APO 가 계속 적용)
+  if (!m_isEqEnabled) {
+    m_eqCtrl->ApplyBypass();
+    return;
+  }
   std::string dev = GetSelectedDeviceGuid();
   m_eqCtrl->ApplyEQ(m_eqGains, m_currentBands, dev);
 }
@@ -285,12 +314,12 @@ void MainWindow::TriggerAIGeneration() {
   if (m_aiThread.joinable())
     m_aiThread.detach();
   m_aiThread = std::thread([this, prompt]() {
-    if (!m_ai || !m_ai->HasApiKey()) {
-      SetStatus("AI Setup Error: Proxy not configured", Theme::COLOR_RED);
+    if (!m_ai) {
+      SetStatus("AI Setup Error: client not initialized", Theme::COLOR_RED);
       m_aiProcessing = false;
       return;
     }
-    
+
     SetStatus("AI: Sending request to Proxy...", Theme::TEXT_WHITE);
     auto result =
         m_ai->GenerateAllBandsEQ(m_currentTitle, m_currentArtist,
@@ -379,6 +408,20 @@ void MainWindow::ChangeBands(int bandIdx) {
 void MainWindow::Render() {
   m_deltaTime = ImGui::GetIO().DeltaTime;
 
+  // ── Controller 프로세스 감지 (5초마다) ──
+  // UAC 거절 등으로 Controller 가 안 떠 있으면 config.txt 변경이 SHM 까지 못
+  // 가고 EQ 가 무시되므로, 사용자에게 빨간 Status 로 즉시 알린다.
+  m_controllerCheckTimer += m_deltaTime;
+  if (m_controllerCheckTimer >= kControllerCheckInterval) {
+    bool nowRunning = IsControllerRunning();
+    if (m_controllerRunning && !nowRunning) {
+      SetStatus("⚠ Controller Not Running — EQ 변경이 적용되지 않습니다 (관리자 권한 필요)",
+                Theme::COLOR_RED);
+    }
+    m_controllerRunning = nowRunning;
+    m_controllerCheckTimer = 0.0f;
+  }
+
   // ── 엔진 헬스 체크 (3초마다, G1_1/G1_2 가 켜져 있을 때만) ──
   if constexpr (SoundMate::Features::kG1_1_HealthIndicator ||
                 SoundMate::Features::kG1_2_DiagnosticPanel) {
@@ -390,6 +433,9 @@ void MainWindow::Render() {
   }
 
   // ── 스무스 트랜지션 업데이트 ──
+  // 트랜지션 진행 중에는 m_eqGains 가 매 프레임 보간되므로 슬라이더는 부드럽게
+  // 움직인다. 동시에 200ms 마다 ApplyEQNoSave 를 호출해 실제 오디오에도 같은
+  // 보간을 적용한다 (시각/청각 동기화). 완료 시점에 한 번 더 호출해 최종 값 보장.
   if (m_transitionProgress < 1.0f) {
     m_transitionProgress += m_deltaTime / m_transitionDuration;
     if (m_transitionProgress > 1.0f)
@@ -401,8 +447,15 @@ void MainWindow::Render() {
       m_eqGains[i] = m_transitionStart[i] +
                      (m_transitionTarget[i] - m_transitionStart[i]) * t;
     }
-    if (m_transitionProgress >= 1.0f)
+    m_transitionApplyTimer += m_deltaTime;
+    if (m_transitionApplyTimer >= kTransitionApplyInterval) {
       ApplyEQNoSave();
+      m_transitionApplyTimer = 0.0f;
+    }
+    if (m_transitionProgress >= 1.0f) {
+      ApplyEQNoSave();             // 최종 값 보장
+      m_transitionApplyTimer = 0.0f;
+    }
   }
 
   // ── 비주얼라이저 업데이트 ──
@@ -509,7 +562,7 @@ void MainWindow::Render() {
             }
             SetStatus("Local Cache Applied.", Theme::COLOR_GREEN);
           }
-        } else if (m_ai && m_ai->HasApiKey() && !m_aiProcessing) {
+        } else if (m_ai && !m_aiProcessing) {
           TriggerAIGeneration();
         }
       }).detach();

@@ -27,7 +27,7 @@ Deno.serve(async (req: Request) => {
     Return ONLY a JSON array of 31 float numbers (gain in dB, -12 to 12). No text.`;
 
     const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -45,11 +45,11 @@ Deno.serve(async (req: Request) => {
         headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
       });
     }
-    
+
     // Simple parsing (Gemini result extraction)
     const textResult = data.candidates?.[0]?.content?.parts?.[0]?.text || "[]";
     const cleanedText = textResult.replace(/```json|```/g, "").trim();
-    
+
     return new Response(cleanedText, {
       headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
     });

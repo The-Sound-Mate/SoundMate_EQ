@@ -38,40 +38,6 @@ void CreateRenderTarget();
 void CleanupRenderTarget();
 LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
-// ─── .env에서 API 키 로드 (Python의 load_dotenv 대응) ──────────────────────
-static std::string LoadEnvKey(const std::string& key) {
-    // 실행 파일과 같은 디렉토리에서 .env 찾기
-    char exePath[MAX_PATH];
-    GetModuleFileNameA(nullptr, exePath, MAX_PATH);
-    std::string dir = exePath;
-    auto pos = dir.find_last_of("\\/");
-    if (pos != std::string::npos) dir = dir.substr(0, pos+1);
-
-    std::ifstream f(dir + ".env");
-    if (!f.is_open()) f.open("C:\\SoundMate_EQ\\AIeq\\AI_eq\\.env");
-    if (!f.is_open()) f.open("C:\\SoundMate_EQ\\AI_eq\\AI_eq\\.env");
-    if (!f.is_open()) f.open(".env");
-    std::string line;
-    while (std::getline(f, line)) {
-        auto eq = line.find('=');
-        if (eq == std::string::npos) continue;
-        std::string k = line.substr(0, eq);
-        std::string v = line.substr(eq+1);
-        
-        // Trim whitespace and \r from start/end
-        auto start = v.find_first_not_of(" \t\r\n\"");
-        auto end = v.find_last_not_of(" \t\r\n\"");
-        if (start != std::string::npos && end != std::string::npos) {
-            v = v.substr(start, end - start + 1);
-        } else {
-            v = "";
-        }
-        
-        if (k == key) return v;
-    }
-    return "";
-}
-
 // ─── WinMain ────────────────────────────────────────────────────────────────
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     // DPI 인지 활성화 (흐릿함 방지)
@@ -137,8 +103,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     eqCtrl.Initialize();
 
     AIClient aiClient;
-    std::string apiKey = LoadEnvKey("GENAI_API_KEY");
-    if (!apiKey.empty()) aiClient.SetApiKey(apiKey);
+    // API 키는 클라이언트에 두지 않는다. Supabase Edge Function이 자체 키로 처리.
 
     MediaMonitor monitor;
 

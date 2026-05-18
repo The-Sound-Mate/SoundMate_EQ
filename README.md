@@ -438,6 +438,9 @@ notepad C:\Users\Public\SoundMateAPO.log
 | audiodg 가 계속 재시작됨 | `reset_registry.ps1` 실행 후 재설치 |
 | 셋업 후 음량이 너무 작음 | 정규화기 OFF가 의도된 정책. 그래도 부족하면 마스터 게인 조정 또는 매크로 ON 검토 |
 | EQ +15 dB 정도에서 거친 소리 | hard ceiling 작동 중 — 슬라이더 내리거나 마스터 게인 -3 dB |
+| Status에 빨간 "⚠ Controller Not Running" | UAC 거절 등으로 SoundMate_Controller가 안 떠있음. 관리자 권한으로 `SoundMate_Controller.exe` 수동 실행 또는 GUI 재시작 후 UAC 허용 |
+| EQ 토글 OFF했는데 효과 남아있음 | 본 PR 이전 버그. 현재는 토글 OFF 시 `config.txt`에서 `Filter:` 라인이 자동으로 비워져 진정한 패스스루로 전환 |
+| 처음 듣는 곡인데 EQ가 자동 안 걸림 | 본 PR로 복구됨. 그래도 안 되면 Status 표시 확인 — "AI Analyzing..." → "AI Analysis Complete!"가 떠야 정상 |
 | Windows 업데이트 후 안 됨 | 새 Windows 버전이 모던 인터페이스 IID 새로 요구할 수 있음 — [ENGINE_README.md §3.1](ENGINE_README.md) 참조 |
 
 ### 깨끗하게 다시 시작
@@ -466,8 +469,12 @@ SoundMate_EQ.exe
 
 ### Q. SoundMate를 끄려면?
 **A.** GUI 종료만으로는 안 끄집니다. APO는 audiodg에 로드된 상태로 남습니다.
-완전 끄기: `SoundMate_reset.exe` 실행 → Realtek 원본 복원.
-임시 끄기: GUI에서 모든 슬라이더를 0 dB로 → EQ chain이 자동 우회 (현재 정책상 정규화기/리미터도 OFF라 사실상 무동작).
+- **완전 끄기**: `SoundMate_reset.exe` 실행 → Realtek 원본 복원
+- **임시 끄기**: GUI의 **EQ 토글을 OFF** — `config.txt`에서 `Filter:` 라인이 비워져 진정한 패스스루 (Controller의 `ResetBands()`가 SHM `bandCount=0`으로 초기화 → APO `eqActive=false` → EQ chain 통째 우회)
+- 모든 슬라이더를 0 dB로 두는 것도 동일 효과지만, 명시적 토글이 더 깔끔
+
+### Q. `.env` 파일이 필요한가요?
+**A.** **아니오, 필요 없습니다.** Gemini API 키는 Supabase Edge Function이 서버측 Secret으로 보관하며, 클라이언트는 Proxy URL만 호출합니다. GUI는 API 키 자체를 모릅니다 (보안상 정공법).
 
 ### Q. 사용 중인 PC에서 다른 EQ(EqualizerAPO 등)와 같이 써도 되나?
 **A.** 가능하지만 두 EQ가 직렬로 적용됩니다. 슬롯 충돌이 날 수 있으니 가급적 한 번에 하나만 권장.

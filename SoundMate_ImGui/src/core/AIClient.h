@@ -20,8 +20,8 @@ class AIClient {
 public:
     AIClient();
 
-    void SetApiKey(const std::string& key) { m_apiKey = key; }
-    bool HasApiKey() const { return !m_apiKey.empty(); }
+    // API 키는 클라이언트에서 들고 있지 않는다. Supabase Edge Function이
+    // 서버측 Secret으로 Gemini API를 호출하므로 GUI는 Proxy URL만 호출.
 
     // Python generate_all_bands_eq() 대응
     // 한 번 API를 호출해 31밴드를 받고, 나머지는 보간으로 계산
@@ -71,8 +71,6 @@ private:
         void Build(const std::vector<double>& xs, const std::vector<double>& ys);
         double Eval(double xVal) const;
     };
-
-    std::string m_apiKey;
 
     // 31밴드 표준 주파수 (Python f_31 대응)
     static const std::vector<int> F31;

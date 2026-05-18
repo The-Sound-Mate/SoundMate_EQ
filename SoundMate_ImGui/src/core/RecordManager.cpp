@@ -235,8 +235,7 @@ std::string RecordManager::RefreshAccessToken(const std::string &refreshToken) {
   curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
   curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
   curl_easy_setopt(curl, CURLOPT_TIMEOUT, 15L);
-  curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
-  curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
+  // SSL 검증 ON — WinSSL이 Windows 인증서 스토어로 자체 검증
   curl_easy_perform(curl);
   curl_slist_free_all(headers);
   curl_easy_cleanup(curl);
@@ -529,8 +528,7 @@ std::string RecordManager::SupabaseRequest(const std::string &method,
   curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
   curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
   curl_easy_setopt(curl, CURLOPT_TIMEOUT, 15L);
-  curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
-  curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
+  // SSL 검증 ON — WinSSL이 Windows 인증서 스토어로 자체 검증
 
   if (method == "POST") {
     curl_easy_setopt(curl, CURLOPT_POST, 1L);

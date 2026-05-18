@@ -62,9 +62,6 @@ private:
 
     // ── 백그라운드 처리 ──────────────────────────────────────────
     void TriggerAIGeneration();    // Python의 trigger_ai_generation()
-    void RunHierarchicalSearch(const std::string& title,
-                               const std::string& artist,
-                               const std::string& genre);
 
     void FetchAudioDevices();      // Python의 fetch_audio_devices()
     std::string GetSelectedDeviceGuid() const;
@@ -169,6 +166,18 @@ private:
     std::vector<float> m_transitionTarget;
     float              m_transitionProgress = 1.0f; // 1.0 = 완료
     float              m_transitionDuration = 2.0f;
+    // 트랜지션 진행 중 실제 오디오 적용 주기 (200ms). 시각/청각 동기화용.
+    // 200ms × 10회 ≈ 2초 트랜지션, Controller 50ms debounce 와 충돌 없음.
+    float              m_transitionApplyTimer = 0.0f;
+    static constexpr float kTransitionApplyInterval = 0.20f;
+
+    // Controller 미실행 감지 — 5초마다 프로세스 enumeration (GUI-only).
+    // UAC 거절 등으로 Controller 가 안 떠 있으면 config.txt 가 SHM 까지
+    // 도달하지 않아 EQ 변경이 무시되므로, 사용자에게 빨간 경고 표시.
+    float              m_controllerCheckTimer = 0.0f;
+    bool               m_controllerRunning    = true;  // 첫 검사 전 낙관적 가정
+    static constexpr float kControllerCheckInterval = 5.0f;
+    bool IsControllerRunning() const;  // CreateToolhelp32Snapshot 기반
 
     // 스레드 안전성
     mutable std::mutex m_songMutex;

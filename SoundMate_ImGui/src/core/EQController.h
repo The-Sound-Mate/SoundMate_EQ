@@ -23,6 +23,11 @@ public:
     bool ApplyFlatEQ(const std::vector<int>& freqs,
                      const std::string&      deviceName = "");
 
+    // EQ 토글 OFF — config.txt에 "Preamp: 0.0 dB"만 남기고 Filter 라인을
+    //전부 비운다. Controller가 ResetBands() 호출하므로 SHM bandCount=0 →
+    // APO에서 eqActive=false로 EQ chain 통째 우회. 진정한 패스스루.
+    bool ApplyBypass();
+
     // config.txt 에 Include 줄을 맨 위에 보장 (Python의 _ensure_include_linked)
     void EnsureIncludeLinked();
 

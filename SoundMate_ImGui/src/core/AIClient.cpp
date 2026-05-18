@@ -58,9 +58,7 @@ std::string AIClient::CallProxyAPI(
         {"userPref", userPref},
         {"systemPref", systemPref}
     };
-    if (!m_apiKey.empty()) {
-        body["apiKey"] = m_apiKey;
-    }
+    // 클라이언트는 Gemini API 키를 보유하지 않는다 — Edge Function이 자체 처리.
     std::string bodyStr = body.dump();
 
     CURL* curl = curl_easy_init();
@@ -79,8 +77,8 @@ std::string AIClient::CallProxyAPI(
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &responseStr);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
+    // SSL 검증 ON — libcurl WinSSL 빌드가 Windows 인증서 스토어를 사용해
+    // 자체 검증한다. 별도 ca-bundle 동봉 불요. MITM 방어 필수.
 
     CURLcode res = curl_easy_perform(curl);
     long httpCode = 0;

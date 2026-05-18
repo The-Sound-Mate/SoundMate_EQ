@@ -193,6 +193,16 @@ bool EQController::ApplyFlatEQ(const std::vector<int> &freqs,
 }
 
 // ──────────────────────────────────────────────────────────────────────────
+// EQ 토글 OFF — Filter 라인 없는 config.txt 작성. Controller 측 ResetBands()
+// 가 SHM bandCount=0 으로 초기화하므로 APO 에서 EQ chain 자체 우회 (eqActive
+// = (activeBands != 0 || masterGain != 1.f)). 진정한 패스스루 보장.
+// ──────────────────────────────────────────────────────────────────────────
+bool EQController::ApplyBypass() {
+  std::string targetPath = "C:\\Program Files\\SoundMate Equalizer\\config.txt";
+  return WriteEQFile(targetPath, "Preamp: 0.0 dB\n");
+}
+
+// ──────────────────────────────────────────────────────────────────────────
 // Python의 _ensure_include_linked() 완전 이식
 // ──────────────────────────────────────────────────────────────────────────
 static void EnsureIncludeInFile(const std::string &configPath) {
