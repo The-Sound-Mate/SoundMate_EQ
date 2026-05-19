@@ -491,21 +491,15 @@ int main(int argc, char* argv[]) {
     }
     wcout << L"    [V] Registry cleaned.\n";
 
-    // 6. Remove install directory + any legacy System32 leftover.
-    //    Kill any process that might hold our files (SoundMate_Controller,
-    //    SoundMate_EQ GUI) so deletion succeeds.
-    wcout << L" -> Removing install directory...\n";
-    system("taskkill /F /IM SoundMate_Controller.exe >nul 2>&1");
-    system("taskkill /F /IM SoundMate_EQ.exe         >nul 2>&1");
-    Sleep(300);
-    DeleteFileW(L"C:\\Windows\\System32\\SoundMate_APO.dll");
-    DeleteFileW(L"C:\\Program Files\\SoundMate Equalizer\\SoundMate_APO.dll");
-    system("rmdir /s /q \"C:\\Program Files\\SoundMate Equalizer\" >nul 2>&1");
-    wcout << L"    [V] Files removed.\n";
+    // [PR-D] 6단계(파일 삭제) + 프로세스 종료 제거 — 순수 레지스트리/서비스
+    // 리셋만 담당. 파일/프로세스 청소는 SoundMate_uninstall.exe가 별도로 수행.
+    // 이전엔 reset.exe가 둘 다 했지만, "레지스트리만 복구" 같은 부분 작업이
+    // 불가능해서 위험. 책임 분리.
 
     // 7. Restart services
     RestartAudioServicesSC();
 
-    wcout << L"\n[SUCCESS] SoundMate removed. Audio restored.\n";
+    wcout << L"\n[SUCCESS] Registry restored. Audio services restarted.\n";
+    wcout << L"          (Install files retained — run SoundMate_uninstall.exe to remove.)\n";
     return 0;
 }

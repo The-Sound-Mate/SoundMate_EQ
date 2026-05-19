@@ -25,7 +25,10 @@
 #include <urlmon.h>
 #pragma comment(lib, "urlmon.lib")
 
-#define APP_VERSION "1.0.0"
+// [PR-C] APP_VERSION은 CMake가 Version.h로 자동 생성. CMakeLists.txt의
+// project(... VERSION ...) 한 곳만 수정하면 .iss, exe 메타데이터, UI 표기
+// 모두 동기화.
+#include "Version.h"
 
 // ── 밴드 정의 ────────────────────────────────────────────────────────────────
 const std::vector<int> MainWindow::BANDS_5 = {60, 230, 910, 4000, 14000};
@@ -184,6 +187,61 @@ void MainWindow::SetStatus(const std::string &msg, ImVec4 color) {
 }
 
 // ── 기기 목록 (레지스트리에서 APO 활성 기기 탐색) ───────────────────────────
+// [작업 A] 시스템 기본 출력 장치 + APO 등록 여부 조회.
+// EngineHealthMonitor가 같은 일을 하지만 r.currentDeviceTargeted는 정기 갱신
+// 주기가 다름. 가벼운 자체 헬퍼로 3초마다 직접 조회.
+void MainWindow::RefreshDefaultDevice() {
+  std::string nameUtf8;
+  std::wstring guidW;
+  bool apoOk = false;
+
+  IMMDeviceEnumerator *enumr = nullptr;
+  if (SUCCEEDED(CoCreateInstance(__uuidof(MMDeviceEnumerator), NULL, CLSCTX_ALL,
+                                 __uuidof(IMMDeviceEnumerator), (void**)&enumr))) {
+    IMMDevice *dev = nullptr;
+    if (SUCCEEDED(enumr->GetDefaultAudioEndpoint(eRender, eConsole, &dev))) {
+      LPWSTR id = nullptr;
+      if (SUCCEEDED(dev->GetId(&id)) && id) {
+        std::wstring fullId = id;
+        // GUID만 추출 ({...} 부분)
+        size_t pos = fullId.find_last_of(L"{");
+        guidW = (pos != std::wstring::npos) ? fullId.substr(pos) : fullId;
+        CoTaskMemFree(id);
+      }
+      IPropertyStore *props = nullptr;
+      if (SUCCEEDED(dev->OpenPropertyStore(STGM_READ, &props))) {
+        PROPVARIANT v; PropVariantInit(&v);
+        PROPERTYKEY key = {
+            {0xa45c254e, 0xdf1c, 0x4efd,
+             {0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0}}, 2};
+        if (SUCCEEDED(props->GetValue(key, &v)) && v.pwszVal) {
+          std::wstring wn = v.pwszVal;
+          int len = WideCharToMultiByte(CP_UTF8, 0, wn.c_str(), -1,
+                                        nullptr, 0, nullptr, nullptr);
+          if (len > 0) {
+            nameUtf8.assign(len - 1, '\0');
+            WideCharToMultiByte(CP_UTF8, 0, wn.c_str(), -1, nameUtf8.data(),
+                                len, nullptr, nullptr);
+          }
+        }
+        PropVariantClear(&v);
+        props->Release();
+      }
+      dev->Release();
+    }
+    enumr->Release();
+  }
+
+  if (!guidW.empty()) {
+    apoOk = m_health.SlotHasOurGuid(guidW);
+  }
+
+  std::lock_guard<std::mutex> lk(m_defaultDeviceMutex);
+  m_defaultDeviceName          = nameUtf8.empty() ? "기본 출력 장치" : nameUtf8;
+  m_defaultDeviceGuid          = guidW;
+  m_defaultDeviceApoRegistered = apoOk;
+}
+
 void MainWindow::FetchAudioDevices() {
   std::vector<DeviceInfo> tempDevices;
 
@@ -264,9 +322,24 @@ void MainWindow::FetchAudioDevices() {
 }
 
 std::string MainWindow::GetSelectedDeviceGuid() const {
+  // [작업 A] 시스템 기본 출력 장치 GUID를 우선 반환. 폴링에서 채워둔 값 사용.
+  {
+    std::lock_guard<std::mutex> lk(m_defaultDeviceMutex);
+    if (!m_defaultDeviceGuid.empty()) {
+      // wchar → utf8
+      int len = WideCharToMultiByte(CP_UTF8, 0, m_defaultDeviceGuid.c_str(), -1,
+                                    nullptr, 0, nullptr, nullptr);
+      if (len > 0) {
+        std::string s(len - 1, '\0');
+        WideCharToMultiByte(CP_UTF8, 0, m_defaultDeviceGuid.c_str(), -1,
+                            s.data(), len, nullptr, nullptr);
+        return s;
+      }
+    }
+  }
+  // 폴백: 옛 경로 (FetchAudioDevices 결과)
   std::lock_guard<std::mutex> lk(m_devicesMutex);
-  if (m_devices.empty())
-    return "";
+  if (m_devices.empty()) return "";
   if (m_selectedDevice >= 0 && m_selectedDevice < (int)m_devices.size()) {
     return m_devices[m_selectedDevice].guid;
   }
@@ -400,13 +473,18 @@ void MainWindow::TriggerAIGeneration() {
 
     if (result.errorCode == 429) {
       SetStatus("AI Rate Limit. Wait 30s.", Theme::COLOR_RED);
+      g_recordManager.LogAiError(m_currentTitle, m_currentArtist,
+                                 "429", result.errorMsg);
     } else if (result.errorCode == 503) {
       SetStatus("AI Server Busy. Try again later.", Theme::COLOR_RED);
+      g_recordManager.LogAiError(m_currentTitle, m_currentArtist,
+                                 "503", result.errorMsg);
     } else if (result.errorCode == 401) {
       SetStatus(u8"세션이 만료되었습니다. 다시 로그인해 주세요.",
                 Theme::COLOR_RED);
+      g_recordManager.LogAiError(m_currentTitle, m_currentArtist,
+                                 "401", result.errorMsg);
     } else if (result.errorCode == 403) {
-      // 서버 quota gate. 사유에 따라 분기.
       if (result.quotaReason == "free_no_ai") {
         m_showUpgradePopup = true;
         SetStatus(u8"Free 플랜은 AI 기능을 사용할 수 없습니다.",
@@ -417,8 +495,13 @@ void MainWindow::TriggerAIGeneration() {
       } else {
         SetStatus("AI Access Denied: " + result.quotaReason, Theme::COLOR_RED);
       }
+      g_recordManager.LogAiError(m_currentTitle, m_currentArtist,
+                                 "403", result.quotaReason);
     } else if (result.errorCode != 0) {
       SetStatus("AI Proxy Error: " + result.errorMsg, Theme::COLOR_RED);
+      g_recordManager.LogAiError(m_currentTitle, m_currentArtist,
+                                 std::to_string(result.errorCode),
+                                 result.errorMsg);
     } else {
       SetStatus("AI: Response received. Applying EQ...", Theme::COLOR_GREEN);
       std::vector<float> *target = nullptr;
@@ -529,6 +612,33 @@ void MainWindow::Render() {
     std::thread([]() { g_recordManager.RefreshUserProfile(); }).detach();
   }
 
+  // ── [PR-A] 세션 상태 폴링 (60초) — force_logout / is_active 검사 ──
+  // 다른 PC에서 본인을 강제 로그아웃시키면 이 PC도 즉시 SignOut.
+  m_deviceCheckTimer += m_deltaTime;
+  if (m_deviceCheckTimer >= kDeviceCheckInterval) {
+    m_deviceCheckTimer = 0.0f;
+    std::thread([this]() {
+      auto st = g_recordManager.CheckDeviceSession();
+      if (!st.valid && !st.reason.empty()) {
+        // 백그라운드 → 메인 thread 핸드오프 (flag만 세팅)
+        m_forceLogoutTriggered = true;
+      }
+    }).detach();
+  }
+
+  // 폴링 결과 처리 (메인 thread)
+  if (m_forceLogoutTriggered.exchange(false)) {
+    SetStatus(u8"다른 위치에서 로그아웃되었습니다.", Theme::COLOR_YELLOW);
+    if (m_onForcedLogout) m_onForcedLogout();
+  }
+
+  // ── [작업 A] 시스템 기본 출력 장치 폴링 (3초) ──
+  m_defaultDeviceTimer += m_deltaTime;
+  if (m_defaultDeviceTimer >= kDefaultDeviceInterval) {
+    m_defaultDeviceTimer = 0.0f;
+    std::thread([this]() { RefreshDefaultDevice(); }).detach();
+  }
+
   // ── 스무스 트랜지션 업데이트 ──
   // 트랜지션 진행 중에는 m_eqGains 가 매 프레임 보간되므로 슬라이더는 부드럽게
   // 움직인다. 동시에 200ms 마다 ApplyEQNoSave 를 호출해 실제 오디오에도 같은
@@ -605,6 +715,12 @@ void MainWindow::Render() {
       std::string logMsg = "Normalization: [" + song.title + "] -> [" + artist + " - " + title + "]";
       SetStatus(logMsg, Theme::TEXT_WHITE);
 
+      // [작업 B] 정규화 로그 누락 보강 — 어떤 분기를 타든 정규화 결과가
+      // normalize_log.jsonl 에 기록되도록 fire-and-forget GetGenre를 먼저 호출.
+      std::thread([title, artist]() {
+        g_genreManager.GetGenre(title, artist);
+      }).detach();
+
       // ── 프리셋 모드 활성 중: AI/캐시 건너뛰고 프리셋 EQ 고정 재적용 ──
       if (m_presetModeActive && m_selectedPresetIdx >= 0 &&
           m_selectedPresetIdx < (int)m_userPresets.size()) {
@@ -673,10 +789,15 @@ void MainWindow::Render() {
           }
         } else {
           // 캐시 없음 — mode에 따라 분기
-          if (mode == EqMode::AiAuto && m_ai && !m_aiProcessing) {
+          // [작업 C] iTunes 매칭 실패(빈 장르) 시 AI/Global 모두 호출 안 함.
+          // m_currentGenre.empty() = 트랙 미발견 or 장르 태그 없음 → 어차피
+          // 의미있는 결과 못 받음. 이전 EQ 유지 + 상태바 안내.
+          if (m_currentGenre.empty()) {
+            SetStatus(u8"음원 정보를 찾을 수 없어 EQ를 적용하지 않습니다.",
+                      Theme::COLOR_YELLOW);
+          } else if (mode == EqMode::AiAuto && m_ai && !m_aiProcessing) {
             TriggerAIGeneration();
           } else if (mode == EqMode::GlobalAverage) {
-            // 글로벌 평균만 단독 적용 (AI 호출 없음)
             auto baseline = g_recordManager.GetGlobalGenreAverage(
                 m_currentGenre, m_currentBands.size());
             if (!baseline.empty() && baseline.size() == m_currentBands.size()) {
@@ -751,6 +872,9 @@ void MainWindow::Render() {
 
   // [Phase 3] Free 플랜 → Pro 업그레이드 안내 팝업
   RenderUpgradePopup();
+
+  // [PR-A] 기기 한도 초과 안내 팝업
+  RenderDeviceLimitPopup();
 }
 
 // ── 상단 바 ──────────────────────────────────────────────────────────────────
@@ -834,47 +958,30 @@ void MainWindow::RenderTopBar() {
     ImGui::SameLine(0, 10);
   }
 
-  // ── [그룹 2] 기기 드롭다운 ──
+  // ── [그룹 2] 기기 표시 (작업 A: 드롭다운 → 단순 텍스트) ──
+  // 시스템 기본 출력 장치를 자동 추종. APO 미설치 시 빨간 안내 부착.
   {
-    // 기기 드롭다운 너비를 우측 버튼 크기에 맞추어 유동적으로 설정 (겹침 방지 핵심)
     float rightButtonsW = twoLines ? (90.0f + 70.0f + 90.0f + 40.0f) : (110.0f + 80.0f + 100.0f + 30.0f);
     float devW = ImGui::GetContentRegionAvail().x - rightButtonsW;
-    devW = std::max(devW, 150.0f); // 최소 크기 보장
+    devW = std::max(devW, 150.0f);
 
-    ImGui::SetNextItemWidth(devW);
-    std::string devLabel = GetSelectedDeviceDisplayName();
-    if (ImGui::BeginCombo("##device", devLabel.c_str())) {
-      std::lock_guard<std::mutex> lk(m_devicesMutex);
-      for (int i = 0; i < (int)m_devices.size(); i++) {
-        if (ImGui::Selectable(m_devices[i].displayName.c_str(), m_selectedDevice == i)) {
-          m_selectedDevice = i;
-          std::string targetGuid = m_devices[i].guid;
-          std::thread([this, targetGuid]() {
-            char exeP[MAX_PATH];
-            GetModuleFileNameA(nullptr, exeP, MAX_PATH);
-            std::filesystem::path curDir = std::filesystem::path(exeP).parent_path();
-            std::string applyExe = "";
-            for (int j = 0; j < 5; ++j) {
-              if (std::filesystem::exists(curDir / "ApplyToDevice.exe")) {
-                applyExe = (curDir / "ApplyToDevice.exe").string();
-                break;
-              }
-              if (std::filesystem::exists(curDir / "engine/SoundMate_APO/ApplyToDevice.exe")) {
-                applyExe = (curDir / "engine/SoundMate_APO/ApplyToDevice.exe").string();
-                break;
-              }
-              curDir = curDir.parent_path();
-            }
-            if (!applyExe.empty()) {
-              std::string params = "\"" + targetGuid + "\"";
-              ShellExecuteA(NULL, "runas", applyExe.c_str(), params.c_str(), NULL, SW_HIDE);
-            }
-          }).detach();
-          ApplyEQToSystem();
-        }
-      }
-      ImGui::EndCombo();
+    std::string name; bool apoOk;
+    {
+      std::lock_guard<std::mutex> lk(m_defaultDeviceMutex);
+      name  = m_defaultDeviceName.empty() ? "기본 출력 장치" : m_defaultDeviceName;
+      apoOk = m_defaultDeviceApoRegistered;
     }
+
+    // ImGui::Text는 풍선 위치만 잡고, devW 너비 안에서 그리도록 BeginChild로 감쌈.
+    ImGui::BeginChild("##devlabel", ImVec2(devW, ImGui::GetFrameHeight()),
+                      false, ImGuiWindowFlags_NoScrollbar);
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextColored(Theme::TEXT_WHITE, "%s", name.c_str());
+    if (!apoOk) {
+      ImGui::SameLine(0, 6);
+      ImGui::TextColored(Theme::COLOR_RED, u8"- 장치설정 요함(설정에서 가능)");
+    }
+    ImGui::EndChild();
   }
   ImGui::SameLine(0, 8);
 
@@ -1166,8 +1273,30 @@ void MainWindow::RenderBottomBar() {
 
   // [Phase 3] Free 플랜은 프롬프트 입력 자체를 비활성. 안내 + 구독 버튼만 노출.
   const bool aiEligible = g_recordManager.IsAIEligible();
+  // [작업 C] 곡 정보(정규화 결과)가 없으면 프롬프트도 비활성 + 안내.
+  // m_currentGenre.empty() → iTunes 매칭 실패 or 트랙 자체 미발견.
+  const bool noSongInfo = m_currentGenre.empty();
 
-  if (!aiEligible) {
+  if (aiEligible && noSongInfo) {
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 330);
+    ImGui::PushStyleColor(ImGuiCol_FrameBg, IM_COL32(35, 35, 45, 255));
+    ImGui::PushStyleColor(ImGuiCol_Text,    Theme::ToU32(Theme::TEXT_GRAY));
+    ImGui::BeginDisabled(true);
+    char placeholder[160];
+    std::snprintf(placeholder, sizeof(placeholder),
+                  u8"곡 정보가 없어서 AI 사용이 불가능 합니다");
+    ImGui::InputText("##prompt_nosong", placeholder, sizeof(placeholder),
+                     ImGuiInputTextFlags_ReadOnly);
+    ImGui::EndDisabled();
+    ImGui::PopStyleColor(2);
+    ImGui::SameLine(0, 8);
+
+    // 비활성 입력 버튼 (자리 유지)
+    ImGui::BeginDisabled(true);
+    ImGui::Button("입력", {80, 0});
+    ImGui::EndDisabled();
+    ImGui::SameLine(0, 8);
+  } else if (!aiEligible) {
     // 비활성 InputText로 입력 영역 가로 폭 유지 (UI 흔들림 방지)
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 330);
     ImGui::PushStyleColor(ImGuiCol_FrameBg,    IM_COL32(35, 35, 45, 255));
@@ -1854,6 +1983,24 @@ static size_t UpdateWriteCallback(void *contents, size_t size, size_t nmemb, voi
     return size * nmemb;
 }
 
+// [PR-C] SemVer 비교 — "1.0.10" > "1.0.9" 정확히 판정. 단순 문자열 != 비교는
+// "1.0.10" vs "1.0.9"에서 잘못된 결과(같다고 인식)를 낼 수 있음.
+namespace {
+    struct SemVer { int major = 0, minor = 0, patch = 0; };
+    SemVer ParseSemVer(const std::string &s) {
+        SemVer v;
+        sscanf_s(s.c_str(), "%d.%d.%d", &v.major, &v.minor, &v.patch);
+        return v;
+    }
+    // latest가 current보다 새 버전인지.
+    bool IsNewerVersion(const std::string &latest, const std::string &current) {
+        SemVer L = ParseSemVer(latest), C = ParseSemVer(current);
+        if (L.major != C.major) return L.major > C.major;
+        if (L.minor != C.minor) return L.minor > C.minor;
+        return L.patch > C.patch;
+    }
+}
+
 void MainWindow::CheckForUpdates() {
     CURL* curl = curl_easy_init();
     if (!curl) return;
@@ -1861,7 +2008,7 @@ void MainWindow::CheckForUpdates() {
     std::string response;
     // app_releases: windows 플랫폼의 최신(is_latest=true) 릴리즈 1건 조회
     std::string url = std::string(RecordManager::SUPABASE_URL)
-        + "/rest/v1/app_releases?select=version,file_path,release_notes"
+        + "/rest/v1/app_releases?select=version,file_path,release_notes,is_mandatory"
           "&platform=eq.windows&is_latest=eq.true&order=created_at.desc&limit=1";
 
     struct curl_slist *headers = NULL;
@@ -1881,13 +2028,14 @@ void MainWindow::CheckForUpdates() {
                 auto& latest = arr[0];
                 m_latestVersion = latest.value("version", "");
 
-                // 단순 버전 비교 로직 (실제 서비스에서는 시맨틱 버저닝 파싱 권장)
-                if (!m_latestVersion.empty() && m_latestVersion != APP_VERSION) {
-                    m_downloadUrl = latest.value("file_path", "");
-                    m_releaseNotes = latest.value("release_notes", "");
-                    m_isMandatoryUpdate = false; // app_releases 스키마에는 강제 업데이트 플래그가 없음
-                    m_updateAvailable = true;
-                    m_showUpdatePopup = true;
+                // [PR-C] SemVer 비교 — 1.0.10 > 1.0.9 정확히 판정.
+                if (!m_latestVersion.empty() &&
+                    IsNewerVersion(m_latestVersion, APP_VERSION)) {
+                    m_downloadUrl       = latest.value("file_path", "");
+                    m_releaseNotes      = latest.value("release_notes", "");
+                    m_isMandatoryUpdate = latest.value("is_mandatory", false);
+                    m_updateAvailable   = true;
+                    m_showUpdatePopup   = true;
                 }
             }
         } catch(...) {}
@@ -1981,6 +2129,90 @@ void MainWindow::OpenPricingPage() {
     ShellExecuteA(nullptr, "open",
                   "https://soundmate.kro.kr/pricing",
                   nullptr, nullptr, SW_SHOWNORMAL);
+}
+
+// ============================================================================
+// [PR-A] 기기 한도 초과 안내 + 웹 대시보드
+// ============================================================================
+void MainWindow::NotifyDeviceLimitExceeded(int limit, int activeCount,
+                                            const std::string &plan) {
+    {
+        std::lock_guard<std::mutex> lk(m_deviceLimitMutex);
+        m_deviceLimit = limit;
+        m_deviceActiveCount = activeCount;
+        m_deviceLimitPlan = plan;
+    }
+    m_showDeviceLimitPopup = true;
+    SetStatus(u8"이 플랜의 기기 등록 한도를 초과했습니다.", Theme::COLOR_RED);
+}
+
+void MainWindow::OpenDeviceManagementPage() {
+    ShellExecuteA(nullptr, "open",
+                  "https://soundmate.kro.kr/mypage/account",
+                  nullptr, nullptr, SW_SHOWNORMAL);
+}
+
+void MainWindow::RenderDeviceLimitPopup() {
+    if (m_showDeviceLimitPopup.exchange(false)) {
+        ImGui::OpenPopup("##device_limit_popup");
+    }
+
+    ImGuiIO &io = ImGui::GetIO();
+    ImGui::SetNextWindowPos({io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f},
+                            ImGuiCond_Always, {0.5f, 0.5f});
+    ImGui::SetNextWindowSize({440, 0}, ImGuiCond_Always);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, Theme::ToU32(Theme::PANEL_COLOR));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 12.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {20.0f, 16.0f});
+
+    int flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize
+              | ImGuiWindowFlags_AlwaysAutoResize;
+    if (ImGui::BeginPopupModal("##device_limit_popup", nullptr, flags)) {
+        ImGui::TextColored(Theme::COLOR_RED, u8"⚠ 기기 등록 한도 초과");
+        ImGui::Spacing();
+
+        std::string planText;
+        int limit = m_deviceLimit.load();
+        int count = m_deviceActiveCount.load();
+        {
+            std::lock_guard<std::mutex> lk(m_deviceLimitMutex);
+            planText = m_deviceLimitPlan;
+        }
+        ImGui::TextWrapped(
+            u8"현재 플랜(%s)의 기기 등록 한도(%d대)를 초과했습니다.\n"
+            u8"활성 기기: %d대\n\n"
+            u8"기존 기기 중 사용하지 않는 기기를 웹 대시보드에서\n"
+            u8"해제하면 이 PC를 사용할 수 있습니다.",
+            planText.empty() ? "free" : planText.c_str(), limit, count);
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        float cw = ImGui::GetContentRegionAvail().x;
+        float btnW = (cw - 8) / 2;
+
+        ImGui::PushStyleColor(ImGuiCol_Button,        Theme::ToU32(Theme::GRAD_START));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Theme::ToU32(Theme::GRAD_END));
+        ImGui::PushStyleColor(ImGuiCol_Text,          IM_COL32(0, 0, 0, 255));
+        if (ImGui::Button(u8"기존 기기 관리하기", {btnW, 36})) {
+            OpenDeviceManagementPage();
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::PopStyleColor(3);
+
+        ImGui::SameLine(0, 8);
+        ImGui::PushStyleColor(ImGuiCol_Button,        IM_COL32(60, 60, 60, 255));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(90, 90, 90, 255));
+        if (ImGui::Button(u8"닫기", {btnW, 36})) {
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::PopStyleColor(2);
+
+        ImGui::EndPopup();
+    }
+
+    ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor();
 }
 
 void MainWindow::RenderUpgradePopup() {

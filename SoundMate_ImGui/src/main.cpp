@@ -166,6 +166,17 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
         std::thread([]() { g_recordManager.RefreshUserProfile(); }).detach();
     };
 
+    // [PR-A] 로그인 직후 기기 등록 (RPC register_device).
+    // 한도 초과면 MainWindow에 device-limit popup flag를 세팅.
+    auto registerDeviceAsync = [&]() {
+        std::thread([&]() {
+            auto r = g_recordManager.RegisterCurrentDevice();
+            if (!r.allowed && r.reason == "device_limit_exceeded") {
+                mainWin.NotifyDeviceLimitExceeded(r.limit, r.activeCount, r.plan);
+            }
+        }).detach();
+    };
+
     // [Phase 2-A] 토큰 자동 복원 — 유효한 v2(DPAPI 암호화) 토큰이 있으면
     // LoginWindow 자체를 띄우지 않고 즉시 메인 화면으로. 토큰 만료 / 복호화
     // 실패 / 파일 없음이면 LoginWindow.Open() 으로 흐름 유지 (TryAutoLogin 이
@@ -173,16 +184,37 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     if (!g_recordManager.GetUserIdFromToken().empty()) {
         loggedIn = true;   // m_userId 는 GetUserIdFromToken 내부에서 설정됨
         refreshProfileAsync();
+        registerDeviceAsync();
     } else {
         loginWin.Open([&](const std::string& uid, const std::string& email, bool isNew) {
             g_recordManager.SetUserId(uid);
             loggedIn = true;
             refreshProfileAsync();
+            registerDeviceAsync();
         });
     }
 
     // ── UI 초기화 ──
     mainWin.Initialize(&eqCtrl, &aiClient, &monitor);
+    // [PR-A] 세션 폴링이 force_logout/deactivated를 감지하면 호출됨.
+    // 로그아웃 콜백과 동일 흐름을 재사용하되 토큰 파일은 삭제하지 않음
+    // (사용자 의도 로그아웃과 구분).
+    mainWin.SetOnForcedLogoutCallback([&]() {
+        g_recordManager.SignOut();
+        AppSettings s = LoadSettings();
+        s.eqMode = EqMode::Off;
+        s.autoAnalyze = false;
+        s.globalAverage = false;
+        SaveSettings(s);
+        loggedIn = false;
+        loginWin.Open([&](const std::string& uid, const std::string& email, bool isNew) {
+            g_recordManager.SetUserId(uid);
+            loggedIn = true;
+            refreshProfileAsync();
+            registerDeviceAsync();
+        });
+    });
+
     mainWin.SetOnLogoutCallback([&]() {
         // [PR-2D] 로그아웃 안전화 — 토큰 파일 + 메모리 캐시 + 설정값 모두 정리.
         std::remove(LoginWindow::GetTokenFilePath().c_str());
@@ -198,6 +230,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
             g_recordManager.SetUserId(uid);
             loggedIn = true;
             refreshProfileAsync();
+            registerDeviceAsync();
         });
     });
     g_app = &mainWin;
@@ -234,6 +267,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     }
 
 cleanup:
+    // [DB-Sync] Exit Sync — pending/ 미동기화 데이터를 종료 직전 강제 업로드.
+    // 5곡 미만이어도 한 번 시도. CURL 타임아웃 15s 내에서 끝. 실패해도 pending/
+    // 파일은 보존되므로 다음 실행 시 자동 재시도.
+    g_recordManager.ProcessBatchSync(true);
+
     monitor.Stop();
     ImGui_ImplDX11_Shutdown();
     ImGui_ImplWin32_Shutdown();

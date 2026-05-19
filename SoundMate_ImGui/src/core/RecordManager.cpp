@@ -80,34 +80,174 @@ void RecordManager::EnsureRecordDir() {
   std::filesystem::create_directories(m_recordDir);
 }
 
-void RecordManager::LoadCache() {
-  if (!std::filesystem::exists(m_cacheFile)) {
-    m_cache = {{"songs", {}},
-               {"unsynced", json::array()},
-               {"profile", {{"tendency", "Balanced and clear sound"}}}};
+// [DB-Sync] song_cache.json은 *로컬 EQ 캐시* 전용. DB 동기화 큐(unsynced)는
+// pending/ 서브폴더의 개별 파일로 분리되어 더 이상 cache JSON에 들어가지 않음.
+// profile 키는 서버에서 읽어온 값의 로컬 캐시(쓰기 X)라 그대로 유지.
+
+// [DB-Sync] pending/ 폴더 경로 헬퍼. (SaveInteraction과 마이그레이션 모두 사용)
+static std::string PendingDir(const std::string &recordDir) {
+  return recordDir + "\\pending";
+}
+
+// [DB-Sync] 곡+source 조합으로 결정적 파일명 — 같은 곡 재등록 시 덮어쓰기.
+static std::string PendingFilenameFor(const std::string &title,
+                                      const std::string &artist,
+                                      const std::string &source) {
+  uint32_t h = 2166136261u;
+  auto mix = [&](const std::string &s) {
+    for (char c : s) { h ^= (unsigned char)c; h *= 16777619u; }
+  };
+  mix(title); mix("\x01"); mix(artist);
+  char hex[9];
+  snprintf(hex, sizeof(hex), "%08x", h);
+  return std::string("pending_") + source + "_" + hex + ".json";
+}
+
+static std::string DefaultCacheJson() {
+  return nlohmann::json{
+      {"songs", nlohmann::json::object()},
+      {"profile", {{"tendency", "Balanced and clear sound"}}}}
+      .dump(4);
+}
+
+// [DB-Sync 마이그레이션] 옛 song_cache.json에 unsynced 배열이 남아 있으면
+// pending/ 폴더의 개별 파일로 쪼개어 보존 후 key 자체를 제거. 데이터 손실 0.
+static void MigrateUnsyncedToPending(nlohmann::json &cache,
+                                     const std::string &recordDir) {
+  if (!cache.contains("unsynced") || !cache["unsynced"].is_array()) return;
+  auto &arr = cache["unsynced"];
+  if (arr.empty()) {
+    cache.erase("unsynced");
     return;
   }
-  try {
-    std::ifstream f(m_cacheFile);
-    m_cache = json::parse(f);
+  std::string dir = PendingDir(recordDir);
+  try { std::filesystem::create_directories(dir); } catch (...) {}
+
+  for (auto &item : arr) {
+    std::string title  = item.value("title", "");
+    std::string artist = item.value("artist", "");
+    std::string source = item.value("source", "");
+    if (title.empty() || source.empty()) continue;
+
+    nlohmann::json rec = {{"schema_version", 1},
+                          {"title",  title},
+                          {"artist", artist},
+                          {"genre",  item.value("genre", "")},
+                          {"source", source},
+                          {"eq_5",   item.value("eq_5",  nlohmann::json())},
+                          {"eq_10",  item.value("eq_10", nlohmann::json())},
+                          {"eq_15",  item.value("eq_15", nlohmann::json())},
+                          {"eq_31",  item.value("eq_31", nlohmann::json())},
+                          {"device_name", item.value("device_name", "")},
+                          {"prompt",      item.value("prompt", "")}};
+    try {
+      std::string path = dir + "\\" + PendingFilenameFor(title, artist, source);
+      std::ofstream f(path, std::ios::binary | std::ios::trunc);
+      if (f) { f << rec.dump(); f.flush(); }
+    } catch (...) {}
+  }
+  cache.erase("unsynced");
+}
+
+void RecordManager::LoadCache() {
+  auto applyDefault = [&]() {
+    m_cache = {{"songs", json::object()},
+               {"profile", {{"tendency", "Balanced and clear sound"}}}};
+  };
+
+  auto tryParse = [](const std::string &path, json &out) -> bool {
+    if (!std::filesystem::exists(path)) return false;
+    try {
+      std::ifstream f(path);
+      out = json::parse(f);
+      return true;
+    } catch (...) {
+      return false;
+    }
+  };
+
+  std::string bakFile = m_cacheFile + ".bak";
+
+  json parsed;
+  bool ok = tryParse(m_cacheFile, parsed);
+  if (!ok) {
+    // 본 파일이 깨졌으면 .bak에서 silent recovery 시도
+    if (tryParse(bakFile, parsed)) {
+      ok = true;
+    } else {
+      // .bak도 손상 → 무한 크래시 루프 방지: .bak 삭제 + 기본값.
+      std::error_code ec;
+      std::filesystem::remove(bakFile, ec);
+      applyDefault();
+    }
+  }
+  if (ok) {
+    m_cache = std::move(parsed);
     if (!m_cache.contains("profile"))
       m_cache["profile"] = {{"tendency", "Balanced and clear sound"}};
-    if (!m_cache.contains("songs"))
-      m_cache["songs"] = json::object();
-    if (!m_cache.contains("unsynced"))
-      m_cache["unsynced"] = json::array();
-  } catch (...) {
-    m_cache = {{"songs", {}},
-               {"unsynced", json::array()},
-               {"profile", {{"tendency", "Balanced and clear sound"}}}};
+    if (!m_cache.contains("songs"))    m_cache["songs"]    = json::object();
+
+    // [DB-Sync] 옛 unsynced 데이터를 pending/ 파일들로 마이그레이션 후 key 제거.
+    // 옛 빌드에서 업데이트한 사용자의 미동기화 데이터 100% 보존.
+    MigrateUnsyncedToPending(m_cache, m_recordDir);
+
+    // 세션당 1회: 정상 로드된 캐시를 .bak으로 백업.
+    try {
+      std::error_code ec;
+      std::filesystem::copy_file(
+          m_cacheFile, bakFile,
+          std::filesystem::copy_options::overwrite_existing, ec);
+    } catch (...) {}
   }
 }
 
 void RecordManager::SaveCache() {
-  try {
-    std::ofstream f(m_cacheFile);
-    f << m_cache.dump(4);
-  } catch (...) {
+  // [PR-C] 200ms debounce — 슬라이더 드래그 시 매 프레임 호출돼도
+  // 디스크 write는 최대 5회/초로 제한. 마지막 호출 데이터가 항상 영구화됨.
+  using clock = std::chrono::steady_clock;
+  static std::mutex saveMutex;
+  static std::atomic<bool> pending{false};
+  static clock::time_point lastWrite{};
+
+  // 즉시 write (debounce 우회) — 종료/로그아웃 등에서 동기 flush 필요할 때.
+  auto doWrite = [this]() {
+    try {
+      std::string tmp = m_cacheFile + ".tmp";
+      {
+        std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+        if (!f) return;
+        f << m_cache.dump(4);
+        f.flush();   // 강종 시에도 OS 버퍼까지 밀어넣음
+      }
+      // 원자적 교체 — write 도중 강종돼도 본 파일은 손상 안 됨.
+      std::error_code ec;
+      std::filesystem::rename(tmp, m_cacheFile, ec);
+      if (ec) {
+        // rename 실패 폴백: 직접 덮어쓰기
+        std::ofstream f(m_cacheFile, std::ios::binary | std::ios::trunc);
+        f << m_cache.dump(4);
+        f.flush();
+        std::filesystem::remove(tmp, ec);
+      }
+    } catch (...) {}
+  };
+
+  auto now = clock::now();
+  std::lock_guard<std::mutex> lk(saveMutex);
+  if (now - lastWrite >= std::chrono::milliseconds(200)) {
+    // 마지막 write로부터 200ms 이상 지났으면 즉시 write.
+    lastWrite = now;
+    doWrite();
+    pending = false;
+  } else if (!pending.exchange(true)) {
+    // 짧은 시간 내 다중 호출은 200ms 후 1회로 합침.
+    std::thread([this, doWrite]() {
+      std::this_thread::sleep_for(std::chrono::milliseconds(200));
+      std::lock_guard<std::mutex> lk2(saveMutex);
+      doWrite();
+      lastWrite = clock::now();
+      pending = false;
+    }).detach();
   }
 }
 
@@ -134,13 +274,19 @@ void RecordManager::LoadIntegratedHistory() {
 
 // ── 로컬 EQ 캐시 전체 초기화 ─────────────────────────────────────────────────
 void RecordManager::ClearAllEQCache() {
-  // 1. 메모리 내 songs/unsynced 비우기 (취향 tendency는 유지)
+  // 1. 메모리 내 songs 비우기 (취향 tendency는 유지). unsynced key는 더 이상
+  //    스키마에 없으니 다루지 않음. DB 동기화 큐는 pending/ 폴더로 분리됨.
   std::string tendency = "Balanced and clear sound";
   if (m_cache.contains("profile") && m_cache["profile"].contains("tendency"))
     tendency = m_cache["profile"]["tendency"].get<std::string>();
-  m_cache["songs"]    = json::object();
-  m_cache["unsynced"] = json::array();
-  m_cache["profile"]  = {{"tendency", tendency}};
+  m_cache["songs"]   = json::object();
+  m_cache.erase("unsynced");  // 옛 잔재 제거 (안전)
+  m_cache["profile"] = {{"tendency", tendency}};
+
+  // [DB-Sync] pending/ 폴더 통째로 삭제 — 미동기화 데이터까지 청소.
+  try {
+    std::filesystem::remove_all(PendingDir(m_recordDir));
+  } catch (...) {}
 
   // 2. 히스토리 맵 비우기
   m_historyMap.clear();
@@ -547,14 +693,151 @@ int RecordManager::GetTrialRemainingDays() {
   }
 }
 
+// [PR-A] HKLM\SOFTWARE\Microsoft\Cryptography\MachineGuid 읽기.
+// 일반 user 권한으로 OK. KEY_WOW64_64KEY로 32→64bit 리다이렉트 회피.
+std::string RecordManager::GetMachineGuid() {
+  HKEY hKey;
+  if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+                    L"SOFTWARE\\Microsoft\\Cryptography",
+                    0, KEY_READ | KEY_WOW64_64KEY, &hKey) != ERROR_SUCCESS) {
+    return "";
+  }
+  wchar_t buf[128] = {};
+  DWORD size = sizeof(buf), type = 0;
+  LONG rc = RegQueryValueExW(hKey, L"MachineGuid", nullptr, &type,
+                             reinterpret_cast<LPBYTE>(buf), &size);
+  RegCloseKey(hKey);
+  if (rc != ERROR_SUCCESS || type != REG_SZ) return "";
+
+  // wchar → utf8
+  int len = WideCharToMultiByte(CP_UTF8, 0, buf, -1, nullptr, 0, nullptr, nullptr);
+  if (len <= 0) return "";
+  std::string out(len - 1, '\0');
+  WideCharToMultiByte(CP_UTF8, 0, buf, -1, out.data(), len, nullptr, nullptr);
+  return out;
+}
+
+// [PR-A] 현재 PC를 connected_devices에 등록.
+RecordManager::DeviceRegistration RecordManager::RegisterCurrentDevice() {
+  DeviceRegistration result;
+  std::string at = GetAccessToken();
+  if (at.empty() || m_userId.empty()) {
+    result.reason = "unauthenticated";
+    return result;
+  }
+  std::string deviceId = GetMachineGuid();
+  if (deviceId.empty()) {
+    result.reason = "no_machine_guid";
+    return result;
+  }
+
+  // 컴퓨터 이름을 device_name으로
+  wchar_t cn[MAX_COMPUTERNAME_LENGTH + 1] = {};
+  DWORD cnLen = MAX_COMPUTERNAME_LENGTH + 1;
+  std::string deviceName = "PC";
+  if (GetComputerNameW(cn, &cnLen)) {
+    int len = WideCharToMultiByte(CP_UTF8, 0, cn, -1, nullptr, 0, nullptr, nullptr);
+    if (len > 0) {
+      std::string s(len - 1, '\0');
+      WideCharToMultiByte(CP_UTF8, 0, cn, -1, s.data(), len, nullptr, nullptr);
+      if (!s.empty()) deviceName = s;
+    }
+  }
+
+  // OS 정보
+  std::string osInfo = "Windows";
+  OSVERSIONINFOEXW osvi = { sizeof(osvi) };
+  // GetVersionExW deprecated 경고 회피: VerifyVersionInfo로 대체할 수도 있지만
+  // Windows 10/11 모두 "Windows"로 표시되면 충분.
+
+  nlohmann::json body = {
+      {"p_device_id",   deviceId},
+      {"p_device_name", deviceName},
+      {"p_os_info",     osInfo}
+  };
+  std::string resp = SupabaseRequest("POST", "/rest/v1/rpc/register_device",
+                                     body.dump(), at);
+  if (resp.empty()) {
+    result.reason = "network";
+    return result;
+  }
+  try {
+    auto j = nlohmann::json::parse(resp);
+    result.allowed     = j.value("allowed", false);
+    result.reason      = j.value("reason", "");
+    result.activeCount = j.value("active_count", 0);
+    result.limit       = j.value("limit", 0);
+    result.plan        = j.value("plan", "");
+  } catch (...) {
+    result.reason = "parse_error";
+  }
+  return result;
+}
+
+// [PR-A] 세션 도중 force_logout/is_active 검사.
+RecordManager::DeviceSessionState RecordManager::CheckDeviceSession() {
+  DeviceSessionState st;
+  std::string at = GetAccessToken();
+  if (at.empty() || m_userId.empty()) {
+    // 로그아웃 상태 — 검사 안 함, valid=true(기본값) 유지.
+    return st;
+  }
+  std::string deviceId = GetMachineGuid();
+  if (deviceId.empty()) return st;
+
+  nlohmann::json body = {{"p_device_id", deviceId}};
+  std::string resp = SupabaseRequest("POST", "/rest/v1/rpc/check_device_session",
+                                     body.dump(), at);
+  if (resp.empty()) return st;  // 네트워크 실패 시는 valid 유지
+  try {
+    auto j = nlohmann::json::parse(resp);
+    st.valid  = j.value("valid", true);
+    st.reason = j.value("reason", "");
+  } catch (...) {}
+  return st;
+}
+
 void RecordManager::SignOut() {
   std::lock_guard<std::mutex> lk(m_mutex);
   m_userId.clear();
   m_accessToken.clear();
   if (m_cache.contains("profile")) m_cache.erase("profile");
-  // 미동기화 큐도 비움 — 다른 사용자의 큐와 섞이지 않도록.
-  if (m_cache.contains("unsynced")) m_cache["unsynced"] = nlohmann::json::array();
+  m_cache.erase("unsynced"); // 옛 잔재 제거 (이제 안 씀)
+  // [DB-Sync] pending/ 폴더 통째로 정리 — 다른 사용자 데이터와 섞이지 않게.
+  try { std::filesystem::remove_all(PendingDir(m_recordDir)); } catch (...) {}
   SaveCache();
+}
+
+// [DB-Sync] Survey 결과 → user_audio_preferences upsert.
+// 라벨은 영문 ("Bass Heavy" 등) 그대로 저장.
+bool RecordManager::UploadAudioPreferences(const std::string &bass,
+                                           const std::string &vocal,
+                                           const std::string &treble,
+                                           const std::string &soundstage,
+                                           const std::string &volume) {
+  std::string at = GetAccessToken();
+  if (at.empty() || m_userId.empty()) {
+    WriteSyncLog({{"event","prefs_skip"},{"reason","no_auth"}});
+    return false;
+  }
+  nlohmann::json body = {{"user_id",         m_userId},
+                         {"bass_pref",       bass},
+                         {"vocal_pref",      vocal},
+                         {"treble_pref",     treble},
+                         {"soundstage_pref", soundstage},
+                         {"volume_pref",     volume}};
+  // PostgREST 단일 row upsert는 객체 1개를 그대로 보내면 됨. on_conflict=user_id.
+  long http = 0;
+  auto resp = SupabaseRequest("POST",
+      "/rest/v1/user_audio_preferences?on_conflict=user_id",
+      body.dump(), at, &http);
+  if (http >= 200 && http < 300) {
+    WriteSyncLog({{"event","prefs_ok"},{"http",http}});
+    return true;
+  }
+  WriteSyncLog({{"event","prefs_fail"},{"http",http},
+                {"body", resp.substr(0, std::min<size_t>(256, resp.size()))}});
+  return false;
 }
 
 bool RecordManager::IsAIEligible() {
@@ -635,7 +918,8 @@ SessionState RecordManager::LoadSessionState() {
   return s;
 }
 
-// EQ 엔트리 저장 (Python save_interaction 대응)
+// EQ 엔트리 저장 — pending/<...>.json 1파일 즉시 디스크 flush.
+// 강제 종료/BSOD에도 보존. 메모리 큐(unsynced) 의존 제거.
 void RecordManager::SaveInteraction(const EQEntry &entry) {
   std::lock_guard<std::mutex> lk(m_mutex);
   if (entry.title.empty())
@@ -655,28 +939,44 @@ void RecordManager::SaveInteraction(const EQEntry &entry) {
 
   std::string key = NormalizeKey(entry.title, entry.artist);
 
-  // unsynced에서 동일 곡/소스 제거 후 새로 추가 (덮어쓰기 정책)
-  auto &unsynced = m_cache["unsynced"];
-  unsynced.erase(
-      std::remove_if(unsynced.begin(), unsynced.end(),
-                     [&](const json &item) {
-                       return item.value("title", "") == entry.title &&
-                              item.value("artist", "") == entry.artist &&
-                              item.value("source", "") == entry.source;
-                     }),
-      unsynced.end());
-
-  json eq_entry = {{"title", entry.title},
-                   {"artist", entry.artist},
-                   {"genre", entry.genre},
-                   {"source", entry.source},
-                   {"eq_5", entry.gains5},
-                   {"eq_10", entry.gains10},
-                   {"eq_15", entry.gains15},
-                   {"eq_31", entry.gains31},
-                   {"device_name", entry.deviceName},
-                   {"prompt", entry.prompt}};
-  unsynced.push_back(eq_entry);
+  // ── [DB-Sync] Pro+ 사용자 한정: pending/ 디스크 큐에 1파일 즉시 기록. ──
+  // Free는 서버 동기화 안 함 → pending 파일도 안 만듦.
+  if (IsAIEligible()) {
+    json pendRec = {{"schema_version", 1},
+                    {"title", entry.title},
+                    {"artist", entry.artist},
+                    {"genre", entry.genre},
+                    {"source", entry.source},
+                    {"eq_5", entry.gains5},
+                    {"eq_10", entry.gains10},
+                    {"eq_15", entry.gains15},
+                    {"eq_31", entry.gains31},
+                    {"device_name", entry.deviceName},
+                    {"prompt", entry.prompt}};
+    try {
+      std::string dir = PendingDir(m_recordDir);
+      std::filesystem::create_directories(dir);
+      std::string path = dir + "\\" +
+                         PendingFilenameFor(entry.title, entry.artist, entry.source);
+      // atomic write — .tmp → rename. 강종 시에도 본 파일은 손상 안 됨.
+      std::string tmp = path + ".tmp";
+      {
+        std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+        if (f) {
+          f << pendRec.dump();
+          f.flush();
+        }
+      }
+      std::error_code ec;
+      std::filesystem::rename(tmp, path, ec);
+      if (ec) {
+        // rename 실패 폴백
+        std::ofstream f(path, std::ios::binary | std::ios::trunc);
+        f << pendRec.dump();
+        std::filesystem::remove(tmp, ec);
+      }
+    } catch (...) {}
+  }
 
   // 메모리 캐시 업데이트
   m_cache["songs"][key][entry.source] = {{"gains", entry.gains5},
@@ -777,12 +1077,13 @@ bool RecordManager::ClearPromptEQ(const std::string &title,
 std::string RecordManager::SupabaseRequest(const std::string &method,
                                            const std::string &endpoint,
                                            const std::string &body,
-                                           const std::string &accessToken) {
+                                           const std::string &accessToken,
+                                           long *outHttpCode) {
+  if (outHttpCode) *outHttpCode = 0;
   std::string url = std::string(SUPABASE_URL) + endpoint;
   std::string response;
   CURL *curl = curl_easy_init();
-  if (!curl)
-    return "";
+  if (!curl) return "";
 
   struct curl_slist *headers = nullptr;
   headers = curl_slist_append(headers,
@@ -803,7 +1104,6 @@ std::string RecordManager::SupabaseRequest(const std::string &method,
   curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
   curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
   curl_easy_setopt(curl, CURLOPT_TIMEOUT, 15L);
-  // SSL 검증 ON — WinSSL이 Windows 인증서 스토어로 자체 검증
 
   if (method == "POST") {
     curl_easy_setopt(curl, CURLOPT_POST, 1L);
@@ -813,9 +1113,47 @@ std::string RecordManager::SupabaseRequest(const std::string &method,
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.c_str());
   }
   curl_easy_perform(curl);
+  long httpCode = 0;
+  curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpCode);
+  if (outHttpCode) *outHttpCode = httpCode;
   curl_slist_free_all(headers);
   curl_easy_cleanup(curl);
   return response;
+}
+
+// [Sync 디버그] sync_log.jsonl 한 줄 append + 5MB 초과 시 앞부분 잘라냄.
+// 절단은 정확히 절반 위치 다음의 \n 이후부터 보존하여 JSON Lines 무결성 유지.
+void RecordManager::WriteSyncLog(const nlohmann::json &record) {
+  try {
+    std::string path = m_recordDir + "\\sync_log.jsonl";
+    std::filesystem::create_directories(m_recordDir);
+
+    static std::mutex s_logMutex;
+    std::lock_guard<std::mutex> lk(s_logMutex);
+
+    // 크기 검사 — 5MB 초과 시 앞 절반 자르기
+    std::error_code ec;
+    auto sz = std::filesystem::exists(path, ec)
+                  ? std::filesystem::file_size(path, ec) : (uintmax_t)0;
+    if (!ec && sz > 5 * 1024 * 1024) {
+      std::ifstream in(path, std::ios::binary);
+      if (in) {
+        in.seekg(sz / 2);
+        // 첫 줄바꿈까지 폐기 — JSON Lines 무결성 유지
+        std::string discard;
+        std::getline(in, discard);
+        std::string remaining((std::istreambuf_iterator<char>(in)),
+                              std::istreambuf_iterator<char>());
+        in.close();
+        std::ofstream out(path, std::ios::binary | std::ios::trunc);
+        out << remaining;
+      }
+    }
+
+    std::ofstream f(path, std::ios::app | std::ios::binary);
+    if (!f) return;
+    f << record.dump() << '\n';
+  } catch (...) {}
 }
 
 std::vector<float>
@@ -883,76 +1221,163 @@ bool RecordManager::CheckUserHistory(const std::string &title,
   }
 }
 
+// [DB-Sync] pending/ 디렉터리에서 모든 .json 파일을 읽어 batch upload.
+// 성공한 파일만 정확히 삭제 → 실패 항목은 다음 시도에서 재처리.
 bool RecordManager::SyncToDB() {
   std::string accessToken = GetUserIdFromToken();
-  if (accessToken.empty() || m_userId.empty())
+  if (accessToken.empty() || m_userId.empty()) {
+    WriteSyncLog({{"event","skip"},{"reason","no_auth"}});
     return false;
-  m_accessToken = accessToken; // cache for other callers
-  auto unsynced = m_cache["unsynced"];
-  if (unsynced.empty())
-    return true;
+  }
+  m_accessToken = accessToken;
+
+  std::string dir = PendingDir(m_recordDir);
+  std::error_code ec;
+  if (!std::filesystem::exists(dir, ec)) return true;
+
+  // pending/*.json 모두 로드
+  struct Item { std::filesystem::path path; nlohmann::json data; };
+  std::vector<Item> items;
+  for (auto &p : std::filesystem::directory_iterator(dir, ec)) {
+    auto name = p.path().filename().string();
+    if (name.rfind("pending_", 0) != 0) continue;
+    if (name.size() < 5 || name.substr(name.size() - 5) != ".json") continue;
+    try {
+      std::ifstream f(p.path());
+      Item it;
+      it.path = p.path();
+      it.data = nlohmann::json::parse(f);
+      items.push_back(std::move(it));
+    } catch (...) {
+      // [Q2 결정] 손상된 파일 즉시 삭제 — 무한 파싱 에러 방지
+      std::filesystem::remove(p.path(), ec);
+      WriteSyncLog({{"event","corrupted_pending_removed"},
+                    {"file", p.path().filename().string()}});
+    }
+  }
+  if (items.empty()) return true;
+
   try {
-    // 1. track 테이블 upsert
+    // 1) track 테이블 upsert
     json tracks = json::array();
     std::map<std::string, std::string> hashToId;
-    for (auto &item : unsynced) {
-      std::string h =
-          GenerateTrackHash(item.value("title", ""), item.value("artist", ""));
+    for (auto &it : items) {
+      std::string h = GenerateTrackHash(it.data.value("title", ""),
+                                        it.data.value("artist", ""));
       tracks.push_back({{"track_hash", h},
-                        {"title", item.value("title", "")},
-                        {"artist", item.value("artist", "")},
-                        {"genre", item.value("genre", "")}});
+                        {"title",  it.data.value("title", "")},
+                        {"artist", it.data.value("artist", "")},
+                        {"genre",  it.data.value("genre", "")}});
     }
-    auto tresp =
-        SupabaseRequest("POST", "/rest/v1/track?on_conflict=track_hash",
-                        tracks.dump(), accessToken);
-    auto tarr = json::parse(tresp);
-    for (auto &r : tarr)
-      hashToId[r["track_hash"].get<std::string>()] = r["id"].get<std::string>();
+    long thttp = 0;
+    auto tresp = SupabaseRequest("POST",
+        "/rest/v1/track?on_conflict=track_hash", tracks.dump(),
+        accessToken, &thttp);
+    if (thttp < 200 || thttp >= 300) {
+      WriteSyncLog({{"event","track_upsert_fail"},{"http",thttp},
+                    {"body", tresp.substr(0, std::min<size_t>(256, tresp.size()))}});
+      return false;
+    }
+    try {
+      auto tarr = nlohmann::json::parse(tresp);
+      for (auto &r : tarr) {
+        if (r.contains("track_hash") && r.contains("id")
+            && r["track_hash"].is_string() && r["id"].is_string()) {
+          hashToId[r["track_hash"].get<std::string>()] =
+              r["id"].get<std::string>();
+        }
+      }
+    } catch (...) {
+      WriteSyncLog({{"event","track_response_parse_fail"},
+                    {"body", tresp.substr(0, std::min<size_t>(256, tresp.size()))}});
+      return false;
+    }
 
-    // 2. user_track_history insert/upsert
+    // 2) user_track_history insert/upsert
     json upserts = json::array(), inserts = json::array();
-    for (auto &item : unsynced) {
-      std::string h =
-          GenerateTrackHash(item.value("title", ""), item.value("artist", ""));
+    std::vector<std::filesystem::path> uploaded;
+    for (auto &it : items) {
+      std::string h = GenerateTrackHash(it.data.value("title", ""),
+                                        it.data.value("artist", ""));
       std::string tid = hashToId.count(h) ? hashToId[h] : "";
-      if (tid.empty())
-        continue;
+      if (tid.empty()) continue;
       json hist = {{"user_id", m_userId},
                    {"track_id", tid},
-                   {"eq_5", item.value("eq_5", json())},
-                   {"eq_10", item.value("eq_10", json())},
-                   {"eq_15", item.value("eq_15", json())},
-                   {"eq_31", item.value("eq_31", json())},
-                   {"source", item.value("source", "")},
-                   {"prompt", item.value("prompt", "")},
-                   {"device_name", item.value("device_name", "")}};
-      if (item.value("source", "") == "direct")
+                   {"eq_5",  it.data.value("eq_5",  json())},
+                   {"eq_10", it.data.value("eq_10", json())},
+                   {"eq_15", it.data.value("eq_15", json())},
+                   {"eq_31", it.data.value("eq_31", json())},
+                   {"source",      it.data.value("source", "")},
+                   {"prompt",      it.data.value("prompt", "")},
+                   {"device_name", it.data.value("device_name", "")}};
+      if (it.data.value("source", "") == "direct")
         upserts.push_back(hist);
       else
         inserts.push_back(hist);
+      uploaded.push_back(it.path);
     }
-    if (!upserts.empty())
-      SupabaseRequest(
-          "POST",
-          "/rest/v1/user_track_history?on_conflict=user_id,track_id,source",
-          upserts.dump(), accessToken);
-    if (!inserts.empty())
-      SupabaseRequest("POST", "/rest/v1/user_track_history", inserts.dump(),
-                      accessToken);
 
-    m_cache["unsynced"] = json::array();
-    SaveCache();
-    return true;
+    bool ok = true;
+    if (!upserts.empty()) {
+      long h = 0;
+      auto r = SupabaseRequest("POST",
+          "/rest/v1/user_track_history?on_conflict=user_id,track_id,source",
+          upserts.dump(), accessToken, &h);
+      if (h < 200 || h >= 300) {
+        ok = false;
+        WriteSyncLog({{"event","history_upsert_fail"},{"http",h},
+                      {"body", r.substr(0, std::min<size_t>(256, r.size()))}});
+      }
+    }
+    if (ok && !inserts.empty()) {
+      long h = 0;
+      auto r = SupabaseRequest("POST", "/rest/v1/user_track_history",
+                               inserts.dump(), accessToken, &h);
+      if (h < 200 || h >= 300) {
+        ok = false;
+        WriteSyncLog({{"event","history_insert_fail"},{"http",h},
+                      {"body", r.substr(0, std::min<size_t>(256, r.size()))}});
+      }
+    }
+
+    if (ok) {
+      // 업로드 성공한 pending 파일만 삭제. 실패하면 그대로 두고 다음에 재시도.
+      for (auto &p : uploaded) {
+        std::error_code rmEc;
+        std::filesystem::remove(p, rmEc);
+      }
+      WriteSyncLog({{"event","sync_ok"},
+                    {"count", (int)uploaded.size()}});
+    }
+    return ok;
+  } catch (const std::exception &e) {
+    WriteSyncLog({{"event","sync_exception"},{"what", e.what()}});
+    return false;
   } catch (...) {
+    WriteSyncLog({{"event","sync_exception"},{"what","unknown"}});
     return false;
   }
 }
 
+// [Q5 결정] 5개 이상 OR forceAll만 sync. 시간 기반 폴링 없음.
 void RecordManager::ProcessBatchSync(bool forceAll) {
   ConsolidateLocalRecords(forceAll);
-  auto unsynced = m_cache.value("unsynced", json::array());
-  if (forceAll || unsynced.size() >= 5) {
+
+  // pending/ 파일 개수 카운트 — 메모리 큐 의존 제거
+  std::string dir = PendingDir(m_recordDir);
+  std::error_code ec;
+  size_t cnt = 0;
+  if (std::filesystem::exists(dir, ec)) {
+    for (auto &p : std::filesystem::directory_iterator(dir, ec)) {
+      auto name = p.path().filename().string();
+      if (name.rfind("pending_", 0) == 0 &&
+          name.size() >= 5 &&
+          name.substr(name.size() - 5) == ".json") {
+        ++cnt;
+      }
+    }
+  }
+  if (forceAll || cnt >= 5) {
     SyncToDB();
   }
 }
@@ -1012,10 +1437,29 @@ void RecordManager::LogAiError(const std::string &title,
                                const std::string &artist,
                                const std::string &code,
                                const std::string &reason) {
+  // 1) 로컬 로그
   try {
     std::ofstream f(m_logFile, std::ios::app);
     f << "[AI_ERROR] title=" << title << " artist=" << artist
       << " code=" << code << " reason=" << reason << "\n";
-  } catch (...) {
-  }
+  } catch (...) {}
+
+  // 2) [DB-Sync] Supabase ai_error_log 테이블에도 fire-and-forget upload.
+  //    Free/Pro 무관. 실패 분석 데이터는 모든 사용자에게 가치 있음.
+  std::string at = GetAccessToken();
+  if (at.empty() || m_userId.empty()) return;
+  std::thread([this, title, artist, code, reason, at]() {
+    nlohmann::json body = {{"user_id",      m_userId},
+                           {"track_title",  title},
+                           {"track_artist", artist},
+                           {"error_code",   code},
+                           {"error_reason", reason}};
+    long http = 0;
+    auto resp = SupabaseRequest("POST", "/rest/v1/ai_error_log",
+                                body.dump(), at, &http);
+    if (http < 200 || http >= 300) {
+      WriteSyncLog({{"event","ai_error_log_fail"},{"http",http},
+                    {"body", resp.substr(0, std::min<size_t>(256, resp.size()))}});
+    }
+  }).detach();
 }

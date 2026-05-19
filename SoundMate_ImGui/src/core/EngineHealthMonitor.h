@@ -41,10 +41,11 @@ public:
     // 한 번 검사 수행. 부작용 없음, 멱등.
     Report check();
 
-private:
-    // 내부 헬퍼 — Windows API 호출을 작게 쪼개서 테스트 가능하게 분리
     bool   ReadDefaultRenderEndpoint(std::wstring& outGuid, std::string& outName);
     bool   SlotHasOurGuid(const std::wstring& deviceGuid);
+
+private:
+    // 내부 헬퍼 — Windows API 호출을 작게 쪼개서 테스트 가능하게 분리
     bool   LastWriteAge(const wchar_t* path, std::chrono::seconds& outAge);
     std::string FormatAge(std::chrono::seconds age);
 };

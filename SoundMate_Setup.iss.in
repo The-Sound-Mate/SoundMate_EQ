@@ -1,0 +1,52 @@
+; Auto-generated from SoundMate_Setup.iss.in by CMake.
+; 직접 수정하지 마세요. CMakeLists.txt 의 project(... VERSION ...) 이 SoT.
+
+[Setup]
+AppName=SoundMate Equalizer
+AppVersion=@PROJECT_VERSION@
+DefaultDirName={pf}\SoundMate Equalizer
+DefaultGroupName=SoundMate
+OutputBaseFilename=SoundMate_Setup_v@PROJECT_VERSION@
+OutputDir=installer_output
+Compression=lzma
+SolidCompression=yes
+ArchitecturesAllowed=x64
+ArchitecturesInstallIn64BitMode=x64
+
+[Tasks]
+Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
+
+[Files]
+; 메인 실행 파일 및 APO DLL
+Source: "build\Release\SoundMate_EQ.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "build\Release\SoundMate_APO.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "build\Release\SoundMate_Controller.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "build\Release\SoundMate_reset.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "build\Release\SoundMate_uninstall.exe"; DestDir: "{app}"; Flags: ignoreversion
+
+; 레지스트리 설정 스크립트
+Source: "reset_registry.ps1"; DestDir: "{app}"; Flags: ignoreversion
+
+; config 및 기타 필요한 리소스들
+Source: "config\*"; DestDir: "{app}\config"; Flags: ignoreversion recursesubdirs createallsubdirs
+
+[Icons]
+Name: "{group}\SoundMate Equalizer"; Filename: "{app}\SoundMate_EQ.exe"
+Name: "{commondesktop}\SoundMate Equalizer"; Filename: "{app}\SoundMate_EQ.exe"; Tasks: desktopicon
+
+; [PR-B/PR-D] v2 → v3 전환 시 옛 프로세스 정리.
+; 덮어쓰기 설치 전 옛 Controller/EQ를 강제 종료해야 새 APO/DLL 로딩이 정상 동작.
+[InstallDelete]
+Type: filesandordirs; Name: "{app}\logs"
+
+[Run]
+; 설치 직전 옛 프로세스 정리
+Filename: "{cmd}"; Parameters: "/C taskkill /F /IM SoundMate_Controller.exe /IM SoundMate_EQ.exe"; Flags: runhidden waituntilterminated; StatusMsg: "이전 인스턴스 종료 중..."
+; 설치 완료 후 레지스트리 자동 등록 스크립트
+Filename: "powershell.exe"; Parameters: "-ExecutionPolicy Bypass -WindowStyle Hidden -File ""{app}\reset_registry.ps1"""; Flags: waituntilterminated runhidden
+; 설치 완료 후 프로그램 자동 실행
+Filename: "{app}\SoundMate_EQ.exe"; Description: "{cm:LaunchProgram,SoundMate Equalizer}"; Flags: nowait postinstall skipifsilent
+
+; [PR-D] PowerShell 의존 제거. C++ uninstall이 모든 청소 담당.
+[UninstallRun]
+Filename: "{app}\SoundMate_uninstall.exe"; Flags: runhidden waituntilterminated

@@ -4,6 +4,21 @@ project(SoundMate_EQ VERSION 1.0.0 LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# ---------------------------------------------------------------------------
+# [PR-C] Version SoT — project(... VERSION ...) 한 곳에서 Version.h / .iss
+# / .exe 메타데이터 모두 파생. configure_file 로 템플릿에 PROJECT_VERSION 주입.
+# ---------------------------------------------------------------------------
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/SoundMate_ImGui/src/Version.h.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/generated/Version.h"
+    @ONLY
+)
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/SoundMate_Setup.iss.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/SoundMate_Setup.iss"
+    @ONLY
+)
+
 if(MSVC)
     add_compile_options("/utf-8")
     add_compile_definitions(UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
@@ -104,7 +119,8 @@ target_include_directories(SoundMate_Controller PRIVATE ${SHARED_INCLUDE_DIRS})
 target_link_libraries(SoundMate_Controller PRIVATE ${COMMON_LIBS})
 
 # ---------------------------------------------------------------------------
-# 3. SoundMate_reset — removes all SoundMate registry entries and files
+# 3. SoundMate_reset — restores registry + restarts audio services only.
+#    File/process cleanup is the responsibility of SoundMate_uninstall.
 # ---------------------------------------------------------------------------
 add_executable(SoundMate_reset
     ${APO_DIR}/SoundMate_Reset_Total.cpp
@@ -114,10 +130,20 @@ target_include_directories(SoundMate_reset PRIVATE ${SHARED_INCLUDE_DIRS})
 target_link_libraries(SoundMate_reset PRIVATE ${COMMON_LIBS})
 
 # ---------------------------------------------------------------------------
+# [PR-D] 3b. SoundMate_uninstall — taskkills processes + removes leftover
+#   files/logs. Invoked by Inno Setup [UninstallRun] before unins000.exe wipes
+#   the [Files] manifest. Replaces the old PowerShell registry_cleanup.ps1.
+# ---------------------------------------------------------------------------
+add_executable(SoundMate_uninstall
+    ${APO_DIR}/SoundMate_Uninstall_Total.cpp
+)
+target_include_directories(SoundMate_uninstall PRIVATE ${SHARED_INCLUDE_DIRS})
+
+# ---------------------------------------------------------------------------
 # Manifest & subsystem for EXE targets
 # [PR-S1] UAC 정책:
-#   - SoundMate_setup / SoundMate_reset: APO 설치/제거에 HKLM 레지스트리 조작
-#     이 필요해서 requireAdministrator 유지.
+#   - SoundMate_setup / SoundMate_reset / SoundMate_uninstall: HKLM 조작 또는
+#     보호된 파일 삭제가 필요해서 requireAdministrator 유지.
 #   - SoundMate_Controller: 공유 메모리 SDDL이 IU(Interactive User) 권한을
 #     허용하도록 변경되었으므로 asInvoker(일반 user)로 충분. UAC 팝업 제거.
 # ---------------------------------------------------------------------------
@@ -128,10 +154,12 @@ if(MSVC)
         LINK_FLAGS "/MANIFESTUAC:level='asInvoker' /SUBSYSTEM:CONSOLE")
     set_target_properties(SoundMate_reset PROPERTIES
         LINK_FLAGS "/MANIFESTUAC:level='requireAdministrator' /SUBSYSTEM:CONSOLE")
+    set_target_properties(SoundMate_uninstall PROPERTIES
+        LINK_FLAGS "/MANIFESTUAC:level='requireAdministrator' /SUBSYSTEM:CONSOLE")
 endif()
 
 # Output all EXEs to the same directory as the DLL so the installer finds them
-set_target_properties(SoundMate_setup SoundMate_Controller SoundMate_reset PROPERTIES
+set_target_properties(SoundMate_setup SoundMate_Controller SoundMate_reset SoundMate_uninstall PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY_DEBUG   "${CMAKE_BINARY_DIR}/Debug"
     RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/Release"
 )
@@ -174,6 +202,7 @@ target_include_directories(SoundMate_EQ PRIVATE
     ${THIRD_PARTY}/nlohmann
     ${THIRD_PARTY}/curl/include
     ${GUI_SRC_DIR}/src
+    "${CMAKE_CURRENT_BINARY_DIR}/generated"   # [PR-C] generated Version.h
 )
 
 target_link_libraries(SoundMate_EQ PRIVATE
@@ -200,3 +229,29 @@ add_custom_command(TARGET SoundMate_EQ POST_BUILD
         "${THIRD_PARTY}/curl/bin/libcurl-x64.dll"
         "$<TARGET_FILE_DIR:SoundMate_EQ>/libcurl-x64.dll"
 )
+
+# ---------------------------------------------------------------------------
+# [PR-C] Installer 자동 빌드 — Inno Setup Compiler(iscc.exe)를 찾아서 호출.
+# 사용: `cmake --build build --target Installer`
+# iscc.exe가 PATH에 없으면 cmake -DISCC_EXECUTABLE=... 로 지정.
+# ---------------------------------------------------------------------------
+find_program(ISCC_EXECUTABLE
+    NAMES iscc
+    PATHS
+        "C:/Program Files (x86)/Inno Setup 6"
+        "C:/Program Files/Inno Setup 6"
+        "C:/Program Files (x86)/Inno Setup 5"
+    DOC "Inno Setup Compiler (iscc.exe)"
+)
+
+if(ISCC_EXECUTABLE)
+    add_custom_target(Installer
+        COMMAND "${ISCC_EXECUTABLE}" "${CMAKE_CURRENT_BINARY_DIR}/SoundMate_Setup.iss"
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        DEPENDS SoundMate_EQ SoundMate_setup SoundMate_Controller SoundMate_reset SoundMate_uninstall SoundMate_APO
+        COMMENT "Building installer with Inno Setup v${PROJECT_VERSION}"
+    )
+else()
+    message(STATUS "iscc.exe not found — Installer target disabled. "
+                   "Install Inno Setup 6 or pass -DISCC_EXECUTABLE=<path>.")
+endif()

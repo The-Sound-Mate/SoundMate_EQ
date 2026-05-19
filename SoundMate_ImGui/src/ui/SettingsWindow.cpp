@@ -179,29 +179,10 @@ void SettingsWindow::Render() {
     SaveSettings(m_settings);
   }
 
-  // ── 오디오 설정 ──
-  RenderSection("오디오 설정");
-  ImGui::TextColored(Theme::TEXT_GRAY, "기본 출력 장치");
-  ImGui::SameLine(rightCol);
-  ImGui::SetNextItemWidth(150);
-  if (m_selectedDevice >= (int)m_devices.size() || m_selectedDevice < 0) {
-    m_selectedDevice = 0;
-  }
-  std::string devLabel =
-      m_devices.empty() ? "없음" : m_devices[m_selectedDevice];
-  if (ImGui::BeginCombo("##setdev", devLabel.c_str())) {
-    for (int i = 0; i < (int)m_devices.size(); i++) {
-      if (ImGui::Selectable(m_devices[i].c_str(), m_selectedDevice == i)) {
-        m_selectedDevice = i;
-        m_settings.defaultDevice = m_devices[i];
-        SaveSettings(m_settings);
-        if (m_onChanged)
-          m_onChanged(m_settings);
-      }
-    }
-    ImGui::EndCombo();
-  }
-  ImGui::Spacing();
+  // [작업 A] "기본 출력 장치" 드롭다운 제거 — 시스템 기본 출력 장치를
+  // 자동 추종(Windows 사운드 설정 따라감). 사용자가 앱 내에서 잘못 선택해
+  // "스피커로 듣는데 헤드셋이 선택돼 있다" 같은 혼란을 원천 차단.
+  // "오디오 설정" 섹션 자체도 비어 있어 제거. 시스템 설정 섹션부터 시작.
 
   // [PR-2C] "AI 설정" 섹션은 통째로 제거. AI 자동 분석은 EQ 제어 섹션의
   // 3단계 세그먼트(OFF / 글로벌 평균 / AI 자동)로 통합되었음.

@@ -48,6 +48,38 @@ public:
   // 살아있어도 다음 sync에서 m_userId.empty() 가드로 no-op 됨.
   void SignOut();
 
+  // [PR-A] PC 고유 식별자. HKLM\SOFTWARE\Microsoft\Cryptography\MachineGuid
+  // 를 읽어와 그대로 사용. 일반 user 권한으로 읽기 가능, Windows 재설치 전엔 고정.
+  static std::string GetMachineGuid();
+
+  // [PR-A] 로그인 직후 register_device RPC 호출. 플랜 한도 초과 시
+  //   { allowed=false, reason="device_limit_exceeded", limit, active_count }
+  // 반환. 호출자는 한도 초과 시 UI 모달 + 웹 대시보드 안내.
+  struct DeviceRegistration {
+    bool allowed = false;
+    std::string reason;   // 빈 문자열 = 성공
+    int activeCount = 0;
+    int limit = 0;
+    std::string plan;
+  };
+  DeviceRegistration RegisterCurrentDevice();
+
+  // [PR-A] 세션 도중 본인 device의 is_active/force_logout 상태 검사.
+  // false 반환 → SignOut + LoginWindow 띄워야 함.
+  struct DeviceSessionState {
+    bool valid = true;
+    std::string reason;   // 'force_logout' / 'deactivated' / 'not_registered'
+  };
+  DeviceSessionState CheckDeviceSession();
+
+  // [DB-Sync] Survey 결과를 user_audio_preferences 테이블에 upsert.
+  // 라벨은 영문 ("Bass Heavy", "Forward Vocal" 등) 그대로 저장.
+  bool UploadAudioPreferences(const std::string &bass,
+                              const std::string &vocal,
+                              const std::string &treble,
+                              const std::string &soundstage,
+                              const std::string &volume);
+
   // Trial 잔여 일수. -1 = Trial 비활성 또는 알 수 없음. 7일 정책 기준.
   int  GetTrialRemainingDays();
 
@@ -98,10 +130,15 @@ private:
   bool ConsolidateLocalRecords(bool forceAll = false);
   // [Phase 2-A] LocalAppData 잔재 토큰을 Program Files 로 silent migrate (1회성).
   void MigrateLegacyTokenFromLocalAppData();
+  // outHttpCode: 200/4xx/5xx 회수. nullptr 가능. 실패 진단용.
   std::string SupabaseRequest(const std::string &method,
                               const std::string &endpoint,
                               const std::string &body = "",
-                              const std::string &accessToken = "");
+                              const std::string &accessToken = "",
+                              long *outHttpCode = nullptr);
+
+  // [Sync 디버그] sync_log.jsonl에 한 줄 append. 5MB 초과 시 앞부분 자동 잘라냄.
+  void WriteSyncLog(const nlohmann::json &record);
 
   std::string m_userId;
   std::string m_accessToken; // JWT access_token for Supabase auth

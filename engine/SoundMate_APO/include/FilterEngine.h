@@ -18,7 +18,9 @@
 //   정책)
 //                                  0 = 기존 soft + hard 리미터
 // ============================================================================
-#define SM_NORMALIZER_DEFAULT_ENABLED 1
+// [PR-B] Pumping(소리 강약) 현상의 원인이 되므로 기본 OFF.
+//        UI 토글은 후속 PR에서 추가 (SHM 호환성 안정화 후).
+#define SM_NORMALIZER_DEFAULT_ENABLED 0
 #define SM_LIMITER_HARD_ONLY 1
 
 // ============================================================================

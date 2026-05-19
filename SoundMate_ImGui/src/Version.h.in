@@ -1,0 +1,11 @@
+// Auto-generated from Version.h.in by CMake.
+// 직접 수정하지 마세요. CMakeLists.txt 의 project(... VERSION ...) 이 SoT.
+#pragma once
+
+#define SM_VERSION_MAJOR @PROJECT_VERSION_MAJOR@
+#define SM_VERSION_MINOR @PROJECT_VERSION_MINOR@
+#define SM_VERSION_PATCH @PROJECT_VERSION_PATCH@
+#define SM_VERSION_STRING "@PROJECT_VERSION@"
+
+// 호환: 기존 코드의 APP_VERSION 매크로 유지.
+#define APP_VERSION SM_VERSION_STRING

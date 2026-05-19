@@ -1,54 +1,45 @@
-# 사운드메이트(SoundMateAPO) 엔진 고도화 상세 계획
+# SoundMate EQ 통합 수정 계획서 (기기 UI, 로깅, AI 차단)
 
-본 계획서는 이전 오디오 사고를 교훈 삼아 **Equalizer APO**의 검증된 로직을 이식하고, 재난 방지 기술을 극대화하는 방안을 담고 있습니다.
+사용자님께서 제안해주신 추가 개선 사항(작업 A, B, C)과 답변해주신 3가지 기준을 바탕으로 작성된 최종 설계 계획입니다.
 
-## 1. 현재 상태 및 개선 방향
-- **현상태**: 기본적인 COM 연동 및 10밴드 필터 엔진 구조 확보.
-- **개선방향**: Equalizer APO의 `FilterEngine` 로직 이식 및 재난 방지 기술 적용.
+## User Review Required & Open Questions
 
----
+> [!IMPORTANT]
+> 사용자님의 답변을 반영한 제 의견과 추가 확인이 필요한 질문입니다.
 
-## 2. 상세 구현 계획
+### 💡 사용자님 답변에 대한 제 의견 및 답변
+1. **[지연은 상관 없음]**
+   - **동의합니다.** `EngineHealthMonitor::GetDefaultAudioEndpoint`는 COM 객체를 초기화하고 윈도우 오디오 세션을 조회하는 무거운 작업(COM API)이므로, 매 프레임(60fps) 호출하면 프레임 드랍이 발생합니다. 3초(3.0s) 폴링 주기를 두는 것이 성능 최적화 관점에서 가장 훌륭한 선택입니다.
+2. **[제대로 정규화가 적용되지 않은 경우에는 프롬프트 작동 안함]**
+   - **적극 찬성합니다.** `m_currentGenre`가 비어있다는 것은 단순 장르 누락을 넘어 곡 제목이나 아티스트조차 제대로 파싱되지 않은 (정규화 실패) 쌩 로컬 파일이거나 오인식된 상태를 의미합니다. 이 상태에서 사용자가 억지로 "댄스 음악 EQ"라고 프롬프트를 쳐봤자, 베이스라인(Baseline) 곡 정보가 없기 때문에 엉뚱한 결과가 나오거나 API 에러만 발생합니다. 수동 입력 시에도 `m_currentGenre.empty()`를 체크하여 아예 작동을 막고 "음원 정보를 알 수 없어 AI를 사용할 수 없습니다"라고 안내하는 것이 서버 비용 절감과 UX 모두에 이롭습니다.
+3. **[오디오 설정 부분도 없애자]**
+   - **가장 좋은 결단입니다!** 윈도우 시스템 자체의 '기본 출력 장치'를 자동으로 따라가게 만들면, 사용자가 앱 내에서 "나는 스피커로 듣는데 앱에서는 헤드셋이 선택되어 있어 소리가 안 변해요"라고 착각하는 고질적인 CS(고객 문의) 문제를 원천 차단할 수 있습니다. 
 
-### 📂 SoundMate_setup (설치 및 주입)
-- **Registry Handling**: `DeviceAPOInfo` 로직으로 장치별 최적 모드 판별.
-- **Child APO 연결**: 기존 드라이버 설정을 `Child APOs`에 백업하여 시스템 파괴 방지.
-- **권한 수리**: `RegistryHelper::takeOwnership`을 통해 '액세스 거부' 원천 차단.
-
-### 🎛️ SoundMate_Controller (실시간 제어)
-- **No-Freeze**: 서비스 재시작 없이 메모리 스왑만으로 EQ 반영하여 동영상 멈춤 방지.
-- **Atomic Swap**: 세마포어 제어로 소리 끊김 없는 설정 변경.
-
-### 🛠️ SoundMate_reset (재난 복구)
-- **Nuclear Reset**: 꼬여버린 오디오 엔드포인트를 강제 초기화하여 'X' 아이콘 해결.
-- **ACL 복구**: 레지스트리 권한 강제 수리 및 서비스 정상화.
+### ❓ 추가 확인(질문) 사항
+> [!WARNING]
+> 1. **작업 A (장치 설정 제거):** 사용자님께서 "오디오 설정 부분도 없애자"고 하셨습니다. 그렇다면 기존 계획안에 있던 "SettingsWindow에서는 드롭다운 유지"를 전면 취소하고, **SettingsWindow 내의 오디오 장치 선택 드롭다운도 완전히 삭제**하는 것이 맞나요? (사용자는 윈도우 우측 하단 소리 아이콘에서 장치를 바꾸면, 3초 뒤 상단 바에 자동 반영되는 방식입니다.)
+> 2. **작업 A (APO 미등록 알림):** "장치설정 요함(설정에서 가능)" 이라는 빨간 글씨를 띄웠을 때, 사용자가 이걸 클릭하면 팝업으로 `SoundMate_setup.exe`를 실행할지 묻는 버튼 기능(Clickable)을 넣는 것이 UX상 더 좋지 않을까요? 아니면 단순히 텍스트만 표시할까요?
+> 3. **작업 C (AI 차단 조건):** 수동 프롬프트(`RenderBottomBar`의 `TriggerAIGeneration()`) 호출 버튼을 누르거나 엔터를 쳤을 때, 곡 정보가 없으면 빨간 텍스트로 에러를 띄우고 끝낼까요? 아니면 텍스트 입력창(InputText) 자체를 비활성화(Disabled) 시켜서 아예 못 치게 막을까요? (후자가 더 직관적일 수 있습니다.)
 
 ---
 
-## 3. 재난 방지 및 로깅 기술
+## Proposed Changes (구현 계획 상세)
 
-### 🛡️ 동영상 멈춤 방지 (No-Freeze Logic)
-- **Fail-Safe Passthrough**: 연산 오류 시 즉시 원본 소리 통과 모드로 전환.
+### 작업 A — 기기 UI 단순화 (자동 동기화)
+- **개념:** 시스템 기본 오디오 장치를 무조건 기본 타겟으로 설정하고, 사용자의 수동 개입을 제거합니다.
+- **헬퍼 함수 추가:** `MainWindow` 또는 `EngineHealthMonitor`에 `DefaultDeviceInfo` 구조체(이름, GUID, APO등록여부)를 반환하는 `GetDefaultDevice()` 헬퍼 추가.
+- **폴링 로직 (3초):** `MainWindow`에 `m_defaultDeviceTimer`(3.0f)를 두고, 백그라운드 스레드로 현재 윈도우 기본 장치를 3초마다 체크하여 `m_defaultDeviceInfo` 갱신.
+- **UI 교체 (TopBar):** 
+  - `MainWindow.cpp` L:863-904 의 `[그룹 2] 기기 드롭다운(BeginCombo)` 전체 삭제.
+  - 대신 `ImGui::Text()`로 `m_defaultDeviceInfo.name` 출력.
+  - `apoRegistered`가 false일 경우 `ImGui::SameLine()` 후 `ImGui::TextColored(COLOR_RED, " - 장치설정 요함(설정에서 가능)")` 추가.
+- **설정창 제거:** `SettingsWindow.cpp` 내부의 오디오 장치 선택 드롭다운 로직을 완전히 삭제하여 혼선 방지.
 
-### 📝 상세 로깅 (Max Logging)
-- **TraceF 시스템**: 엔진 및 도구의 모든 동작을 `C:\Users\Public\SoundMate_*.log`에 실시간 기록.
+### 작업 B — 프리셋 로깅(정규화) 누락 보강
+- **위치:** `MainWindow.cpp` L:632-641 (프리셋 모드 분기)
+- **변경:** 프리셋 모드일 경우 early return 하기 직전에, `std::thread([](){ g_genreManager.GetGenre(title, artist); }).detach();` 를 fire-and-forget으로 한 줄 추가하여 장르 매칭 API를 무조건 태워 정규화 로그가 남도록 수정.
 
----
-
-## 4. 오디오 대참사 방지 핵심 수정 사항 (Special Focus)
-
-이전의 오디오 먹통 사고를 방지하기 위한 구체적인 수정 내용입니다.
-
-| 문제 현상 | 기술적 원인 | **수정 및 방지 대책** |
-| :--- | :--- | :--- |
-| **소리 먹통/X 아이콘** | 오디오 엔드포인트 레지스트리 꼬임 | `SoundMate_reset`에 엔드포인트 강제 삭제 및 하드웨어 재스캔 로직 추가 |
-| **액세스 거부 오류** | 레지스트리 권한(ACL) 손상 | `RegistryHelper`를 강화하여 소유권을 `SYSTEM`으로 즉시 복구하는 로직 적용 |
-| **서비스 시작 실패** | 서비스 종속성(Dependency) 파손 | 서비스 시작 유형 및 필수 라이브러리 연결 상태를 강제 복구하는 코드 삽입 |
-| **설치 후 오디오 정지** | 기존 APO 정보 유실 | `Child APO` 백업 시스템을 도입하여 설치 전 상태로 언제든 롤백 가능하게 설계 |
-| **동영상 프리징** | 오디오 버퍼 처리 중단 | 처리 루프에 `try-catch` 및 타임아웃을 도입하여 엔진 문제 시 즉시 우회(Pass) |
-
----
-
-## 5. UI 연동 계획
-- **실시간 로그 뷰어**: 엔진 상태를 UI에서 실시간 확인.
-- **원클릭 복구**: 문제 발생 시 버튼 하나로 `SoundMate_reset` 가동.
+### 작업 C — 음원 정보(iTunes 매칭) 실패 시 AI 완벽 차단
+- **자동 AI 모드 차단:** `MainWindow.cpp` L:698-701 부근에서 `mode == EqMode::AiAuto` 일 때, `m_currentGenre.empty()` 이면 `TriggerAIGeneration()` 호출을 막고 `SetStatus("음원 정보를 찾을 수 없어 EQ를 적용하지 않습니다.", Theme::COLOR_YELLOW)` 실행.
+- **수동 프롬프트 차단:** `MainWindow.cpp` L:1228 부근 프롬프트 입력 및 "입력" 버튼 영역에서, `m_currentGenre.empty()` 이면 버튼 클릭을 무시하거나 에러 상태 텍스트 출력(또는 입력창 비활성화).
+- **글로벌 평균 모드 차단:** `EqMode::GlobalAverage` 일 때도 `m_currentGenre.empty()` 이면 사일런트 페일하지 않고, 노란 텍스트로 에러 안내 및 이전 EQ(플랫) 유지.
