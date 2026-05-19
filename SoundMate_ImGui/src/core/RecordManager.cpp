@@ -359,12 +359,141 @@ std::string RecordManager::GetUserIdFromToken() {
   }
 }
 
+std::string RecordManager::GetAccessToken() {
+  // GetUserIdFromToken은 access_token을 리턴하면서 m_userId를 채워줌.
+  // 만료 1분 전이면 자동으로 refresh access_token까지 처리.
+  return GetUserIdFromToken();
+}
+
+bool RecordManager::RefreshUserProfile() {
+  std::string at = GetAccessToken();
+  if (at.empty() || m_userId.empty())
+    return false;
+
+  std::string endpoint =
+      "/rest/v1/profiles?id=eq." + m_userId +
+      "&select=plan_type,display_name,trial_started_at,subscription_status";
+  std::string resp = SupabaseRequest("GET", endpoint, "", at);
+  if (resp.empty())
+    return false;
+
+  try {
+    auto arr = nlohmann::json::parse(resp);
+    if (!arr.is_array() || arr.empty())
+      return false;
+    auto &row = arr[0];
+
+    std::lock_guard<std::mutex> lk(m_mutex);
+    if (!m_cache.contains("profile") || !m_cache["profile"].is_object())
+      m_cache["profile"] = nlohmann::json::object();
+    auto &p = m_cache["profile"];
+    p["plan_type"]           = row.value("plan_type",           "free");
+    p["display_name"]        = row.value("display_name",        "");
+    p["trial_started_at"]    = row.value("trial_started_at",    "");
+    p["subscription_status"] = row.value("subscription_status", "");
+    SaveCache();
+    return true;
+  } catch (...) {
+    return false;
+  }
+}
+
 std::pair<std::string, std::string> RecordManager::GetUserInfo() {
-  return {"테스트 사용자", "Expert"};
+  std::string name = "사용자";
+  std::string plan = "free";
+  try {
+    if (m_cache.contains("profile") && m_cache["profile"].is_object()) {
+      auto &p = m_cache["profile"];
+      if (p.contains("display_name") && p["display_name"].is_string()) {
+        std::string dn = p["display_name"].get<std::string>();
+        if (!dn.empty()) name = dn;
+      }
+      if (p.contains("plan_type") && p["plan_type"].is_string()) {
+        std::string pt = p["plan_type"].get<std::string>();
+        if (!pt.empty()) plan = pt;
+      }
+    }
+  } catch (...) {}
+  return {name, plan};
 }
 
 std::string RecordManager::GetUserPlanType() {
-  return "expert";
+  // 캐시 미존재 시 1회 lazy fetch (네트워크 호출 1번).
+  // 호출 측에서 명시적으로 RefreshUserProfile()을 부르는 게 더 좋지만
+  // 로그인 직후 호출이 누락된 경로에 대한 안전망.
+  try {
+    if (!m_cache.contains("profile") ||
+        !m_cache["profile"].is_object() ||
+        !m_cache["profile"].contains("plan_type")) {
+      RefreshUserProfile();
+    }
+    if (m_cache.contains("profile") &&
+        m_cache["profile"].is_object() &&
+        m_cache["profile"].contains("plan_type") &&
+        m_cache["profile"]["plan_type"].is_string()) {
+      std::string pt = m_cache["profile"]["plan_type"].get<std::string>();
+      if (!pt.empty()) return pt;
+    }
+  } catch (...) {}
+  return "free"; // fail closed
+}
+
+// Trial 정책: 7일. 변경 시 site_settings로 옮기는 게 깔끔하지만 현재는 상수.
+static constexpr std::time_t kTrialDurationSec = 7 * 24 * 60 * 60;
+
+int RecordManager::GetTrialRemainingDays() {
+  try {
+    if (!m_cache.contains("profile") || !m_cache["profile"].is_object() ||
+        !m_cache["profile"].contains("trial_started_at"))
+      return -1;
+    std::string ts = m_cache["profile"]["trial_started_at"].get<std::string>();
+    if (ts.empty()) return -1;
+
+    std::tm tm{};
+    std::istringstream ss(ts);
+    ss >> std::get_time(&tm, "%Y-%m-%dT%H:%M:%S");
+    if (ss.fail()) return -1;
+
+    std::time_t started = _mkgmtime(&tm);
+    std::time_t now     = std::time(nullptr);
+    std::time_t endsAt  = started + kTrialDurationSec;
+    if (now >= endsAt) return -1;
+
+    // 올림(ceil): 23시간 남았어도 "D-1"이 아니라 "D-1"로 보이게.
+    std::time_t secLeft = endsAt - now;
+    int days = (int)((secLeft + (24 * 60 * 60 - 1)) / (24 * 60 * 60));
+    return days;
+  } catch (...) {
+    return -1;
+  }
+}
+
+bool RecordManager::IsAIEligible() {
+  std::string plan = GetUserPlanType();
+  if (plan == "pro" || plan == "beta" || plan == "expert")
+    return true;
+  return GetTrialRemainingDays() > 0;
+}
+
+std::string RecordManager::GetPlanDisplayLabel() {
+  std::string plan = GetUserPlanType();
+
+  std::string base;
+  if      (plan == "pro")    base = u8"Pro 플랜";
+  else if (plan == "beta")   base = u8"Beta 플랜";
+  else if (plan == "expert") base = u8"Expert 플랜";
+  else if (plan == "free")   base = u8"무료 플랜";
+  else                       base = plan; // 알 수 없는 값은 그대로 노출
+
+  int trialDays = GetTrialRemainingDays();
+  if (trialDays > 0) {
+    // free 사용자가 Trial 중이라면 "Pro 플랜 (Trial · D-3)"으로 표기.
+    // 이미 유료 플랜이면 Trial 표기는 무의미해서 생략.
+    if (plan == "free") {
+      base = u8"Pro 플랜 (Trial · D-" + std::to_string(trialDays) + ")";
+    }
+  }
+  return base;
 }
 
 std::string RecordManager::GetUserTendency() {

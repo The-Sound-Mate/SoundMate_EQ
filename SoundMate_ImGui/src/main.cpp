@@ -112,16 +112,24 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     MainWindow   mainWin;
     bool loggedIn = false;
 
+    // [Phase 3] 로그인 성공 직후 profile(plan_type, display_name 등)을
+    // 백그라운드 스레드에서 1회 fetch. UI 블로킹 없이 캐시를 채워둔다.
+    auto refreshProfileAsync = []() {
+        std::thread([]() { g_recordManager.RefreshUserProfile(); }).detach();
+    };
+
     // [Phase 2-A] 토큰 자동 복원 — 유효한 v2(DPAPI 암호화) 토큰이 있으면
     // LoginWindow 자체를 띄우지 않고 즉시 메인 화면으로. 토큰 만료 / 복호화
     // 실패 / 파일 없음이면 LoginWindow.Open() 으로 흐름 유지 (TryAutoLogin 이
     // v1→v2 마이그레이션 + "세션 만료" 메시지 처리 담당).
     if (!g_recordManager.GetUserIdFromToken().empty()) {
         loggedIn = true;   // m_userId 는 GetUserIdFromToken 내부에서 설정됨
+        refreshProfileAsync();
     } else {
         loginWin.Open([&](const std::string& uid, const std::string& email, bool isNew) {
             g_recordManager.SetUserId(uid);
             loggedIn = true;
+            refreshProfileAsync();
         });
     }
 
@@ -134,6 +142,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
         loginWin.Open([&](const std::string& uid, const std::string& email, bool isNew) {
             g_recordManager.SetUserId(uid);
             loggedIn = true;
+            refreshProfileAsync();
         });
     });
     g_app = &mainWin;

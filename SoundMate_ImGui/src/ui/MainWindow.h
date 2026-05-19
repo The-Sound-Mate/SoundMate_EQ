@@ -149,6 +149,11 @@ private:
     void DownloadAndExecuteUpdate();
     void RenderUpdatePopup();
 
+    // ── [Phase 3] Free 플랜 AI 차단 / Pro 구독 안내 ─────────────
+    bool m_showUpgradePopup = false;
+    void RenderUpgradePopup();
+    void OpenPricingPage();
+
     // 기기 목록
     std::vector<DeviceInfo> m_devices;
     int m_selectedDevice = 0;
@@ -170,6 +175,11 @@ private:
     // 200ms × 10회 ≈ 2초 트랜지션, Controller 50ms debounce 와 충돌 없음.
     float              m_transitionApplyTimer = 0.0f;
     static constexpr float kTransitionApplyInterval = 0.20f;
+
+    // [Phase 3] 프로필 주기 폴링 — 켜진 상태로 구독/Trial 시작 시 자동 반영.
+    // 60초마다 백그라운드 thread에서 RefreshUserProfile() 호출.
+    float              m_profileRefreshTimer = 999.f; // 첫 프레임에 즉시 실행
+    static constexpr float kProfileRefreshInterval = 60.0f;
 
     // Controller 미실행 감지 — 5초마다 프로세스 enumeration (GUI-only).
     // UAC 거절 등으로 Controller 가 안 떠 있으면 config.txt 가 SHM 까지

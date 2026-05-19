@@ -33,32 +33,37 @@ AIClient::AIClient() {
     curl_global_init(CURL_GLOBAL_DEFAULT);
 }
 
-// ─── Gemini REST API 호출 ────────────────────────────────────────────────────
 // ─── Supabase Edge Function Proxy 호출 (Gemini 중계) ───────────────────────────
+// PR-1: 사용자 JWT 필수. apikey 헤더에는 anon 키, Authorization에는 user JWT.
 std::string AIClient::CallProxyAPI(
     const std::string& title,
     const std::string& artist,
     const std::string& genre,
     const std::string& userPref,
-    const std::string& systemPref)
+    const std::string& systemPref,
+    const std::string& accessToken,
+    long*              outHttpCode,
+    std::string*       outBody)
 {
-    // [v12.0] 직접 구글을 호출하지 않고 우리 서버(Supabase)를 거칩니다.
     std::string url = "https://lpcarclwfgzlfczqflgo.supabase.co/functions/v1/generate-eq";
-    
-    // Supabase Key 난독화 (빌드 시 스트링 추출 방지)
+
+    // anon 키(라우팅용) — 빌드 산출물 grep 방지를 위해 분할 보관
     std::string k1 = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.";
     std::string k2 = "eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxwY2FyY2x3Zmd6bGZjenFmbGdvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzI1OTUwNTUsImV4cCI6MjA4ODE3MTA1NX0.";
     std::string k3 = "UzEoMwsb6pKjb4TjvvAkgjypqzLG-hB_sUAIvzB4f04";
-    std::string sKey = k1 + k2 + k3;
+    std::string anonKey = k1 + k2 + k3;
+
+    // verify_jwt: true 이므로 Authorization엔 사용자 JWT가 들어가야 함.
+    // 비어있으면 빈 토큰 그대로 보내 401을 받게 한다 (UI에서 재로그인 유도).
+    const std::string& userJwt = accessToken;
 
     json body = {
-        {"title", title},
-        {"artist", artist},
-        {"genre", genre},
-        {"userPref", userPref},
+        {"title",      title},
+        {"artist",     artist},
+        {"genre",      genre},
+        {"userPref",   userPref},
         {"systemPref", systemPref}
     };
-    // 클라이언트는 Gemini API 키를 보유하지 않는다 — Edge Function이 자체 처리.
     std::string bodyStr = body.dump();
 
     CURL* curl = curl_easy_init();
@@ -67,8 +72,8 @@ std::string AIClient::CallProxyAPI(
     std::string responseStr;
     struct curl_slist* headers = nullptr;
     headers = curl_slist_append(headers, "Content-Type: application/json");
-    headers = curl_slist_append(headers, ("apikey: " + sKey).c_str());
-    headers = curl_slist_append(headers, ("Authorization: Bearer " + sKey).c_str());
+    headers = curl_slist_append(headers, ("apikey: " + anonKey).c_str());
+    headers = curl_slist_append(headers, ("Authorization: Bearer " + userJwt).c_str());
 
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, bodyStr.c_str());
@@ -77,20 +82,20 @@ std::string AIClient::CallProxyAPI(
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &responseStr);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
-    // SSL 검증 ON — libcurl WinSSL 빌드가 Windows 인증서 스토어를 사용해
-    // 자체 검증한다. 별도 ca-bundle 동봉 불요. MITM 방어 필수.
 
     CURLcode res = curl_easy_perform(curl);
     long httpCode = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpCode);
-    
+
     curl_slist_free_all(headers);
     curl_easy_cleanup(curl);
+
+    if (outHttpCode) *outHttpCode = httpCode;
+    if (outBody)     *outBody     = responseStr;
 
     if (res == CURLE_OK && httpCode == 200) {
         return responseStr;
     }
-    
     throw std::runtime_error("Proxy Error " + std::to_string(httpCode) + ": " + responseStr);
 }
 
@@ -126,7 +131,8 @@ EQBands AIClient::GenerateAllBandsEQ(
     const std::string& artist,
     const std::string& genre,
     const std::string& userPref,
-    const std::string& systemPref)
+    const std::string& systemPref,
+    const std::string& accessToken)
 {
     EQBands result;
     result.bands5.assign(5, 0.0f);
@@ -134,42 +140,30 @@ EQBands AIClient::GenerateAllBandsEQ(
     result.bands15.assign(15, 0.0f);
     result.bands31.assign(31, 0.0f);
 
-    // ── 프롬프트 구성 (Python generate_eq 내부와 동일) ──
-    std::ostringstream freqStr;
-    for (size_t i = 0; i < F31.size(); ++i) {
-        if (i > 0) freqStr << ", ";
-        freqStr << F31[i];
-    }
-
-    json musicInfo = {
-        {"music_info", {
-            {"title",  title},
-            {"artist", artist},
-            {"genre",  genre.empty() ? "Unknown" : genre}
-        }}
-    };
-
-    // [v12.0] 프롬프트는 이제 서버(Edge Function)에서 생성합니다.
-
+    long httpCode = 0;
+    std::string body;
     try {
-        std::string response = CallProxyAPI(title, artist, genre, userPref, systemPref);
+        std::string response = CallProxyAPI(title, artist, genre, userPref,
+                                            systemPref, accessToken,
+                                            &httpCode, &body);
         result.bands31 = ParseGainsFromResponse(response);
-
-        // 보간으로 나머지 밴드 계산
         result.bands5  = Map31ToTargetBands(result.bands31, F5);
         result.bands10 = Map31ToTargetBands(result.bands31, F10);
         result.bands15 = Map31ToTargetBands(result.bands31, F15);
         result.errorCode = 0;
     }
     catch (const std::exception& e) {
-        std::string msg = e.what();
-        if (msg.find("429") != std::string::npos)
-            result.errorCode = 429;
-        else if (msg.find("503") != std::string::npos)
-            result.errorCode = 503;
-        else
-            result.errorCode = -1;
-        result.errorMsg = msg;
+        result.errorMsg = e.what();
+        result.errorCode = (int)httpCode;
+        if (httpCode == 0) result.errorCode = -1;
+
+        // 403 인 경우 본문에서 reason 파싱 (free_no_ai / monthly_limit / ...)
+        if (httpCode == 403 && !body.empty()) {
+            try {
+                auto j = json::parse(body);
+                result.quotaReason = j.value("reason", "");
+            } catch (...) {}
+        }
     }
     return result;
 }

@@ -146,13 +146,21 @@ void SettingsWindow::Render() {
 
     // ── AI 설정 ──
     RenderSection("AI 설정");
-    
+
+    // [Phase 3] "음악 취향 설정" 행은 "계정 정보" 섹션의 "취향 설문하기"와 동작이
+    // 겹쳐 사용자가 혼란스러워하므로 임시 숨김. SurveyWindow 하나로 통일.
+    // 향후 5차원 슬라이더 다이얼로그를 신설하면 이 자리에 다시 살릴 것.
+    /*
     ImGui::TextColored(Theme::TEXT_GRAY, "음악 취향 설정");
     ImGui::SameLine(rightCol);
     ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(50,30,100,255));
-    if (ImGui::Button("변경하기", {150, 0})) { /* 취향 설정 다이얼로그 호출 */ }
+    if (ImGui::Button("변경하기", {150, 0})) {
+        m_open = false;                  // SettingsWindow 닫고 Survey로 이동
+        if (m_onSurvey) m_onSurvey();
+    }
     ImGui::PopStyleColor();
-    
+    */
+
     ImGui::TextColored(Theme::TEXT_GRAY, "AI 자동 분석");
     ImGui::SameLine(cw - 40.0f);
     if (ToggleButton("##autoanalyze", &m_settings.autoAnalyze)) {
@@ -188,10 +196,15 @@ void SettingsWindow::Render() {
     ImGui::TextColored(Theme::TEXT_GRAY, "언어 (Language)");
     ImGui::SameLine(rightCol);
     ImGui::SetNextItemWidth(150);
+    // [Phase 3] i18n 본 작업(I18nManager) 전까지 dropdown 비활성. 동작 안 하는
+    // 토글을 노출하면 다른 토글의 신뢰도까지 떨어뜨림.
+    ImGui::BeginDisabled(true);
     if (ImGui::BeginCombo("##lang", m_settings.language.c_str())) {
-        if (ImGui::Selectable("한국어", m_settings.language=="한국어")) { m_settings.language="한국어"; SaveSettings(m_settings); }
-        if (ImGui::Selectable("English", m_settings.language=="English")) { m_settings.language="English"; SaveSettings(m_settings); }
         ImGui::EndCombo();
+    }
+    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        ImGui::SetTooltip(u8"준비 중입니다.");
     }
     ImGui::Spacing();
 
@@ -267,10 +280,14 @@ void SettingsWindow::Render() {
     ImGui::SameLine(cw - ImGui::CalcTextSize(userName.c_str()).x);
     ImGui::TextColored(Theme::TEXT_WHITE, "%s", userName.c_str());
 
+    // [Phase 3] 한글 라벨 + Trial D-N. 로직은 RecordManager 단에서 일원화.
     ImGui::TextColored(Theme::TEXT_GRAY, "현재 플랜");
-    std::string planText = userPlan + " (전문가 플랜)";
+    std::string planText = g_recordManager.GetPlanDisplayLabel();
+    bool isFreePlan = (userPlan == "free" &&
+                       g_recordManager.GetTrialRemainingDays() <= 0);
+    ImVec4 planColor = isFreePlan ? Theme::TEXT_GRAY : Theme::COLOR_CYAN;
     ImGui::SameLine(cw - ImGui::CalcTextSize(planText.c_str()).x);
-    ImGui::TextColored(Theme::COLOR_CYAN, "%s", planText.c_str());
+    ImGui::TextColored(planColor, "%s", planText.c_str());
 
     ImGui::Spacing();
 
@@ -280,6 +297,8 @@ void SettingsWindow::Render() {
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Theme::ToU32(Theme::GRAD_END));
     ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(0,0,0,255));
     if (ImGui::Button("취향 설문하기", {160, 32})) {
+        // [Phase 3] z-order 충돌 방지 — Settings를 먼저 닫고 Survey 호출
+        m_open = false;
         if (m_onSurvey) m_onSurvey();
     }
     ImGui::PopStyleColor(3);

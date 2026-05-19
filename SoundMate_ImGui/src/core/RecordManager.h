@@ -33,6 +33,23 @@ public:
   std::pair<std::string, std::string> GetUserInfo(); // {name, plan}
   std::string GetUserPlanType();
 
+  // 현재 유효한 access_token(JWT)를 반환. 만료 임박 시 자동 refresh.
+  std::string GetAccessToken();
+
+  // profiles 테이블에서 plan_type / display_name / trial_started_at 등을
+  // 받아 m_cache["profile"]에 저장. 로그인 직후 1회 + 필요 시 호출.
+  bool RefreshUserProfile();
+
+  // Phase 3: AI 사용 가능한 플랜인지 (pro/beta/expert) 또는 Trial 활성 여부.
+  // 클라이언트측 캐시 기반 — 서버가 진짜 게이트(consume_ai_quota).
+  bool IsAIEligible();
+
+  // Trial 잔여 일수. -1 = Trial 비활성 또는 알 수 없음. 7일 정책 기준.
+  int  GetTrialRemainingDays();
+
+  // 설정창 등에서 그대로 표시할 한글 라벨. 예) "Pro 플랜", "Pro 플랜 (Trial · D-3)".
+  std::string GetPlanDisplayLabel();
+
   // ── 세션 상태 ──────────────────────────────────────────────────
   void SaveSessionState(const std::vector<float> &gains,
                         const std::vector<int> &bands,

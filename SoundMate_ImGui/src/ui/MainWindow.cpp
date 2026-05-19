@@ -305,15 +305,28 @@ void MainWindow::OnSongChanged(const SongInfo &song) {
 void MainWindow::TriggerAIGeneration() {
   if (m_currentTitle.empty() || m_aiProcessing)
     return;
+
+  // [Phase 3] Free 플랜은 AI 호출 자체를 막는다. 서버도 이중으로 막지만
+  // 호출 비용·대기시간을 줄이기 위해 클라이언트에서 1차 컷.
+  // (auto 트리거에서도 호출되므로 popup은 띄우지 않고 상태바만 표시 →
+  //  popup은 하단 바 "Pro 구독하기" 버튼 또는 서버 403 'free_no_ai' 응답에서만)
+  if (!g_recordManager.IsAIEligible()) {
+    memset(m_promptBuf, 0, sizeof(m_promptBuf));
+    SetStatus(u8"Free 플랜은 AI 기능이 제한됩니다. Pro 플랜으로 업그레이드하세요.",
+              Theme::COLOR_ORANGE);
+    return;
+  }
+
   std::string prompt = m_promptBuf;
   memset(m_promptBuf, 0, sizeof(m_promptBuf));
+  std::string accessToken = g_recordManager.GetAccessToken();
 
   SetStatus("AI Analyzing...", Theme::TEXT_WHITE);
   m_aiProcessing = true;
 
   if (m_aiThread.joinable())
     m_aiThread.detach();
-  m_aiThread = std::thread([this, prompt]() {
+  m_aiThread = std::thread([this, prompt, accessToken]() {
     if (!m_ai) {
       SetStatus("AI Setup Error: client not initialized", Theme::COLOR_RED);
       m_aiProcessing = false;
@@ -321,14 +334,29 @@ void MainWindow::TriggerAIGeneration() {
     }
 
     SetStatus("AI: Sending request to Proxy...", Theme::TEXT_WHITE);
-    auto result =
-        m_ai->GenerateAllBandsEQ(m_currentTitle, m_currentArtist,
-                                 m_currentGenre, prompt, m_userPreference);
+    auto result = m_ai->GenerateAllBandsEQ(
+        m_currentTitle, m_currentArtist, m_currentGenre,
+        prompt, m_userPreference, accessToken);
 
     if (result.errorCode == 429) {
       SetStatus("AI Rate Limit. Wait 30s.", Theme::COLOR_RED);
     } else if (result.errorCode == 503) {
       SetStatus("AI Server Busy. Try again later.", Theme::COLOR_RED);
+    } else if (result.errorCode == 401) {
+      SetStatus(u8"세션이 만료되었습니다. 다시 로그인해 주세요.",
+                Theme::COLOR_RED);
+    } else if (result.errorCode == 403) {
+      // 서버 quota gate. 사유에 따라 분기.
+      if (result.quotaReason == "free_no_ai") {
+        m_showUpgradePopup = true;
+        SetStatus(u8"Free 플랜은 AI 기능을 사용할 수 없습니다.",
+                  Theme::COLOR_ORANGE);
+      } else if (result.quotaReason == "monthly_limit") {
+        SetStatus(u8"이번 달 AI 사용 한도를 모두 사용했습니다.",
+                  Theme::COLOR_ORANGE);
+      } else {
+        SetStatus("AI Access Denied: " + result.quotaReason, Theme::COLOR_RED);
+      }
     } else if (result.errorCode != 0) {
       SetStatus("AI Proxy Error: " + result.errorMsg, Theme::COLOR_RED);
     } else {
@@ -432,6 +460,15 @@ void MainWindow::Render() {
     }
   }
 
+  // ── [Phase 3] 프로필 주기 폴링 (60초) ──
+  // 앱 실행 중에 사용자가 웹에서 구독 / 무료체험을 시작해도 1분 내에 plan이
+  // 갱신되어 AI 게이트와 UI 라벨이 자동으로 풀리도록 한다.
+  m_profileRefreshTimer += m_deltaTime;
+  if (m_profileRefreshTimer >= kProfileRefreshInterval) {
+    m_profileRefreshTimer = 0.0f;
+    std::thread([]() { g_recordManager.RefreshUserProfile(); }).detach();
+  }
+
   // ── 스무스 트랜지션 업데이트 ──
   // 트랜지션 진행 중에는 m_eqGains 가 매 프레임 보간되므로 슬라이더는 부드럽게
   // 움직인다. 동시에 200ms 마다 ApplyEQNoSave 를 호출해 실제 오디오에도 같은
@@ -514,7 +551,10 @@ void MainWindow::Render() {
         ApplyPreset(m_selectedPresetIdx);
         SetStatus("Preset: " + m_userPresets[m_selectedPresetIdx].name,
                   Theme::COLOR_CYAN);
-        std::thread([]() { g_recordManager.ProcessBatchSync(false); }).detach();
+        // [Phase 3] pro 이상만 서버 동기화 (free는 로컬 캐시까지만)
+        if (g_recordManager.IsAIEligible()) {
+          std::thread([]() { g_recordManager.ProcessBatchSync(false); }).detach();
+        }
         return;
       }
 
@@ -568,7 +608,10 @@ void MainWindow::Render() {
       }).detach();
 
       // DB 일괄 동기화 (5곡 변경마다 백그라운드 스레드에서 실행)
-      std::thread([]() { g_recordManager.ProcessBatchSync(false); }).detach();
+      // [Phase 3] pro 이상만 — free는 서버에 EQ 히스토리를 안 보냄.
+      if (g_recordManager.IsAIEligible()) {
+        std::thread([]() { g_recordManager.ProcessBatchSync(false); }).detach();
+      }
     }
   }
 
@@ -624,6 +667,9 @@ void MainWindow::Render() {
   
   // 자동 업데이트 알림 팝업
   RenderUpdatePopup();
+
+  // [Phase 3] Free 플랜 → Pro 업그레이드 안내 팝업
+  RenderUpgradePopup();
 }
 
 // ── 상단 바 ──────────────────────────────────────────────────────────────────
@@ -820,6 +866,18 @@ void MainWindow::RenderTopBar() {
                 SetStatus("설정 실패 (권한 거부)", Theme::COLOR_RED);
               }
             }).detach();
+          },
+          // [Phase 3] onRestoreDevice — dev/mj 복원: SoundMate_reset.exe 실행
+          [this]() { ExecuteRestore(""); },
+          // [Phase 3] onSurvey — SurveyWindow 열기. 완료 시 취향 저장 + AI 재트리거
+          [this]() {
+            m_surveyWin.Open([this](const std::string &pref) {
+              m_userPreference = pref;
+              g_recordManager.SaveUserTendency(pref, {});
+              SetStatus(u8"취향이 저장되었습니다.", Theme::COLOR_GREEN);
+              if (!m_currentTitle.empty() && g_recordManager.IsAIEligible())
+                TriggerAIGeneration();
+            });
           });
     }
   }
@@ -1025,18 +1083,46 @@ void MainWindow::RenderBottomBar() {
   ImGui::PushStyleColor(ImGuiCol_ChildBg, Theme::ToU32(Theme::PANEL_COLOR));
   ImGui::BeginChild("##bottom", {0, 54}, false);
 
-  // 프롬프트 입력
-  ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 330);
-  bool enter = ImGui::InputText("##prompt", m_promptBuf, sizeof(m_promptBuf),
-                                ImGuiInputTextFlags_EnterReturnsTrue);
-  ImGui::SameLine(0, 8);
+  // [Phase 3] Free 플랜은 프롬프트 입력 자체를 비활성. 안내 + 구독 버튼만 노출.
+  const bool aiEligible = g_recordManager.IsAIEligible();
 
-  // 입력 버튼
-  ImGui::PushStyleColor(ImGuiCol_Button, Theme::ToU32(Theme::BTN_SECONDARY));
-  if (ImGui::Button("입력", {80, 0}) || enter)
-    TriggerAIGeneration();
-  ImGui::PopStyleColor();
-  ImGui::SameLine(0, 8);
+  if (!aiEligible) {
+    // 비활성 InputText로 입력 영역 가로 폭 유지 (UI 흔들림 방지)
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 330);
+    ImGui::PushStyleColor(ImGuiCol_FrameBg,    IM_COL32(35, 35, 45, 255));
+    ImGui::PushStyleColor(ImGuiCol_Text,       Theme::ToU32(Theme::TEXT_GRAY));
+    ImGui::BeginDisabled(true);
+    char placeholder[160];
+    std::snprintf(placeholder, sizeof(placeholder),
+                  u8"Pro 플랜 구독 시 AI 채팅 사용 가능 — 우측 버튼으로 업그레이드하세요");
+    ImGui::InputText("##prompt_locked", placeholder, sizeof(placeholder),
+                     ImGuiInputTextFlags_ReadOnly);
+    ImGui::EndDisabled();
+    ImGui::PopStyleColor(2);
+    ImGui::SameLine(0, 8);
+
+    // Pro 구독하기 버튼 — 모달 안내 또는 즉시 페이지 오픈
+    ImGui::PushStyleColor(ImGuiCol_Button,        Theme::ToU32(Theme::GRAD_START));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Theme::ToU32(Theme::GRAD_END));
+    if (ImGui::Button(u8"Pro 구독하기", {130, 0})) {
+      m_showUpgradePopup = true;
+    }
+    ImGui::PopStyleColor(2);
+    ImGui::SameLine(0, 8);
+  } else {
+    // 프롬프트 입력
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 330);
+    bool enter = ImGui::InputText("##prompt", m_promptBuf, sizeof(m_promptBuf),
+                                  ImGuiInputTextFlags_EnterReturnsTrue);
+    ImGui::SameLine(0, 8);
+
+    // 입력 버튼
+    ImGui::PushStyleColor(ImGuiCol_Button, Theme::ToU32(Theme::BTN_SECONDARY));
+    if (ImGui::Button("입력", {80, 0}) || enter)
+      TriggerAIGeneration();
+    ImGui::PopStyleColor();
+    ImGui::SameLine(0, 8);
+  }
 
   // 수동 초기화
   ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(61, 61, 61, 255));
@@ -1074,7 +1160,8 @@ void MainWindow::RenderBottomBar() {
   ImGui::PopStyleColor();
   ImGui::SameLine(0, 8);
 
-  // AI 초기화
+  // AI 초기화 — Free 플랜에서는 노출 자체를 막는다 (의미 없는 버튼 제거).
+  if (aiEligible) {
   ImGui::PushStyleColor(ImGuiCol_Button, Theme::ToU32(Theme::GRAD_START));
   if (ImGui::Button("AI 초기화", {100, 0})) {
     g_recordManager.ClearPromptEQ(m_currentTitle, m_currentArtist);
@@ -1108,6 +1195,7 @@ void MainWindow::RenderBottomBar() {
     }
   }
   ImGui::PopStyleColor();
+  } // end if (aiEligible) — Free 플랜은 AI 초기화 버튼 자체가 숨겨짐
 
   ImGui::EndChild();
   ImGui::PopStyleColor();
@@ -1799,7 +1887,74 @@ void MainWindow::RenderUpdatePopup() {
 
         ImGui::EndPopup();
     }
-    
+
+    ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor();
+}
+
+// ============================================================================
+// [Phase 3] Free 플랜 → Pro 구독 안내 팝업
+// ============================================================================
+void MainWindow::OpenPricingPage() {
+    // Pricing 페이지로 이동. ShellExecuteA 는 비동기로 기본 브라우저를 띄움.
+    ShellExecuteA(nullptr, "open",
+                  "https://soundmate.kro.kr/pricing",
+                  nullptr, nullptr, SW_SHOWNORMAL);
+}
+
+void MainWindow::RenderUpgradePopup() {
+    if (m_showUpgradePopup) {
+        ImGui::OpenPopup("##upgrade_popup");
+        m_showUpgradePopup = false;
+    }
+
+    ImGuiIO& io = ImGui::GetIO();
+    ImGui::SetNextWindowPos({io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f},
+                            ImGuiCond_Always, {0.5f, 0.5f});
+    ImGui::SetNextWindowSize({420, 0}, ImGuiCond_Always);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, Theme::ToU32(Theme::PANEL_COLOR));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 12.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {20.0f, 16.0f});
+
+    int flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize
+              | ImGuiWindowFlags_AlwaysAutoResize;
+    if (ImGui::BeginPopupModal("##upgrade_popup", nullptr, flags)) {
+        ImGui::TextColored(Theme::COLOR_CYAN, u8"✨ Pro 플랜으로 업그레이드");
+        ImGui::Spacing();
+        ImGui::TextWrapped(
+            u8"SoundMate의 AI EQ 자동 매핑 / 프롬프트 기반 EQ 생성 기능은\n"
+            u8"Pro 플랜 이상에서 사용하실 수 있습니다.\n\n"
+            u8"Pro 플랜:\n"
+            u8"  • AI 자동 EQ: 월 300회\n"
+            u8"  • 프롬프트 EQ: 월 100회\n"
+            u8"  • 사용자 프리셋 저장 3개");
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        float cw   = ImGui::GetContentRegionAvail().x;
+        float btnW = (cw - 8) / 2;
+
+        ImGui::PushStyleColor(ImGuiCol_Button,        Theme::ToU32(Theme::GRAD_START));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Theme::ToU32(Theme::GRAD_END));
+        ImGui::PushStyleColor(ImGuiCol_Text,          IM_COL32(0,0,0,255));
+        if (ImGui::Button(u8"Pro 구독하기", {btnW, 36})) {
+            OpenPricingPage();
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::PopStyleColor(3);
+
+        ImGui::SameLine(0, 8);
+        ImGui::PushStyleColor(ImGuiCol_Button,        IM_COL32(60,60,60,255));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(90,90,90,255));
+        if (ImGui::Button(u8"닫기", {btnW, 36})) {
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::PopStyleColor(2);
+
+        ImGui::EndPopup();
+    }
+
     ImGui::PopStyleVar(2);
     ImGui::PopStyleColor();
 }
