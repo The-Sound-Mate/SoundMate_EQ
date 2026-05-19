@@ -53,4 +53,10 @@ private:
     std::atomic<bool> m_serverRunning{false};
     std::string  m_accessToken, m_refreshToken;
     std::atomic<bool> m_tokenReceived{false};
+
+    // [PR-2D] 자동로그인 thread를 detach 대신 join으로 관리.
+    // 로그아웃 → 재로그인 시 이전 thread가 m_open/m_onSuccess에 race로
+    // write 하던 버그(앱이 꺼진 듯 보이는 증상) 차단.
+    std::thread       m_autoLoginThread;
+    std::atomic<bool> m_autoLoginBusy{false};
 };

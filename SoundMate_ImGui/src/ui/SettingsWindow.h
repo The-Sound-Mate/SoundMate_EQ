@@ -6,13 +6,24 @@
 #include <functional>
 #include <nlohmann/json.hpp>
 
+// [PR-2C] EQ 자동 적용 모드. 기존 globalAverage + autoAnalyze 두 토글을 통합.
+//   Off           : 자동 EQ 변환 없음 (사용자가 마지막 설정한 값 유지)
+//   GlobalAverage : 곡 장르의 글로벌 평균 EQ 적용 (AI 호출 안 함)
+//   AiAuto        : AI 자동 분석 + 글로벌 평균 블렌딩 — 기존 default 동작
+enum class EqMode { Off = 0, GlobalAverage = 1, AiAuto = 2 };
+
 struct AppSettings {
     std::string defaultDevice;
     int         defaultBands = 5;
-    bool        autoAnalyze  = true;
     bool        runOnStartup = false;
     bool        minimizeToTray = false;
     std::string language = "한국어";
+
+    // [PR-2C] 새 통합 필드. 기본은 AiAuto.
+    EqMode      eqMode = EqMode::AiAuto;
+
+    // [Deprecated, 마이그레이션 용도로만 유지] 기존 JSON 읽기 호환.
+    bool        autoAnalyze   = true;
     bool        globalAverage = false;
 };
 

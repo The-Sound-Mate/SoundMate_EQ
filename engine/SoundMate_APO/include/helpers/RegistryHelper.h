@@ -49,6 +49,13 @@ public:
 	static void deleteKey(std::wstring key);
 	static void makeWritable(std::wstring key);
 	static void takeOwnership(std::wstring key);
+
+	// [PR-S1] 원래 소유자 SID 백업 + 복원. takeOwnership 전 호출하여 owner를
+	// 저장해 두고, 작업 완료 후 restoreOwnership에 넘기면 (TrustedInstaller 등)
+	// 원래 owner로 정확히 롤백. Windows Update 호환성 보장용.
+	// outOwnerSid: LocalAlloc 으로 새 메모리에 복사된 SID. 호출자가 LocalFree 책임.
+	static void backupOwnership(std::wstring key, PSID* outOwnerSid);
+	static void restoreOwnership(std::wstring key, PSID ownerSid);
 	static ACCESS_MASK getFileAccessForUser(std::wstring path, unsigned long rid);
 	static std::vector<std::wstring> enumSubKeys(std::wstring key);
 	static std::vector<std::wstring> enumValueNames(std::wstring key);

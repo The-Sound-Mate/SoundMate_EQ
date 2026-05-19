@@ -154,11 +154,18 @@ vector<AudioDeviceInfo> DeviceManager::GetActiveDevices() {
 // Mirrors src/main.cpp::ProcessDevice but uses RegistryHelper for consistency.
 // ============================================================================
 bool DeviceManager::Install(const wstring& deviceGuid) {
+    PSID originalOwner = NULL;
+    wstring fxPath;
     try {
         wstring renderBase = wstring(RENDER_BASE) + L"\\" + deviceGuid;
-        wstring fxPath     = renderBase + L"\\FxProperties";
+        fxPath             = renderBase + L"\\FxProperties";
         wstring childPath  = wstring(L"HKEY_LOCAL_MACHINE\\SOFTWARE\\SoundMateAPO\\Child APOs\\")
                              + deviceGuid;
+
+        // [PR-S1] takeOwnership 전에 원래 owner를 백업 → 작업 끝나면 복원.
+        // TrustedInstaller 등 OS 시스템 owner를 그대로 유지하여 Windows Update
+        // 와의 호환성을 깨지 않는다.
+        try { RegistryHelper::backupOwnership(fxPath, &originalOwner); } catch(...) {}
 
         RegistryHelper::takeOwnership(fxPath);
         RegistryHelper::makeWritable(fxPath);
@@ -196,8 +203,19 @@ bool DeviceManager::Install(const wstring& deviceGuid) {
         }
 
         try { RegistryHelper::deleteValue(fxPath, disableEnhVal); } catch(...) {}
+
+        // [PR-S1] 원래 owner로 복원 후 SID 메모리 해제
+        if (originalOwner) {
+            try { RegistryHelper::restoreOwnership(fxPath, originalOwner); } catch(...) {}
+            LocalFree(originalOwner);
+            originalOwner = NULL;
+        }
         return true;
     } catch (...) {
+        if (originalOwner) {
+            try { RegistryHelper::restoreOwnership(fxPath, originalOwner); } catch(...) {}
+            LocalFree(originalOwner);
+        }
         return false;
     }
 }
@@ -211,6 +229,10 @@ bool DeviceManager::Uninstall(const wstring& deviceGuid) {
     for (auto base : { wstring(RENDER_BASE), wstring(CAPTURE_BASE) }) {
         wstring fxPath = base + L"\\" + deviceGuid + L"\\FxProperties";
         if (!RegistryHelper::keyExists(fxPath)) continue;
+
+        // [PR-S1] 원래 owner 백업 — 작업 끝나면 복원
+        PSID originalOwner = NULL;
+        try { RegistryHelper::backupOwnership(fxPath, &originalOwner); } catch(...) {}
 
         try { RegistryHelper::takeOwnership(fxPath); RegistryHelper::makeWritable(fxPath); }
         catch (...) {}
@@ -228,6 +250,12 @@ bool DeviceManager::Uninstall(const wstring& deviceGuid) {
                     writeMSZVec(fxPath, slot.c_str(), filtered);
                 removed = true;
             }
+        }
+
+        // [PR-S1] 원래 owner로 복원
+        if (originalOwner) {
+            try { RegistryHelper::restoreOwnership(fxPath, originalOwner); } catch(...) {}
+            LocalFree(originalOwner);
         }
     }
     return removed;

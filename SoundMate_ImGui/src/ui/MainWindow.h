@@ -149,6 +149,10 @@ private:
     void DownloadAndExecuteUpdate();
     void RenderUpdatePopup();
 
+    // [PR-S1] Controller 헬스 회복 — SHM SDDL 마이그레이션 후 첫 실행 시 구버전
+    // Controller가 잔존할 수 있어 강제 종료 후 user 권한으로 재기동.
+    void EnsureControllerHealthy();
+
     // ── [Phase 3] Free 플랜 AI 차단 / Pro 구독 안내 ─────────────
     bool m_showUpgradePopup = false;
     void RenderUpgradePopup();

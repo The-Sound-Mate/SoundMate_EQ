@@ -19,6 +19,8 @@ LoginWindow::LoginWindow() {}
 LoginWindow::~LoginWindow() {
     m_serverRunning = false;
     if (m_serverThread.joinable()) m_serverThread.detach();
+    // [PR-2D] 자동로그인 thread도 안전 정리.
+    if (m_autoLoginThread.joinable()) m_autoLoginThread.join();
 }
 
 // [Phase 2-A] 토큰 경로 — Program Files 통합. RecordManager::m_tokenFile 과 동일.
@@ -79,10 +81,18 @@ std::string LoginWindow::DecryptDPAPI(const std::string& b64Cipher) {
 }
 
 void LoginWindow::Open(LoginSuccessCallback cb) {
+    // [PR-2D] 이전 자동로그인 thread가 살아있으면 끝까지 기다린 뒤 진행.
+    // detach 대신 join 패턴으로 m_open/m_onSuccess 동시 write race 차단.
+    if (m_autoLoginThread.joinable()) m_autoLoginThread.join();
+
     m_onSuccess = cb;
     m_open      = true;
     m_statusMsg = "이전 세션 확인 중...";
-    std::thread([this]{ TryAutoLogin(); }).detach();
+    m_autoLoginBusy = true;
+    m_autoLoginThread = std::thread([this]{
+        TryAutoLogin();
+        m_autoLoginBusy = false;
+    });
 }
 
 // ── 자동 로그인 ──────────────────────────────────────────────────────────

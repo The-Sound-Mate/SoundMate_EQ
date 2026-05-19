@@ -115,12 +115,17 @@ target_link_libraries(SoundMate_reset PRIVATE ${COMMON_LIBS})
 
 # ---------------------------------------------------------------------------
 # Manifest & subsystem for EXE targets
+# [PR-S1] UAC 정책:
+#   - SoundMate_setup / SoundMate_reset: APO 설치/제거에 HKLM 레지스트리 조작
+#     이 필요해서 requireAdministrator 유지.
+#   - SoundMate_Controller: 공유 메모리 SDDL이 IU(Interactive User) 권한을
+#     허용하도록 변경되었으므로 asInvoker(일반 user)로 충분. UAC 팝업 제거.
 # ---------------------------------------------------------------------------
 if(MSVC)
     set_target_properties(SoundMate_setup PROPERTIES
         LINK_FLAGS "/MANIFESTUAC:level='requireAdministrator' /SUBSYSTEM:CONSOLE")
     set_target_properties(SoundMate_Controller PROPERTIES
-        LINK_FLAGS "/MANIFESTUAC:level='requireAdministrator' /SUBSYSTEM:CONSOLE")
+        LINK_FLAGS "/MANIFESTUAC:level='asInvoker' /SUBSYSTEM:CONSOLE")
     set_target_properties(SoundMate_reset PROPERTIES
         LINK_FLAGS "/MANIFESTUAC:level='requireAdministrator' /SUBSYSTEM:CONSOLE")
 endif()
@@ -178,6 +183,9 @@ target_link_libraries(SoundMate_EQ PRIVATE
 )
 
 if(MSVC)
+    # [PR-2D] UI를 requireAdministrator로 강제 — 사용자 요청에 따라 단일 UAC
+    # 승인으로 모든 admin 작업 처리. Controller는 asInvoker로 두어도 UI 자식
+    # 으로 spawn되면 admin 컨텍스트 상속.
     set_target_properties(SoundMate_EQ PROPERTIES
         LINK_FLAGS "/MANIFESTUAC:level='requireAdministrator' /SUBSYSTEM:WINDOWS"
         RUNTIME_OUTPUT_DIRECTORY_DEBUG   "${CMAKE_BINARY_DIR}/Debug"

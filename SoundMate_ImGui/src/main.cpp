@@ -4,6 +4,7 @@
 #include <windows.h>
 #include <d3d11.h>
 #include <d3dcompiler.h>
+#include <shellapi.h>   // [PR-2B] Shell_NotifyIcon
 #include <tchar.h>
 #include <string>
 #include <fstream>
@@ -21,6 +22,53 @@
 #include "core/MediaMonitor.h"
 #include "core/RecordManager.h"
 #include "core/GenreManager.h"
+
+// [PR-2B] 트레이 아이콘 상태 ──────────────────────────────────────────────────
+#define SM_WM_TRAYICON (WM_USER + 1)
+static NOTIFYICONDATAA g_tray = {};
+static bool            g_trayInstalled = false;
+
+static void TrayAdd(HWND hWnd) {
+    if (g_trayInstalled) return;
+    g_tray = {};
+    g_tray.cbSize           = sizeof(g_tray);
+    g_tray.hWnd             = hWnd;
+    g_tray.uID              = 1;
+    g_tray.uFlags           = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+    g_tray.uCallbackMessage = SM_WM_TRAYICON;
+    g_tray.hIcon            = LoadIcon(nullptr, IDI_APPLICATION);
+    strncpy_s(g_tray.szTip, "SoundMate EQ", _TRUNCATE);
+    Shell_NotifyIconA(NIM_ADD, &g_tray);
+    g_trayInstalled = true;
+}
+
+static void TrayRemove() {
+    if (!g_trayInstalled) return;
+    Shell_NotifyIconA(NIM_DELETE, &g_tray);
+    g_trayInstalled = false;
+}
+
+static void TrayMenu(HWND hWnd) {
+    POINT pt;
+    GetCursorPos(&pt);
+    HMENU menu = CreatePopupMenu();
+    AppendMenuA(menu, MF_STRING, 1001, "\xec\x97\xb4\xea\xb8\xb0");      // 열기 (UTF-8)
+    AppendMenuA(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuA(menu, MF_STRING, 1002, "\xec\xa2\x85\xeb\xa3\x8c");      // 종료
+    SetForegroundWindow(hWnd);
+    UINT cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY,
+                              pt.x, pt.y, 0, hWnd, nullptr);
+    DestroyMenu(menu);
+
+    if (cmd == 1001) {
+        ShowWindow(hWnd, SW_SHOW);
+        SetForegroundWindow(hWnd);
+        TrayRemove();
+    } else if (cmd == 1002) {
+        TrayRemove();
+        DestroyWindow(hWnd);
+    }
+}
 
 // ─── DirectX 11 전역 변수 ───────────────────────────────────────────────────
 static ID3D11Device*            g_pd3dDevice           = nullptr;
@@ -136,8 +184,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     // ── UI 초기화 ──
     mainWin.Initialize(&eqCtrl, &aiClient, &monitor);
     mainWin.SetOnLogoutCallback([&]() {
-        // 로그아웃 시 토큰 삭제 및 로그인 창 다시 띄우기
+        // [PR-2D] 로그아웃 안전화 — 토큰 파일 + 메모리 캐시 + 설정값 모두 정리.
         std::remove(LoginWindow::GetTokenFilePath().c_str());
+        g_recordManager.SignOut();   // m_userId / m_accessToken / profile cache 클리어
+        // 프리미엄 잔재 제거 — 새 계정이 Free일 수 있으므로 eqMode를 OFF로 리셋
+        AppSettings s = LoadSettings();
+        s.eqMode = EqMode::Off;
+        s.autoAnalyze = false;
+        s.globalAverage = false;
+        SaveSettings(s);
         loggedIn = false;
         loginWin.Open([&](const std::string& uid, const std::string& email, bool isNew) {
             g_recordManager.SetUserId(uid);
@@ -252,7 +307,37 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_SYSCOMMAND:
         if ((wParam & 0xfff0) == SC_KEYMENU) return 0;
         break;
+
+    // [PR-2B] X(닫기) 가로채기 — pro+ 사용자가 minimizeToTray ON이면 숨김+트레이.
+    // free 사용자 또는 minimizeToTray OFF면 일반 종료.
+    case WM_CLOSE: {
+        bool toTray = false;
+        if (g_recordManager.IsAIEligible()) {
+            AppSettings s = LoadSettings();
+            toTray = s.minimizeToTray;
+        }
+        if (toTray) {
+            ShowWindow(hWnd, SW_HIDE);
+            TrayAdd(hWnd);
+            return 0;
+        }
+        DestroyWindow(hWnd);
+        return 0;
+    }
+
+    // [PR-2B] 트레이 콜백
+    case SM_WM_TRAYICON:
+        if (LOWORD(lParam) == WM_LBUTTONUP || LOWORD(lParam) == WM_LBUTTONDBLCLK) {
+            ShowWindow(hWnd, SW_SHOW);
+            SetForegroundWindow(hWnd);
+            TrayRemove();
+        } else if (LOWORD(lParam) == WM_RBUTTONUP) {
+            TrayMenu(hWnd);
+        }
+        return 0;
+
     case WM_DESTROY:
+        TrayRemove();
         PostQuitMessage(0);
         return 0;
     }

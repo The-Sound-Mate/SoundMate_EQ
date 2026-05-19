@@ -21,6 +21,7 @@ inline constexpr ImVec4 BTN_SECONDARY  = { 0.188f, 0.125f, 0.380f, 1.0f }; // #3
 inline constexpr ImVec4 COLOR_GREEN    = { 0.671f, 1.000f, 0.000f, 1.0f }; // #ABFF00
 inline constexpr ImVec4 COLOR_RED      = { 1.000f, 0.322f, 0.322f, 1.0f }; // #FF5252
 inline constexpr ImVec4 COLOR_ORANGE   = { 1.000f, 0.647f, 0.000f, 1.0f };
+inline constexpr ImVec4 COLOR_YELLOW   = { 1.000f, 1.000f, 0.000f, 1.0f }; // #FFFF00
 inline constexpr ImVec4 COLOR_CYAN     = { 0.000f, 0.900f, 1.000f, 1.0f }; // #00E5FF
 
 // ImVec4 -> ImU32 변환 헬퍼

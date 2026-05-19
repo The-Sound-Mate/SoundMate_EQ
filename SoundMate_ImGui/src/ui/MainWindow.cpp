@@ -121,7 +121,50 @@ void MainWindow::Initialize(EQController *eq, AIClient *ai,
     }
 
     if (!controllerPath.empty()) {
-      ShellExecuteA(NULL, "runas", controllerPath.c_str(), NULL, NULL, SW_HIDE);
+      // [PR-S1] Controller는 일반 user 권한으로 충분. SHM SDDL이 IU 허용.
+      ShellExecuteA(NULL, "open", controllerPath.c_str(), NULL, NULL, SW_HIDE);
+    }
+  }).detach();
+}
+
+// [PR-S1] SHM 접근 실패 시 안전망 — 구버전 Controller(구 SDDL)가 살아있을 때
+// 강제 종료 후 새 Controller를 user 권한으로 재기동. 업데이트 직후 첫 실행에서
+// 발생할 수 있는 silent failure 방지.
+void MainWindow::EnsureControllerHealthy() {
+  // EQController 측에서 SHM open 결과를 체크할 수 있어야 함. EQController의
+  // 별도 메서드가 없으면 IsControllerRunning() + 짧은 대기 후 재시도.
+  if (IsControllerRunning()) return;
+
+  // 1) 구버전 Controller 잔존 가능성 — 강제 종료
+  system("taskkill /F /IM SoundMate_Controller.exe > nul 2>&1");
+
+  // 2) Controller 경로 탐색 후 user 권한 spawn
+  std::thread([]() {
+    char exeP[MAX_PATH];
+    GetModuleFileNameA(nullptr, exeP, MAX_PATH);
+    std::filesystem::path curDir = std::filesystem::path(exeP).parent_path();
+    std::string controllerPath;
+    const char* installed =
+        "C:\\Program Files\\SoundMate Equalizer\\SoundMate_Controller.exe";
+    if (std::filesystem::exists(installed)) {
+      controllerPath = installed;
+    } else {
+      for (int i = 0; i < 5; ++i) {
+        if (std::filesystem::exists(curDir / "SoundMate_Controller.exe")) {
+          controllerPath = (curDir / "SoundMate_Controller.exe").string();
+          break;
+        }
+        if (std::filesystem::exists(
+                curDir / "engine/SoundMate_APO/SoundMate_Controller.exe")) {
+          controllerPath =
+              (curDir / "engine/SoundMate_APO/SoundMate_Controller.exe").string();
+          break;
+        }
+        curDir = curDir.parent_path();
+      }
+    }
+    if (!controllerPath.empty()) {
+      ShellExecuteA(NULL, "open", controllerPath.c_str(), NULL, NULL, SW_HIDE);
     }
   }).detach();
 }
@@ -273,7 +316,24 @@ void MainWindow::ApplyEQNoSave() {
     return;
   }
   std::string dev = GetSelectedDeviceGuid();
-  m_eqCtrl->ApplyEQ(m_eqGains, m_currentBands, dev);
+  // [PR-S1 wiring] SHM write 실패 시 1회 회복 시도. 구버전 Controller가
+  // 살아있는 경우 강제 재기동 후 재적용. 그래도 실패하면 빨간 에러.
+  static std::atomic<bool> s_healthRecoveryInFlight{false};
+  if (!m_eqCtrl->ApplyEQ(m_eqGains, m_currentBands, dev)) {
+    bool expected = false;
+    if (s_healthRecoveryInFlight.compare_exchange_strong(expected, true)) {
+      SetStatus(u8"EQ 엔진 응답 없음 — 재기동 중...", Theme::COLOR_YELLOW);
+      EnsureControllerHealthy();
+      std::thread([this, dev]() {
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+        if (!m_eqCtrl->ApplyEQ(m_eqGains, m_currentBands, dev)) {
+          SetStatus(u8"EQ 설정 엔진 응답 없음. 프로그램을 재시작해주세요.",
+                    Theme::COLOR_RED);
+        }
+        s_healthRecoveryInFlight = false;
+      }).detach();
+    }
+  }
 }
 
 void MainWindow::ApplyEQToSystem() {
@@ -551,18 +611,27 @@ void MainWindow::Render() {
         ApplyPreset(m_selectedPresetIdx);
         SetStatus("Preset: " + m_userPresets[m_selectedPresetIdx].name,
                   Theme::COLOR_CYAN);
-        // [Phase 3] pro 이상만 서버 동기화 (free는 로컬 캐시까지만)
         if (g_recordManager.IsAIEligible()) {
           std::thread([]() { g_recordManager.ProcessBatchSync(false); }).detach();
         }
         return;
       }
 
-      // 장르 정보 비동기 가져오기
-      std::thread([this, title, artist]() {
+      // [PR-2C] EQ 자동 적용 모드 분기. free는 IsAIEligible() = false 이므로
+      // mode 와 상관없이 자동 EQ 전면 OFF (이전 EQ 유지). pro 이상만 mode 적용.
+      const bool eligible = g_recordManager.IsAIEligible();
+      const EqMode mode = eligible ? m_settings.eqMode : EqMode::Off;
+
+      // 장르 정보 비동기 가져오기 (OFF 상태여도 정규화 로그 작성을 위해 API 호출 유지)
+      std::thread([this, title, artist, mode]() {
         m_currentGenre = g_genreManager.GetGenre(title, artist);
 
-        // 로컬 캐시 확인 (장르가 업데이트된 후 확인)
+        if (mode == EqMode::Off) {
+          // 자동 EQ 변환 없음 — 이전 EQ 그대로 유지.
+          return;
+        }
+
+        // 로컬 캐시 확인
         EQEntry *cached = g_recordManager.GetCachedEQ(title, artist);
         if (cached) {
           std::vector<float> *target = nullptr;
@@ -576,20 +645,20 @@ void MainWindow::Render() {
             target = &cached->gains31;
 
           if (target) {
-            if (m_settings.globalAverage && cached->source != "manual" &&
-                cached->source != "direct") {
+            // GlobalAverage 또는 AiAuto 모드 + 캐시가 수동/직접이 아닐 때 블렌딩
+            const bool blend = (mode == EqMode::AiAuto || mode == EqMode::GlobalAverage)
+                               && cached->source != "manual"
+                               && cached->source != "direct";
+            if (blend) {
               auto baseline = g_recordManager.GetGlobalGenreAverage(
                   m_currentGenre, m_currentBands.size());
               if (baseline.size() == target->size()) {
                 std::vector<float> blended = *target;
-                for (size_t i = 0; i < blended.size(); ++i) {
+                for (size_t i = 0; i < blended.size(); ++i)
                   blended[i] = (blended[i] + baseline[i]) / 2.0f;
-                }
-                {
-                  std::lock_guard<std::mutex> lk(m_eqUpdateMutex);
-                  m_queuedGains = blended;
-                  m_pendingEQUpdate = true;
-                }
+                std::lock_guard<std::mutex> lk(m_eqUpdateMutex);
+                m_queuedGains = blended;
+                m_pendingEQUpdate = true;
               } else {
                 std::lock_guard<std::mutex> lk(m_eqUpdateMutex);
                 m_queuedGains = *target;
@@ -602,14 +671,26 @@ void MainWindow::Render() {
             }
             SetStatus("Local Cache Applied.", Theme::COLOR_GREEN);
           }
-        } else if (m_ai && !m_aiProcessing) {
-          TriggerAIGeneration();
+        } else {
+          // 캐시 없음 — mode에 따라 분기
+          if (mode == EqMode::AiAuto && m_ai && !m_aiProcessing) {
+            TriggerAIGeneration();
+          } else if (mode == EqMode::GlobalAverage) {
+            // 글로벌 평균만 단독 적용 (AI 호출 없음)
+            auto baseline = g_recordManager.GetGlobalGenreAverage(
+                m_currentGenre, m_currentBands.size());
+            if (!baseline.empty() && baseline.size() == m_currentBands.size()) {
+              std::lock_guard<std::mutex> lk(m_eqUpdateMutex);
+              m_queuedGains = baseline;
+              m_pendingEQUpdate = true;
+              SetStatus("Global Average Applied.", Theme::COLOR_CYAN);
+            }
+          }
         }
       }).detach();
 
-      // DB 일괄 동기화 (5곡 변경마다 백그라운드 스레드에서 실행)
-      // [Phase 3] pro 이상만 — free는 서버에 EQ 히스토리를 안 보냄.
-      if (g_recordManager.IsAIEligible()) {
+      // DB 일괄 동기화 — pro 이상만
+      if (eligible) {
         std::thread([]() { g_recordManager.ProcessBatchSync(false); }).detach();
       }
     }

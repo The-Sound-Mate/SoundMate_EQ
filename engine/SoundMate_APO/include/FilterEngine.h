@@ -18,7 +18,7 @@
 //   정책)
 //                                  0 = 기존 soft + hard 리미터
 // ============================================================================
-#define SM_NORMALIZER_DEFAULT_ENABLED 0
+#define SM_NORMALIZER_DEFAULT_ENABLED 1
 #define SM_LIMITER_HARD_ONLY 1
 
 // ============================================================================
@@ -585,9 +585,10 @@ private:
     if (hMapFile)
       return;
 
-    // SDDL: SYSTEM, Administrators, and LocalService (audiodg.exe account) all
-    // get full access so the APO (LocalService) and Controller (admin) can
-    // share the mapping.
+    // SDDL: SYSTEM / Administrators / LocalService(audiodg) → GA(전체).
+    //       Interactive User → GR+GW(최소권한). PR-S1 변경: 일반 user 권한의
+    //       UI/Controller가 UAC 없이 SHM에 접근 가능하도록 IU 추가.
+    //       OICI는 SHM(이름있는 매핑)에 의미 없지만 기존 항목 형식 유지.
     PSECURITY_DESCRIPTOR pSD = NULL;
     SECURITY_ATTRIBUTES sa;
     sa.nLength = sizeof(sa);
@@ -595,7 +596,7 @@ private:
     sa.lpSecurityDescriptor = NULL;
 
     if (ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            L"D:P(A;OICI;GA;;;SY)(A;OICI;GA;;;BA)(A;OICI;GA;;;LS)",
+            L"D:P(A;OICI;GA;;;SY)(A;OICI;GA;;;BA)(A;OICI;GA;;;LS)(A;OICI;GRGW;;;IU)",
             SDDL_REVISION_1, &pSD, NULL)) {
       sa.lpSecurityDescriptor = pSD;
     }

@@ -365,6 +365,30 @@ std::string RecordManager::GetAccessToken() {
   return GetUserIdFromToken();
 }
 
+// [Fix] PostgreSQL NULL → JSON null → nlohmann::json::value()가 string default
+// 변환 시 type_error 던짐. null/missing 모두 안전하게 문자열 또는 빈 문자열로.
+static std::string SafeStr(const nlohmann::json &row, const char *key,
+                           const std::string &fallback = "") {
+  if (!row.contains(key)) return fallback;
+  const auto &v = row[key];
+  if (v.is_null())   return fallback;
+  if (v.is_string()) return v.get<std::string>();
+  return fallback;
+}
+
+// [Fix] plan_type에 trailing space나 대소문자 변형이 있을 경우 정규화.
+// DB 트리거가 있어도 in-flight 응답 / 캐시된 옛 값 방어용.
+static std::string NormalizePlan(std::string s) {
+  // trim left
+  size_t a = s.find_first_not_of(" \t\r\n");
+  if (a == std::string::npos) return "";
+  size_t b = s.find_last_not_of(" \t\r\n");
+  s = s.substr(a, b - a + 1);
+  // to lower (ASCII only — plan 이름은 영문이므로 충분)
+  for (auto &c : s) if (c >= 'A' && c <= 'Z') c = c - 'A' + 'a';
+  return s;
+}
+
 bool RecordManager::RefreshUserProfile() {
   std::string at = GetAccessToken();
   if (at.empty() || m_userId.empty())
@@ -387,10 +411,10 @@ bool RecordManager::RefreshUserProfile() {
     if (!m_cache.contains("profile") || !m_cache["profile"].is_object())
       m_cache["profile"] = nlohmann::json::object();
     auto &p = m_cache["profile"];
-    p["plan_type"]           = row.value("plan_type",           "free");
-    p["display_name"]        = row.value("display_name",        "");
-    p["trial_started_at"]    = row.value("trial_started_at",    "");
-    p["subscription_status"] = row.value("subscription_status", "");
+    p["plan_type"]           = NormalizePlan(SafeStr(row, "plan_type", "free"));
+    p["display_name"]        = SafeStr(row, "display_name");
+    p["trial_started_at"]    = SafeStr(row, "trial_started_at");
+    p["subscription_status"] = SafeStr(row, "subscription_status");
     SaveCache();
     return true;
   } catch (...) {
@@ -398,29 +422,84 @@ bool RecordManager::RefreshUserProfile() {
   }
 }
 
+// JWT payload에서 특정 string claim 추출 (email 등). 실패 시 "".
+static std::string ExtractJwtClaim(const std::string &jwt, const char *key) {
+  try {
+    auto p1 = jwt.find('.');
+    auto p2 = jwt.find('.', p1 + 1);
+    if (p1 == std::string::npos || p2 == std::string::npos) return "";
+    std::string payload = jwt.substr(p1 + 1, p2 - p1 - 1);
+    while (payload.size() % 4) payload += '=';
+    for (auto &c : payload) { if (c == '-') c = '+'; else if (c == '_') c = '/'; }
+    static const std::string b64 =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string decoded;
+    int val = 0, bits = -8;
+    for (char c : payload) {
+      auto pos = b64.find(c);
+      if (pos == std::string::npos) continue;
+      val = (val << 6) | (int)pos;
+      bits += 6;
+      if (bits >= 0) { decoded += (char)((val >> bits) & 0xFF); bits -= 8; }
+    }
+    auto claims = nlohmann::json::parse(decoded);
+    return claims.value(key, std::string{});
+  } catch (...) { return ""; }
+}
+
 std::pair<std::string, std::string> RecordManager::GetUserInfo() {
-  std::string name = "사용자";
+  std::string name;
   std::string plan = "free";
+
   try {
     if (m_cache.contains("profile") && m_cache["profile"].is_object()) {
       auto &p = m_cache["profile"];
+      // 1순위: profiles.display_name
       if (p.contains("display_name") && p["display_name"].is_string()) {
         std::string dn = p["display_name"].get<std::string>();
         if (!dn.empty()) name = dn;
       }
       if (p.contains("plan_type") && p["plan_type"].is_string()) {
-        std::string pt = p["plan_type"].get<std::string>();
+        std::string pt = NormalizePlan(p["plan_type"].get<std::string>());
         if (!pt.empty()) plan = pt;
       }
     }
   } catch (...) {}
+
+  // 2순위: JWT email의 local-part ("alex@gmail.com" → "alex")
+  if (name.empty()) {
+    std::string token = m_accessToken;
+    if (token.empty()) {
+      // 디스크에서 한번 읽어보기 (m_accessToken은 refresh 시에만 set 됨)
+      // GetUserIdFromToken은 m_userId 부작용까지 발생하므로 여기선 직접 파싱하지 않고
+      // 토큰 파일이 있는 경우만 시도.
+      try {
+        if (std::filesystem::exists(m_tokenFile)) {
+          std::ifstream f(m_tokenFile);
+          auto tok = nlohmann::json::parse(f);
+          int v = tok.value("v", 1);
+          if (v >= 2) {
+            // v2 encrypted — DPAPI 복호화는 LoginWindow에 있고 cyclic include
+            // 회피를 위해 여기선 시도 안 함. m_accessToken이 비어있으면 fallback.
+          } else {
+            token = tok.value("access_token", "");
+          }
+        }
+      } catch (...) {}
+    }
+    if (!token.empty()) {
+      std::string email = ExtractJwtClaim(token, "email");
+      auto at = email.find('@');
+      if (at != std::string::npos && at > 0) name = email.substr(0, at);
+    }
+  }
+
+  // 3순위: 마지막 폴백
+  if (name.empty()) name = u8"사용자";
   return {name, plan};
 }
 
 std::string RecordManager::GetUserPlanType() {
-  // 캐시 미존재 시 1회 lazy fetch (네트워크 호출 1번).
-  // 호출 측에서 명시적으로 RefreshUserProfile()을 부르는 게 더 좋지만
-  // 로그인 직후 호출이 누락된 경로에 대한 안전망.
   try {
     if (!m_cache.contains("profile") ||
         !m_cache["profile"].is_object() ||
@@ -431,7 +510,7 @@ std::string RecordManager::GetUserPlanType() {
         m_cache["profile"].is_object() &&
         m_cache["profile"].contains("plan_type") &&
         m_cache["profile"]["plan_type"].is_string()) {
-      std::string pt = m_cache["profile"]["plan_type"].get<std::string>();
+      std::string pt = NormalizePlan(m_cache["profile"]["plan_type"].get<std::string>());
       if (!pt.empty()) return pt;
     }
   } catch (...) {}
@@ -466,6 +545,16 @@ int RecordManager::GetTrialRemainingDays() {
   } catch (...) {
     return -1;
   }
+}
+
+void RecordManager::SignOut() {
+  std::lock_guard<std::mutex> lk(m_mutex);
+  m_userId.clear();
+  m_accessToken.clear();
+  if (m_cache.contains("profile")) m_cache.erase("profile");
+  // 미동기화 큐도 비움 — 다른 사용자의 큐와 섞이지 않도록.
+  if (m_cache.contains("unsynced")) m_cache["unsynced"] = nlohmann::json::array();
+  SaveCache();
 }
 
 bool RecordManager::IsAIEligible() {

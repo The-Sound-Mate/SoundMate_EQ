@@ -437,6 +437,83 @@ void RegistryHelper::takeOwnership(wstring key)
 	LocalFree(sd);
 }
 
+// [PR-S1] 원래 소유자 SID를 LocalAlloc 메모리로 복사 보관. 호출자가 LocalFree 책임.
+void RegistryHelper::backupOwnership(std::wstring key, PSID* outOwnerSid)
+{
+	*outOwnerSid = NULL;
+
+	HKEY rootKey;
+	wstring subKey = splitKey(key, &rootKey);
+	// HKLM\SOFTWARE\... 형식을 SE_REGISTRY_KEY 가 받는 절대 경로로 변환
+	wstring fullPath;
+	if (rootKey == HKEY_LOCAL_MACHINE)        fullPath = L"MACHINE\\" + subKey;
+	else if (rootKey == HKEY_CURRENT_USER)    fullPath = L"CURRENT_USER\\" + subKey;
+	else if (rootKey == HKEY_CLASSES_ROOT)    fullPath = L"CLASSES_ROOT\\" + subKey;
+	else if (rootKey == HKEY_USERS)           fullPath = L"USERS\\" + subKey;
+	else throw RegistryException(L"backupOwnership: unsupported root key for " + key);
+
+	PSID ownerSid = NULL;
+	PSECURITY_DESCRIPTOR sd = NULL;
+	DWORD status = GetNamedSecurityInfoW(
+		const_cast<LPWSTR>(fullPath.c_str()), SE_REGISTRY_KEY,
+		OWNER_SECURITY_INFORMATION, &ownerSid, NULL, NULL, NULL, &sd);
+	if (status != ERROR_SUCCESS) {
+		throw RegistryException(L"Error in GetNamedSecurityInfoW (backupOwnership) for " + key
+			+ L": " + StringHelper::getSystemErrorString(status));
+	}
+
+	if (ownerSid && IsValidSid(ownerSid)) {
+		DWORD sidLen = GetLengthSid(ownerSid);
+		PSID copy = (PSID) LocalAlloc(LPTR, sidLen);
+		if (copy && CopySid(sidLen, copy, ownerSid)) {
+			*outOwnerSid = copy;
+		} else if (copy) {
+			LocalFree(copy);
+		}
+	}
+	if (sd) LocalFree(sd);
+}
+
+void RegistryHelper::restoreOwnership(std::wstring key, PSID ownerSid)
+{
+	if (!ownerSid || !IsValidSid(ownerSid)) return; // 백업 실패 시 no-op
+
+	// 소유권 복원에도 SE_TAKE_OWNERSHIP 권한 필요 (현재 owner != 본인일 수 있음).
+	HANDLE tokenHandle;
+	if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &tokenHandle))
+		throw RegistryException(L"Error in OpenProcessToken while restoring ownership");
+	LUID luid;
+	if (!LookupPrivilegeValue(NULL, SE_TAKE_OWNERSHIP_NAME, &luid))
+		throw RegistryException(L"Error in LookupPrivilegeValue while restoring ownership");
+	TOKEN_PRIVILEGES tp{};
+	tp.PrivilegeCount = 1;
+	tp.Privileges[0].Luid = luid;
+	tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+	AdjustTokenPrivileges(tokenHandle, FALSE, &tp, sizeof(tp), NULL, NULL);
+
+	HKEY rootKey;
+	wstring subKey = splitKey(key, &rootKey);
+	wstring fullPath;
+	if (rootKey == HKEY_LOCAL_MACHINE)        fullPath = L"MACHINE\\" + subKey;
+	else if (rootKey == HKEY_CURRENT_USER)    fullPath = L"CURRENT_USER\\" + subKey;
+	else if (rootKey == HKEY_CLASSES_ROOT)    fullPath = L"CLASSES_ROOT\\" + subKey;
+	else if (rootKey == HKEY_USERS)           fullPath = L"USERS\\" + subKey;
+	else throw RegistryException(L"restoreOwnership: unsupported root key for " + key);
+
+	DWORD status = SetNamedSecurityInfoW(
+		const_cast<LPWSTR>(fullPath.c_str()), SE_REGISTRY_KEY,
+		OWNER_SECURITY_INFORMATION, ownerSid, NULL, NULL, NULL);
+
+	tp.Privileges[0].Attributes = 0;
+	AdjustTokenPrivileges(tokenHandle, FALSE, &tp, sizeof(tp), NULL, NULL);
+	CloseHandle(tokenHandle);
+
+	if (status != ERROR_SUCCESS) {
+		throw RegistryException(L"Error in SetNamedSecurityInfoW (restoreOwnership) for " + key
+			+ L": " + StringHelper::getSystemErrorString(status));
+	}
+}
+
 ACCESS_MASK RegistryHelper::getFileAccessForUser(std::wstring path, unsigned long rid)
 {
 	ACCESS_MASK result;

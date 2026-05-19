@@ -44,6 +44,10 @@ public:
   // 클라이언트측 캐시 기반 — 서버가 진짜 게이트(consume_ai_quota).
   bool IsAIEligible();
 
+  // [PR-2D] 로그아웃 시 메모리 캐시 + access token 클리어. 백그라운드 thread가
+  // 살아있어도 다음 sync에서 m_userId.empty() 가드로 no-op 됨.
+  void SignOut();
+
   // Trial 잔여 일수. -1 = Trial 비활성 또는 알 수 없음. 7일 정책 기준.
   int  GetTrialRemainingDays();
 
