@@ -615,7 +615,7 @@ void MainWindow::Render() {
   // ── [PR-A] 세션 상태 폴링 (60초) — force_logout / is_active 검사 ──
   // 다른 PC에서 본인을 강제 로그아웃시키면 이 PC도 즉시 SignOut.
   m_deviceCheckTimer += m_deltaTime;
-  if (m_deviceCheckTimer >= kDeviceCheckInterval) {
+  if (m_deviceCheckTimer >= kDeviceCheckInterval && !m_forceLogoutTriggered) {
     m_deviceCheckTimer = 0.0f;
     std::thread([this]() {
       auto st = g_recordManager.CheckDeviceSession();
@@ -629,6 +629,10 @@ void MainWindow::Render() {
   // 폴링 결과 처리 (메인 thread)
   if (m_forceLogoutTriggered.exchange(false)) {
     SetStatus(u8"다른 위치에서 로그아웃되었습니다.", Theme::COLOR_YELLOW);
+    // 타이머를 0으로 리셋해 재로그인 후 즉시 다시 폴링하지 않도록 함.
+    // (서버측 check_device_session이 force_logout 플래그를 자동 클리어하므로
+    //  재폴링돼도 valid=true 반환하지만, 불필요한 호출을 방지.)
+    m_deviceCheckTimer = 0.0f;
     if (m_onForcedLogout) m_onForcedLogout();
   }
 
@@ -1063,6 +1067,25 @@ void MainWindow::RenderTopBar() {
               m_userPreference = pref;
               g_recordManager.SaveUserTendency(pref, {});
               SetStatus(u8"취향이 저장되었습니다.", Theme::COLOR_GREEN);
+
+              // [DB-Sync] Survey 결과를 Supabase user_audio_preferences에 업로드.
+              // pref 형식: "Bass Heavy, Forward Vocal, Huge Soundstage, High Resolution, Energetic"
+              std::thread([pref]() {
+                // 콤마+공백으로 분리하여 5개 라벨 추출
+                std::vector<std::string> parts;
+                std::string s = pref;
+                size_t pos;
+                while ((pos = s.find(", ")) != std::string::npos) {
+                  parts.push_back(s.substr(0, pos));
+                  s = s.substr(pos + 2);
+                }
+                if (!s.empty()) parts.push_back(s);
+                if (parts.size() == 5) {
+                  g_recordManager.UploadAudioPreferences(
+                      parts[0], parts[1], parts[3], parts[2], parts[4]);
+                }
+              }).detach();
+
               if (!m_currentTitle.empty() && g_recordManager.IsAIEligible())
                 TriggerAIGeneration();
             });
