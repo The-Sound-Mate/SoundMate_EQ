@@ -25,7 +25,7 @@
 
 // [PR-2B] 트레이 아이콘 상태 ──────────────────────────────────────────────────
 #define SM_WM_TRAYICON (WM_USER + 1)
-static NOTIFYICONDATAA g_tray = {};
+static NOTIFYICONDATAW g_tray = {};
 static bool            g_trayInstalled = false;
 
 static void TrayAdd(HWND hWnd) {
@@ -37,14 +37,14 @@ static void TrayAdd(HWND hWnd) {
     g_tray.uFlags           = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     g_tray.uCallbackMessage = SM_WM_TRAYICON;
     g_tray.hIcon            = LoadIcon(nullptr, IDI_APPLICATION);
-    strncpy_s(g_tray.szTip, "SoundMate EQ", _TRUNCATE);
-    Shell_NotifyIconA(NIM_ADD, &g_tray);
+    wcsncpy_s(g_tray.szTip, L"SoundMate EQ", _TRUNCATE);
+    Shell_NotifyIconW(NIM_ADD, &g_tray);
     g_trayInstalled = true;
 }
 
 static void TrayRemove() {
     if (!g_trayInstalled) return;
-    Shell_NotifyIconA(NIM_DELETE, &g_tray);
+    Shell_NotifyIconW(NIM_DELETE, &g_tray);
     g_trayInstalled = false;
 }
 
@@ -52,9 +52,9 @@ static void TrayMenu(HWND hWnd) {
     POINT pt;
     GetCursorPos(&pt);
     HMENU menu = CreatePopupMenu();
-    AppendMenuA(menu, MF_STRING, 1001, "\xec\x97\xb4\xea\xb8\xb0");      // 열기 (UTF-8)
-    AppendMenuA(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuA(menu, MF_STRING, 1002, "\xec\xa2\x85\xeb\xa3\x8c");      // 종료
+    AppendMenuW(menu, MF_STRING, 1001, L"열기");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, 1002, L"종료");
     SetForegroundWindow(hWnd);
     UINT cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY,
                               pt.x, pt.y, 0, hWnd, nullptr);

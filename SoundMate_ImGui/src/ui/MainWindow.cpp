@@ -51,15 +51,30 @@ const char *MainWindow::BAND_NAMES[] = {"5-Band", "10-Band", "15-Band",
 
 MainWindow::MainWindow() { SetupEQBands(BANDS_5); }
 
+// [A-2] system("taskkill...") 은 cmd.exe 콘솔 창을 깜빡 띄움 → UX 깨짐.
+// CreateProcessA + CREATE_NO_WINDOW 로 silent 실행.
+static void SilentTaskKill(const char* imageName) {
+  char cmd[256];
+  snprintf(cmd, sizeof(cmd), "taskkill /F /IM %s", imageName);
+  STARTUPINFOA si = { sizeof(si) };
+  PROCESS_INFORMATION pi = {};
+  if (CreateProcessA(NULL, cmd, NULL, NULL, FALSE,
+                     CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+    WaitForSingleObject(pi.hProcess, 2000);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+  }
+}
+
 MainWindow::~MainWindow() {
   m_running = false;
   if (m_aiThread.joinable())
     m_aiThread.join();
 
-  // [v12.0] UI 종료 시 백그라운드 컨트롤러 함께 종료
-  system("taskkill /F /IM SoundMate_Controller.exe > nul 2>&1");
+  // [v12.0] UI 종료 시 백그라운드 컨트롤러 함께 종료 (silent)
+  SilentTaskKill("SoundMate_Controller.exe");
   // 빌드 환경에 따라 이름이 다를 수 있으므로 다른 후보도 함께 종료
-  system("taskkill /F /IM MainController.exe > nul 2>&1");
+  SilentTaskKill("MainController.exe");
 }
 
 void MainWindow::Initialize(EQController *eq, AIClient *ai,
@@ -155,8 +170,8 @@ void MainWindow::EnsureControllerHealthy() {
   // 별도 메서드가 없으면 IsControllerRunning() + 짧은 대기 후 재시도.
   if (IsControllerRunning()) return;
 
-  // 1) 구버전 Controller 잔존 가능성 — 강제 종료
-  system("taskkill /F /IM SoundMate_Controller.exe > nul 2>&1");
+  // 1) 구버전 Controller 잔존 가능성 — 강제 종료 (silent)
+  SilentTaskKill("SoundMate_Controller.exe");
 
   // 2) Controller 경로 탐색 후 user 권한 spawn
   std::thread([]() {
@@ -486,9 +501,20 @@ void MainWindow::TriggerAIGeneration() {
   // 비동기로 완료되어도 자동으로 반영됨. m_userPreference 캐시 의존 제거.
   std::string userPref = g_recordManager.GetUserTendency();
 
-  m_aiThread = std::thread([this, prompt, accessToken, aiTitle, aiArtist, userPref]() {
+  // [A-1] 호출 시점의 곡 epoch 캡처 — 응답 도착 전 곡이 바뀌면 결과 폐기.
+  // 옛 곡의 AI 결과가 새 곡에 잘못 적용되는 사고 방지.
+  int myEpoch = m_songEpoch.load();
+
+  m_aiThread = std::thread([this, prompt, accessToken, aiTitle, aiArtist, userPref, myEpoch]() {
     if (!m_ai) {
       SetStatus("AI Setup Error: client not initialized", Theme::COLOR_RED);
+      m_aiProcessing = false;
+      return;
+    }
+
+    // [A-1] HTTP 요청 직전에도 한 번 더 검사 — 그 사이 곡이 바뀌었으면 호출 자체를 안 함.
+    if (m_songEpoch.load() != myEpoch) {
+      SetStatus(u8"AI: 곡 변경으로 취소", Theme::TEXT_GRAY);
       m_aiProcessing = false;
       return;
     }
@@ -497,6 +523,13 @@ void MainWindow::TriggerAIGeneration() {
     auto result = m_ai->GenerateAllBandsEQ(
         aiTitle, aiArtist, m_currentGenre,
         prompt, userPref, accessToken);
+
+    // [A-1] 응답 도착 직후 epoch 재검사 — 사용자가 응답 대기 중 곡 바꿨으면 폐기.
+    if (m_songEpoch.load() != myEpoch) {
+      SetStatus(u8"AI: 응답 폐기 (곡 변경됨)", Theme::TEXT_GRAY);
+      m_aiProcessing = false;
+      return;
+    }
 
     if (result.errorCode == 429) {
       SetStatus("AI Rate Limit. Wait 30s.", Theme::COLOR_RED);
@@ -768,6 +801,28 @@ void MainWindow::Render() {
         // 3초 대기 — 그 사이 새 곡으로 바뀌면 이 작업 통째로 폐기.
         std::this_thread::sleep_for(std::chrono::seconds(3));
         if (m_songEpoch.load() != myEpoch) return;
+
+        // [E-1] 익명 모드: 외부 API (iTunes) 호출도 차단.
+        // 로컬 캐시에 같은 키 있으면 적용, 없으면 무처리.
+        if (g_recordManager.IsAnonymous()) {
+          EQEntry* cached = g_recordManager.GetCachedEQ(title, artist);
+          if (cached && mode != EqMode::Off) {
+            std::vector<float>* target = nullptr;
+            if      (m_currentBands.size() == 5  && !cached->gains5.empty())  target = &cached->gains5;
+            else if (m_currentBands.size() == 10 && !cached->gains10.empty()) target = &cached->gains10;
+            else if (m_currentBands.size() == 15 && !cached->gains15.empty()) target = &cached->gains15;
+            else if (!cached->gains31.empty())                                 target = &cached->gains31;
+            if (target) {
+              std::lock_guard<std::mutex> lk(m_eqUpdateMutex);
+              m_queuedGains = *target;
+              m_pendingEQUpdate = true;
+              SetStatus(u8"로컬 캐시 적용 (익명 모드)", Theme::COLOR_GREEN);
+            }
+          } else if (!cached) {
+            SetStatus(u8"익명 모드: 회원가입 후 AI EQ 사용 가능", Theme::TEXT_GRAY);
+          }
+          return;  // 익명 모드는 여기서 종료
+        }
 
         // iTunes API 호출 (디스크 캐시 통해 — 같은 곡 재생 시 무료)
         MusicInfo info = g_genreManager.GetMusicInfo(title, artist);
@@ -1105,6 +1160,12 @@ void MainWindow::RenderTopBar() {
           [this]() { ExecuteRestore(""); },
           // [Phase 3] onSurvey — SurveyWindow 열기. 완료 시 취향 저장 + AI 재트리거
           [this]() {
+            // [C-4] DB/메모리에서 기존 취향 가져와 SurveyWindow prefill 로 전달.
+            // 사용자가 이전에 답한 내용이 자동으로 선택되어 보임.
+            std::string existing = g_recordManager.GetUserTendency();
+            // 기본값 "Balanced and clear sound" 면 미설문 상태 → 빈 문자열로 전달
+            if (existing == "Balanced and clear sound") existing.clear();
+
             m_surveyWin.Open([this](const std::string &pref) {
               m_userPreference = pref;
               g_recordManager.SaveUserTendency(pref, {});
@@ -1130,7 +1191,7 @@ void MainWindow::RenderTopBar() {
 
               if (!m_currentTitle.empty() && g_recordManager.IsAIEligible())
                 TriggerAIGeneration();
-            });
+            }, existing);
           });
     }
   }

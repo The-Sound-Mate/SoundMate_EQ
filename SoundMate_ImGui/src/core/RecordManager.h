@@ -33,6 +33,15 @@ public:
   std::pair<std::string, std::string> GetUserInfo(); // {name, plan}
   std::string GetUserPlanType();
 
+  // [E-1] 익명(비로그인) 모드 — m_userId 가 비어있거나 "guest" 이면 true.
+  // 익명 시: 로컬 캐시만 동작, API/AI/DB 호출 모두 차단.
+  bool IsAnonymous() const;
+
+  // [E-1] 익명 → 정식 회원 전환 시 호출. m_cache 의 모든 곡 EQ + tendency 를
+  // 새 user_id 로 DB 에 일괄 마이그레이션. SetUserId 가 익명→실제 전환을
+  // 감지하면 자동 호출됨. 충돌 시 DB 의 ON CONFLICT 정책 (마지막 쓰기 우선).
+  void MigrateAnonymousData();
+
   // 현재 유효한 access_token(JWT)를 반환. 만료 임박 시 자동 refresh.
   std::string GetAccessToken();
 

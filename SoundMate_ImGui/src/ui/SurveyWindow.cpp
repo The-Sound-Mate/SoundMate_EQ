@@ -1,10 +1,38 @@
 #include "SurveyWindow.h"
 #include "Theme.h"
+#include "../core/SurveyMapping.h"
 
-void SurveyWindow::Open(std::function<void(const std::string&)> onComplete) {
+// [C-3] 콤마 연결 라벨/ID 문자열을 5개 인덱스로 파싱.
+// 라벨 매칭 우선, ID 매칭 폴백 (SurveyMapping 이 양방향 처리).
+void SurveyWindow::ParsePrefill(const std::string& tendency) {
+    m_prefillIndices.assign(5, -1);
+    if (tendency.empty()) return;
+
+    // ", " 로 split
+    std::vector<std::string> parts;
+    std::string s = tendency;
+    size_t pos;
+    while ((pos = s.find(", ")) != std::string::npos) {
+        parts.push_back(s.substr(0, pos));
+        s = s.substr(pos + 2);
+    }
+    if (!s.empty()) parts.push_back(s);
+
+    if (parts.size() < 5) return;  // 형식 불일치, 모두 미선택 유지
+
+    m_prefillIndices[0] = SurveyMapping::BassIndexFromLabel(parts[0]);
+    m_prefillIndices[1] = SurveyMapping::VocalIndexFromLabel(parts[1]);
+    m_prefillIndices[2] = SurveyMapping::SoundstageIndexFromLabel(parts[2]);
+    m_prefillIndices[3] = SurveyMapping::TrebleIndexFromLabel(parts[3]);
+    m_prefillIndices[4] = SurveyMapping::VolumeIndexFromLabel(parts[4]);
+}
+
+void SurveyWindow::Open(std::function<void(const std::string&)> onComplete,
+                        const std::string& prefillTendency) {
     m_onComplete = onComplete;
     m_step = 0;
     m_answers.clear();
+    ParsePrefill(prefillTendency);
     m_open = true;
 
     m_questions = {
@@ -33,11 +61,26 @@ void SurveyWindow::Render() {
             ImGui::TextColored(Theme::TEXT_GRAY, "%s", q.desc.c_str());
             ImGui::Spacing(); ImGui::Spacing();
 
+            // [C-3] 이 단계의 prefill 인덱스 — 매칭된 옵션은 강조 색.
+            int prefillIdx = (m_step < (int)m_prefillIndices.size())
+                                 ? m_prefillIndices[m_step] : -1;
+
             ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 8.0f);
             for (size_t i = 0; i < q.options.size(); ++i) {
-                ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(40, 40, 60, 255));
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(60, 60, 90, 255));
-                if (ImGui::Button(q.options[i].c_str(), ImVec2(-1, 50))) {
+                bool isPrefill = ((int)i == prefillIdx);
+                if (isPrefill) {
+                    // 이전 응답: 강조 색 (보라 톤)
+                    ImGui::PushStyleColor(ImGuiCol_Button,
+                                          Theme::ToU32(Theme::ACCENT_COLOR));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
+                                          Theme::ToU32(Theme::ACCENT_HOVER));
+                } else {
+                    ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(40, 40, 60, 255));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(60, 60, 90, 255));
+                }
+                std::string label = q.options[i];
+                if (isPrefill) label = "[이전] " + label;
+                if (ImGui::Button(label.c_str(), ImVec2(-1, 50))) {
                     m_answers.push_back((int)i);
                     m_step++;
                 }
@@ -45,6 +88,17 @@ void SurveyWindow::Render() {
                 ImGui::Spacing();
             }
             ImGui::PopStyleVar();
+
+            // [C-3] "이전 답변 그대로 다음으로" 버튼 — prefill 이 있을 때만 노출
+            if (prefillIdx >= 0) {
+                ImGui::Spacing();
+                ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(70, 70, 90, 255));
+                if (ImGui::Button(u8"이전 답변 유지 ▶", ImVec2(-1, 32))) {
+                    m_answers.push_back(prefillIdx);
+                    m_step++;
+                }
+                ImGui::PopStyleColor();
+            }
 
             ImGui::SetCursorPosY(ImGui::GetWindowHeight() - 40);
             ImGui::TextColored(Theme::TEXT_GRAY, "진행률: %d / %d", m_step + 1, (int)m_questions.size());

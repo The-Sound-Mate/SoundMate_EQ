@@ -2,6 +2,7 @@
 #include "RecordManager.h"
 #include "../utils/StringUtils.h"
 #include "../ui/LoginWindow.h"   // [Phase 2-A] DPAPI 헬퍼 공유
+#include "SurveyMapping.h"       // [C-2] 라벨 ↔ ID 변환
 #include <chrono>
 #include <curl/curl.h>
 #include <filesystem>
@@ -330,7 +331,20 @@ std::string RecordManager::GenerateTrackHash(const std::string &title,
                                              const std::string &artist) {
   if (title.empty() || artist.empty())
     return "unknown";
-  std::string raw = title + "|" + artist;
+
+  // [B-5] 양끝 공백 제거 — 한 칸 차이로 다른 해시 생성되는 문제 방어.
+  // YouTube/Spotify 메타데이터에 trailing space 가 종종 섞임.
+  auto trim = [](std::string s) -> std::string {
+    size_t a = s.find_first_not_of(" \t\n\r");
+    if (a == std::string::npos) return "";
+    size_t b = s.find_last_not_of(" \t\n\r");
+    return s.substr(a, b - a + 1);
+  };
+  std::string t = trim(title);
+  std::string ar = trim(artist);
+  if (t.empty() || ar.empty()) return "unknown";
+
+  std::string raw = t + "|" + ar;
   for (auto &c : raw)
     c = tolower(c);
 
@@ -362,8 +376,103 @@ std::string RecordManager::GenerateTrackHash(const std::string &title,
 }
 
 void RecordManager::SetUserId(const std::string &uid) {
+  std::string prevUid;
+  {
+    std::lock_guard<std::mutex> lk(m_mutex);
+    prevUid = m_userId;
+    m_userId = uid;
+  }
+  // [E-1] 익명(빈/"guest") → 정식 user_id 전환 감지 시 마이그레이션 트리거.
+  // 새 user 가 가입/로그인하는 순간 로컬에 쌓아둔 EQ 데이터가 DB 로 올라감.
+  bool wasAnonymous = (prevUid.empty() || prevUid == "guest");
+  bool nowReal      = (!uid.empty() && uid != "guest");
+  if (wasAnonymous && nowReal) {
+    std::thread([this]() {
+      std::this_thread::sleep_for(std::chrono::seconds(3));  // 토큰 안정화 대기
+      MigrateAnonymousData();
+    }).detach();
+  }
+}
+
+bool RecordManager::IsAnonymous() const {
+  // m_mutex 잠금 비용 회피 — m_userId 는 SetUserId 1번만 변경,
+  // race 시 worst case 도 잠시 잘못된 결과 후 자동 정정.
+  return m_userId.empty() || m_userId == "guest";
+}
+
+void RecordManager::MigrateAnonymousData() {
+  // 1) 로컬 cache 의 모든 songs 를 SaveInteraction 으로 재기록.
+  //    SaveInteraction 내부에서 IsAIEligible() 검사를 우회해야 하므로 직접 pending 작성.
+  //    (이 시점엔 m_userId 가 새 user 로 갱신됨)
+  WriteSyncLog({{"event","anonymous_migrate_start"},{"new_user", m_userId}});
+
   std::lock_guard<std::mutex> lk(m_mutex);
-  m_userId = uid;
+  if (!m_cache.contains("songs") || !m_cache["songs"].is_object()) {
+    WriteSyncLog({{"event","anonymous_migrate_skip"},{"reason","no_songs"}});
+    return;
+  }
+
+  int migrated = 0;
+  for (auto it = m_cache["songs"].begin(); it != m_cache["songs"].end(); ++it) {
+    if (!it.value().is_object()) continue;
+    for (auto sit = it.value().begin(); sit != it.value().end(); ++sit) {
+      std::string source = sit.key();
+      auto &d = sit.value();
+      auto mb = d.value("multi_bands", json::object());
+
+      json pendRec = {{"schema_version", 1},
+                      {"title", it.key()},   // NormalizeKey 된 값 — 마이그레이션 시는 그대로 사용
+                      {"artist", ""},        // cache 구조상 분리 안 됨 — 추후 보강 가능
+                      {"source", source},
+                      {"eq_5",  mb.value("5",  json::array())},
+                      {"eq_10", mb.value("10", json::array())},
+                      {"eq_15", mb.value("15", json::array())},
+                      {"eq_31", mb.value("31", json::array())},
+                      {"device_name", ""},
+                      {"prompt", ""},
+                      {"migrated_from_anonymous", true}};
+      try {
+        std::string dir = PendingDir(m_recordDir);
+        std::filesystem::create_directories(dir);
+        std::string path = dir + "\\pending_migrated_" + std::to_string(migrated) + "_" + source + ".json";
+        std::ofstream f(path, std::ios::binary | std::ios::trunc);
+        if (f) {
+          f << pendRec.dump();
+          ++migrated;
+        }
+      } catch (...) {}
+    }
+  }
+
+  // 2) tendency 도 업로드 — SaveUserTendency 의 DB 동기화 부분만.
+  //    실제 업로드는 m_cache["profile"]["tendency"] 가 라벨 형태로 들어있을 가능성.
+  //    SurveyMapping 으로 5분할 후 UploadAudioPreferences 호출.
+  if (m_cache.contains("profile") && m_cache["profile"].is_object()) {
+    std::string tendency = m_cache["profile"].value("tendency", "");
+    if (!tendency.empty() && tendency != "Balanced and clear sound") {
+      std::vector<std::string> parts;
+      std::string s = tendency;
+      size_t pos;
+      while ((pos = s.find(", ")) != std::string::npos) {
+        parts.push_back(s.substr(0, pos));
+        s = s.substr(pos + 2);
+      }
+      if (!s.empty()) parts.push_back(s);
+      if (parts.size() == 5) {
+        // (UploadAudioPreferences 매개변수 순서: bass, vocal, treble, soundstage, volume)
+        // SurveyWindow 출력 순서: bass, vocal, soundstage, treble, volume → 인덱스 다름
+        UploadAudioPreferences(parts[0], parts[1], parts[3], parts[2], parts[4]);
+      }
+    }
+  }
+
+  // 3) 다음 ProcessBatchSync 사이클이 pending/ 을 처리하도록 트리거.
+  WriteSyncLog({{"event","anonymous_migrate_done"},{"migrated_count", migrated}});
+
+  // 마이그레이션이 끝났으면 백그라운드 sync 시작 (5초 대기 안 함)
+  std::thread([this]() {
+    ProcessBatchSync(true);
+  }).detach();
 }
 
 // Base64url decode helper
@@ -591,19 +700,21 @@ bool RecordManager::FetchUserTendency() {
       return false;
     }
     auto &row = arr[0];
-    std::string bass       = SafeStr(row, "bass_pref");
-    std::string vocal      = SafeStr(row, "vocal_pref");
-    std::string treble     = SafeStr(row, "treble_pref");
-    std::string soundstage = SafeStr(row, "soundstage_pref");
-    std::string volume     = SafeStr(row, "volume_pref");
+    // [C-2] DB 는 ID 형식으로 저장됨. UI 표시/AI 프롬프트는 라벨이 자연스러우므로 변환.
+    // SurveyMapping 이 ID → Label, 옛 데이터 (라벨 그대로 저장된 경우) 도 호환.
+    std::string bass       = SurveyMapping::IdToLabel(SafeStr(row, "bass_pref"));
+    std::string vocal      = SurveyMapping::IdToLabel(SafeStr(row, "vocal_pref"));
+    std::string treble     = SurveyMapping::IdToLabel(SafeStr(row, "treble_pref"));
+    std::string soundstage = SurveyMapping::IdToLabel(SafeStr(row, "soundstage_pref"));
+    std::string volume     = SurveyMapping::IdToLabel(SafeStr(row, "volume_pref"));
 
-    // UploadAudioPreferences 의 인자 순서 (bass, vocal, treble, soundstage, volume)
-    // 와 동일한 순서로 재조립. AI 프롬프트가 이 문자열을 자연어로 그대로 받음.
+    // SurveyWindow.cpp 의 t1/t2/t3/t4/t5 순서: bass, vocal, soundstage, treble, volume
+    // (UploadAudioPreferences 의 매개변수 순서와 다름 — SurveyWindow 출력 순서 유지)
     std::vector<std::string> parts;
     if (!bass.empty())       parts.push_back(bass);
     if (!vocal.empty())      parts.push_back(vocal);
-    if (!treble.empty())     parts.push_back(treble);
     if (!soundstage.empty()) parts.push_back(soundstage);
+    if (!treble.empty())     parts.push_back(treble);
     if (!volume.empty())     parts.push_back(volume);
     if (parts.empty()) return false;
 
@@ -880,12 +991,14 @@ bool RecordManager::UploadAudioPreferences(const std::string &bass,
     WriteSyncLog({{"event","prefs_skip"},{"reason","no_auth"}});
     return false;
   }
+  // [C-2] DB 에는 불변 ID 형식으로 저장 (예: "bass_heavy"). UI 라벨이 변경/번역되어도
+  // 기존 데이터와 매칭 유지. SurveyMapping 이 라벨 → ID 변환, 라벨로 들어와도 폴백.
   nlohmann::json body = {{"user_id",         m_userId},
-                         {"bass_pref",       bass},
-                         {"vocal_pref",      vocal},
-                         {"treble_pref",     treble},
-                         {"soundstage_pref", soundstage},
-                         {"volume_pref",     volume}};
+                         {"bass_pref",       SurveyMapping::LabelToId(bass)},
+                         {"vocal_pref",      SurveyMapping::LabelToId(vocal)},
+                         {"treble_pref",     SurveyMapping::LabelToId(treble)},
+                         {"soundstage_pref", SurveyMapping::LabelToId(soundstage)},
+                         {"volume_pref",     SurveyMapping::LabelToId(volume)}};
   // PostgREST 단일 row upsert는 객체 1개를 그대로 보내면 됨. on_conflict=user_id.
   long http = 0;
   auto resp = SupabaseRequest("POST",
@@ -901,6 +1014,8 @@ bool RecordManager::UploadAudioPreferences(const std::string &bass,
 }
 
 bool RecordManager::IsAIEligible() {
+  // [E-1] 익명 사용자는 AI/DB 모두 차단 — 로컬 캐시만 동작.
+  if (IsAnonymous()) return false;
   std::string plan = GetUserPlanType();
   if (plan == "pro" || plan == "beta" || plan == "expert")
     return true;
@@ -1000,8 +1115,9 @@ void RecordManager::SaveInteraction(const EQEntry &entry) {
   std::string key = NormalizeKey(entry.title, entry.artist);
 
   // ── [DB-Sync] Pro+ 사용자 한정: pending/ 디스크 큐에 1파일 즉시 기록. ──
-  // Free는 서버 동기화 안 함 → pending 파일도 안 만듦.
-  if (IsAIEligible()) {
+  // Free / Anonymous 는 서버 동기화 안 함 → pending 파일도 안 만듦.
+  // [E-1] 익명 모드: 로컬 캐시 (m_cache) 에만 저장 — 마이그레이션 시 일괄 업로드.
+  if (!IsAnonymous() && IsAIEligible()) {
     json pendRec = {{"schema_version", 1},
                     {"title", entry.title},
                     {"artist", entry.artist},
@@ -1013,13 +1129,15 @@ void RecordManager::SaveInteraction(const EQEntry &entry) {
                     {"eq_31", entry.gains31},
                     {"device_name", entry.deviceName},
                     {"prompt", entry.prompt}};
+    bool writeOk = false;
+    std::string writtenPath;
     try {
       std::string dir = PendingDir(m_recordDir);
       std::filesystem::create_directories(dir);
-      std::string path = dir + "\\" +
-                         PendingFilenameFor(entry.title, entry.artist, entry.source);
+      writtenPath = dir + "\\" +
+                    PendingFilenameFor(entry.title, entry.artist, entry.source);
       // atomic write — .tmp → rename. 강종 시에도 본 파일은 손상 안 됨.
-      std::string tmp = path + ".tmp";
+      std::string tmp = writtenPath + ".tmp";
       {
         std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
         if (f) {
@@ -1028,14 +1146,27 @@ void RecordManager::SaveInteraction(const EQEntry &entry) {
         }
       }
       std::error_code ec;
-      std::filesystem::rename(tmp, path, ec);
+      std::filesystem::rename(tmp, writtenPath, ec);
       if (ec) {
         // rename 실패 폴백
-        std::ofstream f(path, std::ios::binary | std::ios::trunc);
+        std::ofstream f(writtenPath, std::ios::binary | std::ios::trunc);
         f << pendRec.dump();
         std::filesystem::remove(tmp, ec);
       }
+      writeOk = true;
     } catch (...) {}
+
+    // [A-3] DB 동기화 진단 — 사용자가 "DB 저장 안 됨" 신고 시 원인 추적용.
+    WriteSyncLog({{"event", "save_interaction"},
+                  {"source", entry.source},
+                  {"title", entry.title},
+                  {"ok", writeOk},
+                  {"path", writtenPath}});
+  } else {
+    WriteSyncLog({{"event", "save_interaction_skip"},
+                  {"reason", IsAnonymous() ? "anonymous" : "free_user"},
+                  {"source", entry.source},
+                  {"title", entry.title}});
   }
 
   // 메모리 캐시 업데이트
@@ -1437,6 +1568,11 @@ void RecordManager::ProcessBatchSync(bool forceAll) {
       }
     }
   }
+  // [A-3] DB 동기화 진단 — 시작 시 pending 파일 개수 + forceAll 여부 기록.
+  WriteSyncLog({{"event", "batch_sync_scan"},
+                {"pending_count", cnt},
+                {"force_all", forceAll},
+                {"will_sync", (forceAll || cnt >= 5)}});
   if (forceAll || cnt >= 5) {
     SyncToDB();
   }
