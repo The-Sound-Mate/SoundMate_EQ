@@ -239,6 +239,35 @@ private:
   std::atomic<bool> m_pendingSongChange{false};
   SongInfo m_pendingSong;
 
+  // [4-B] 곡 변경 디바운스 — Gemini 권고 3초.
+  // 빠른 스킵 시 iTunes API 과호출 방지.
+  // 곡 변경마다 epoch++. 디바운스 스레드는 sleep 후 epoch 가 그대로면 진행,
+  // 그 사이 새 곡으로 바뀌었으면 (epoch 증가) 스킵.
+  std::atomic<int> m_songEpoch{0};
+
+  // [4-A/B] iTunes 정규화된 canonical title/artist. DB key 로 사용.
+  // m_currentTitle/m_currentArtist 는 사용자에게 보이는 원본 (정규화 후),
+  // m_canonicalTitle/m_canonicalArtist 는 cross-platform 매칭용.
+  //
+  // ⚠️ 스레드 안전성: async 디바운스 스레드가 쓰고, 메인 스레드 / AI 스레드가
+  //    읽음. std::string 의 SSO/heap pointer 가 갱신되는 순간 읽으면 AV 가능.
+  //    모든 접근은 m_canonicalMutex 보호 하에 수행.
+  mutable std::mutex m_canonicalMutex;
+  std::string        m_canonicalTitle;
+  std::string        m_canonicalArtist;
+  int64_t            m_canonicalTrackId = 0;
+
+  // 잠금 비용 최소화 — 멤버를 매번 잠그지 않고 한 번에 snapshot 복사하는 헬퍼.
+  struct CanonicalSnapshot {
+    std::string title;
+    std::string artist;
+    int64_t     trackId = 0;
+  };
+  CanonicalSnapshot SnapshotCanonical() const {
+    std::lock_guard<std::mutex> lk(m_canonicalMutex);
+    return { m_canonicalTitle, m_canonicalArtist, m_canonicalTrackId };
+  }
+
   // AI/Cache 처리 상태
   std::atomic<bool> m_pendingEQUpdate{false};
   std::vector<float> m_queuedGains;

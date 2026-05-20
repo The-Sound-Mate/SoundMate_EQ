@@ -5,6 +5,9 @@
 
 struct MusicInfo {
     std::string genre, artist, title, imageUrl;
+    int64_t     trackId = 0;   // [4-A] Apple iTunes 글로벌 트랙 ID (SoT).
+                                // 같은 곡을 YouTube/Spotify/Apple Music 어디서 듣든
+                                // 동일한 trackId → 학습 데이터 통합 가능.
     bool valid = false;
 };
 

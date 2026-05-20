@@ -568,6 +568,66 @@ bool RecordManager::RefreshUserProfile() {
   }
 }
 
+// [3-C] 시작 시 user_audio_preferences 에서 사용자 취향 (설문 결과) SELECT.
+// 다른 PC 에서 로그인해도 동일 취향이 즉시 반영되도록 함.
+// 5개 컬럼 (bass/vocal/treble/soundstage/volume) 을 콤마 연결 문자열로 복원하여
+// m_cache["profile"]["tendency"] 에 저장. AI 호출 시 이 값이 userPref 로 들어감.
+bool RecordManager::FetchUserTendency() {
+  std::string at = GetAccessToken();
+  if (at.empty() || m_userId.empty())
+    return false;
+
+  std::string endpoint =
+      "/rest/v1/user_audio_preferences?user_id=eq." + m_userId +
+      "&select=bass_pref,vocal_pref,treble_pref,soundstage_pref,volume_pref";
+  std::string resp = SupabaseRequest("GET", endpoint, "", at);
+  if (resp.empty())
+    return false;
+
+  try {
+    auto arr = nlohmann::json::parse(resp);
+    if (!arr.is_array() || arr.empty()) {
+      WriteSyncLog({{"event","tendency_fetch_empty"}});
+      return false;
+    }
+    auto &row = arr[0];
+    std::string bass       = SafeStr(row, "bass_pref");
+    std::string vocal      = SafeStr(row, "vocal_pref");
+    std::string treble     = SafeStr(row, "treble_pref");
+    std::string soundstage = SafeStr(row, "soundstage_pref");
+    std::string volume     = SafeStr(row, "volume_pref");
+
+    // UploadAudioPreferences 의 인자 순서 (bass, vocal, treble, soundstage, volume)
+    // 와 동일한 순서로 재조립. AI 프롬프트가 이 문자열을 자연어로 그대로 받음.
+    std::vector<std::string> parts;
+    if (!bass.empty())       parts.push_back(bass);
+    if (!vocal.empty())      parts.push_back(vocal);
+    if (!treble.empty())     parts.push_back(treble);
+    if (!soundstage.empty()) parts.push_back(soundstage);
+    if (!volume.empty())     parts.push_back(volume);
+    if (parts.empty()) return false;
+
+    std::string tendency;
+    for (size_t i = 0; i < parts.size(); ++i) {
+      if (i) tendency += ", ";
+      tendency += parts[i];
+    }
+
+    {
+      std::lock_guard<std::mutex> lk(m_mutex);
+      if (!m_cache.contains("profile") || !m_cache["profile"].is_object())
+        m_cache["profile"] = nlohmann::json::object();
+      m_cache["profile"]["tendency"] = tendency;
+      SaveCache();
+    }
+    WriteSyncLog({{"event","tendency_fetch_ok"},{"len",tendency.size()}});
+    return true;
+  } catch (...) {
+    WriteSyncLog({{"event","tendency_fetch_parse_error"}});
+    return false;
+  }
+}
+
 // JWT payload에서 특정 string claim 추출 (email 등). 실패 시 "".
 static std::string ExtractJwtClaim(const std::string &jwt, const char *key) {
   try {

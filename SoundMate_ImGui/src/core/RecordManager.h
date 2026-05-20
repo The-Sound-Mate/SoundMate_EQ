@@ -40,6 +40,11 @@ public:
   // 받아 m_cache["profile"]에 저장. 로그인 직후 1회 + 필요 시 호출.
   bool RefreshUserProfile();
 
+  // [3-C] user_audio_preferences 에서 설문 결과 복원 (다른 PC 로그인 동기화).
+  // 로그인 직후 refreshProfileAsync 와 함께 호출됨. 결과는 m_cache 의
+  // ["profile"]["tendency"] 에 콤마 연결 문자열로 저장. AI 호출 시 사용.
+  bool FetchUserTendency();
+
   // Phase 3: AI 사용 가능한 플랜인지 (pro/beta/expert) 또는 Trial 활성 여부.
   // 클라이언트측 캐시 기반 — 서버가 진짜 게이트(consume_ai_quota).
   bool IsAIEligible();

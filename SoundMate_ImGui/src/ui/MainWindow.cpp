@@ -78,6 +78,7 @@ void MainWindow::Initialize(EQController *eq, AIClient *ai,
     m_eqCtrl->Initialize();
     std::vector<float> currentGains;
     int detectedCount = 0;
+    bool loadedFromConfig = false;
     if (m_eqCtrl->LoadEQFromFile(currentGains, detectedCount)) {
       // 저장된 밴드 수에 맞는 모드 찾기 (5, 10, 15, 31 등)
       for (int i = 0; i < (int)ALL_BANDS.size(); i++) {
@@ -85,9 +86,25 @@ void MainWindow::Initialize(EQController *eq, AIClient *ai,
           m_selectedBandSet = i;
           SetupEQBands(ALL_BANDS[i]);
           m_eqGains = currentGains;
+          loadedFromConfig = true;
           break;
         }
       }
+    }
+    // [1-A] config.txt 미존재 또는 매칭 실패 시 settings.defaultBands 폴백.
+    // 첫 설치 + 사용자가 이전에 31밴드로 설정 저장한 경우 5밴드 default 로
+    // 시작되던 문제 방어.
+    if (!loadedFromConfig) {
+      int bandIdx = 0;
+      switch (m_settings.defaultBands) {
+        case 5:  bandIdx = 0; break;
+        case 10: bandIdx = 1; break;
+        case 15: bandIdx = 2; break;
+        case 31: bandIdx = 3; break;
+        default: bandIdx = 0; break;
+      }
+      m_selectedBandSet = bandIdx;
+      SetupEQBands(ALL_BANDS[bandIdx]);
     }
   }
 
@@ -459,7 +476,17 @@ void MainWindow::TriggerAIGeneration() {
 
   if (m_aiThread.joinable())
     m_aiThread.detach();
-  m_aiThread = std::thread([this, prompt, accessToken]() {
+  // [4-A] AI 서버에 canonical title/artist 전달 — cross-platform 학습 데이터 통합.
+  // canonical 멤버는 async 스레드가 쓰므로 snapshot 으로 안전하게 복사.
+  CanonicalSnapshot canon = SnapshotCanonical();
+  std::string aiTitle  = canon.title.empty()  ? m_currentTitle  : canon.title;
+  std::string aiArtist = canon.artist.empty() ? m_currentArtist : canon.artist;
+
+  // [3-D] tendency 는 매번 RecordManager 에서 최신값 조회 — FetchUserTendency 가
+  // 비동기로 완료되어도 자동으로 반영됨. m_userPreference 캐시 의존 제거.
+  std::string userPref = g_recordManager.GetUserTendency();
+
+  m_aiThread = std::thread([this, prompt, accessToken, aiTitle, aiArtist, userPref]() {
     if (!m_ai) {
       SetStatus("AI Setup Error: client not initialized", Theme::COLOR_RED);
       m_aiProcessing = false;
@@ -468,8 +495,8 @@ void MainWindow::TriggerAIGeneration() {
 
     SetStatus("AI: Sending request to Proxy...", Theme::TEXT_WHITE);
     auto result = m_ai->GenerateAllBandsEQ(
-        m_currentTitle, m_currentArtist, m_currentGenre,
-        prompt, m_userPreference, accessToken);
+        aiTitle, aiArtist, m_currentGenre,
+        prompt, userPref, accessToken);
 
     if (result.errorCode == 429) {
       SetStatus("AI Rate Limit. Wait 30s.", Theme::COLOR_RED);
@@ -531,10 +558,10 @@ void MainWindow::TriggerAIGeneration() {
       }
       SetStatus("AI Analysis Complete!", Theme::COLOR_GREEN);
 
-      // [NEW] Save AI Interaction
+      // [4-A] DB 저장도 canonical key — cross-platform 매칭 일관성.
       EQEntry entry;
-      entry.title = m_currentTitle;
-      entry.artist = m_currentArtist;
+      entry.title = aiTitle;
+      entry.artist = aiArtist;
       entry.source = prompt.empty() ? "AI" : "prompt";
       entry.prompt = prompt;
       entry.gains5 = result.bands5;
@@ -719,11 +746,8 @@ void MainWindow::Render() {
       std::string logMsg = "Normalization: [" + song.title + "] -> [" + artist + " - " + title + "]";
       SetStatus(logMsg, Theme::TEXT_WHITE);
 
-      // [작업 B] 정규화 로그 누락 보강 — 어떤 분기를 타든 정규화 결과가
-      // normalize_log.jsonl 에 기록되도록 fire-and-forget GetGenre를 먼저 호출.
-      std::thread([title, artist]() {
-        g_genreManager.GetGenre(title, artist);
-      }).detach();
+      // [4-B] 곡 변경 epoch 증가 — 디바운스 스레드가 자기가 가장 최신인지 검사
+      int myEpoch = ++m_songEpoch;
 
       // ── 프리셋 모드 활성 중: AI/캐시 건너뛰고 프리셋 EQ 고정 재적용 ──
       if (m_presetModeActive && m_selectedPresetIdx >= 0 &&
@@ -731,9 +755,6 @@ void MainWindow::Render() {
         ApplyPreset(m_selectedPresetIdx);
         SetStatus("Preset: " + m_userPresets[m_selectedPresetIdx].name,
                   Theme::COLOR_CYAN);
-        if (g_recordManager.IsAIEligible()) {
-          std::thread([]() { g_recordManager.ProcessBatchSync(false); }).detach();
-        }
         return;
       }
 
@@ -742,17 +763,38 @@ void MainWindow::Render() {
       const bool eligible = g_recordManager.IsAIEligible();
       const EqMode mode = eligible ? m_settings.eqMode : EqMode::Off;
 
-      // 장르 정보 비동기 가져오기 (OFF 상태여도 정규화 로그 작성을 위해 API 호출 유지)
-      std::thread([this, title, artist, mode]() {
-        m_currentGenre = g_genreManager.GetGenre(title, artist);
+      // [4-B] 3초 디바운스 + canonical title/artist 로 DB 매칭.
+      std::thread([this, title, artist, mode, myEpoch]() {
+        // 3초 대기 — 그 사이 새 곡으로 바뀌면 이 작업 통째로 폐기.
+        std::this_thread::sleep_for(std::chrono::seconds(3));
+        if (m_songEpoch.load() != myEpoch) return;
+
+        // iTunes API 호출 (디스크 캐시 통해 — 같은 곡 재생 시 무료)
+        MusicInfo info = g_genreManager.GetMusicInfo(title, artist);
+        m_currentGenre = info.valid ? info.genre : "";
+
+        // [4-A] DB key 는 canonical title/artist 사용.
+        // YouTube/Spotify/Apple Music 어디서 듣든 같은 곡 → 같은 row 매칭.
+        // iTunes 매칭 실패 시 원본으로 폴백.
+        std::string keyTitle  = info.valid ? info.title  : title;
+        std::string keyArtist = info.valid ? info.artist : artist;
+
+        // ⚠️ canonical mutex 보호 — 메인 스레드 (RenderEQPanel slider deactivation)
+        // 와 AI 스레드 (TriggerAIGeneration 시작) 가 동시에 읽음.
+        {
+          std::lock_guard<std::mutex> lk(m_canonicalMutex);
+          m_canonicalTitle   = keyTitle;
+          m_canonicalArtist  = keyArtist;
+          m_canonicalTrackId = info.trackId;
+        }
 
         if (mode == EqMode::Off) {
           // 자동 EQ 변환 없음 — 이전 EQ 그대로 유지.
           return;
         }
 
-        // 로컬 캐시 확인
-        EQEntry *cached = g_recordManager.GetCachedEQ(title, artist);
+        // 로컬 캐시 확인 — canonical key 로 조회
+        EQEntry *cached = g_recordManager.GetCachedEQ(keyTitle, keyArtist);
         if (cached) {
           std::vector<float> *target = nullptr;
           if (m_currentBands.size() == 5 && !cached->gains5.empty())
@@ -1228,9 +1270,12 @@ void MainWindow::RenderEQPanel() {
       }
     }
     if (ImGui::IsItemDeactivatedAfterEdit()) {
+      // [4-A] DB key = canonical (iTunes 매칭 시) 또는 원본 (폴백)
+      // canonical 은 async 스레드가 쓰므로 snapshot 으로 안전하게 복사.
+      CanonicalSnapshot canon = SnapshotCanonical();
       EQEntry entry;
-      entry.title = m_currentTitle;
-      entry.artist = m_currentArtist;
+      entry.title  = canon.title.empty()  ? m_currentTitle  : canon.title;
+      entry.artist = canon.artist.empty() ? m_currentArtist : canon.artist;
       entry.source = "manual";
       entry.deviceName = GetSelectedDeviceGuid();
       if (m_currentBands.size() == 5)

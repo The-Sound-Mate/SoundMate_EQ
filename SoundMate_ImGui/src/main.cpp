@@ -130,11 +130,29 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     io.IniFilename  = nullptr; // ini 파일 저장 비활성화
 
     // 폰트: 맑은 고딕 (한글 지원, 고해상도 처리)
+    //
+    // [5-A] GetGlyphRangesKorean() 은 자주 쓰는 한글 ~2,500자만 포함 →
+    //       일부 글자 (예: "쒸", "꿴", "뷁") 가 fallback 글리프 (작은 ?) 로
+    //       렌더되면서 "글자가 커지는/작아지는 현상" 의 원인이 됨.
+    //       Hangul Syllables 전체 범위 (U+AC00 ~ U+D7AF, 11,184자) 를
+    //       사전 로드 → 모든 한글이 동일 폰트/크기로 렌더됨.
+    //
+    // [5-C] OversampleH/V 3→2/1 — 폰트 텍스처 메모리 절감 (한글은 자모 구조라
+    //       고배수 oversampling 효과 미미). 청감 차이 거의 없음.
+    static const ImWchar koreanFullRanges[] = {
+        0x0020, 0x00FF,   // Basic Latin + Latin-1 Supplement
+        0x2000, 0x206F,   // General Punctuation
+        0x3000, 0x303F,   // CJK Symbols & Punctuation
+        0x3130, 0x318F,   // Hangul Compatibility Jamo (ㄱㄴㄷ)
+        0xAC00, 0xD7AF,   // Hangul Syllables (가-힣 전체)
+        0xFF00, 0xFFEF,   // Halfwidth/Fullwidth Forms
+        0,
+    };
     ImFontConfig font_config;
-    font_config.OversampleH = 3;
-    font_config.OversampleV = 3;
+    font_config.OversampleH = 2;
+    font_config.OversampleV = 1;
     io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\malgun.ttf", 16.0f * dpiScale,
-                                  &font_config, io.Fonts->GetGlyphRangesKorean());
+                                  &font_config, koreanFullRanges);
     // io.Fonts->Build(); // [FIX] Modern backends handle this automatically; calling it manually causes assertion failure.
 
     // ImGui 스타일 스케일링
@@ -162,8 +180,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
 
     // [Phase 3] 로그인 성공 직후 profile(plan_type, display_name 등)을
     // 백그라운드 스레드에서 1회 fetch. UI 블로킹 없이 캐시를 채워둔다.
+    // [3-C] tendency (설문 결과) 도 같이 fetch — 다른 PC 로그인 시 동기화.
     auto refreshProfileAsync = []() {
-        std::thread([]() { g_recordManager.RefreshUserProfile(); }).detach();
+        std::thread([]() {
+            g_recordManager.RefreshUserProfile();
+            g_recordManager.FetchUserTendency();
+        }).detach();
     };
 
     // [PR-A] 로그인 직후 기기 등록 (RPC register_device).
@@ -177,6 +199,17 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
         }).detach();
     };
 
+    // [2-C] 시작 시 pending/ 폴더 자동 회수 — 이전 세션이 종료 직전 업로드
+    // 못 한 데이터를 백그라운드로 동기화. 로그인 후 5초 대기 (프로필/디바이스
+    // 등록 안정화 후) → ProcessBatchSync(true) 호출 → snapshot 패턴으로
+    // 안전하게 처리 (RecordManager 내부에서 ConsolidateLocalRecords + SyncToDB).
+    auto startPendingSyncAsync = []() {
+        std::thread([]() {
+            std::this_thread::sleep_for(std::chrono::seconds(5));
+            g_recordManager.ProcessBatchSync(true);
+        }).detach();
+    };
+
     // [Phase 2-A] 토큰 자동 복원 — 유효한 v2(DPAPI 암호화) 토큰이 있으면
     // LoginWindow 자체를 띄우지 않고 즉시 메인 화면으로. 토큰 만료 / 복호화
     // 실패 / 파일 없음이면 LoginWindow.Open() 으로 흐름 유지 (TryAutoLogin 이
@@ -185,12 +218,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
         loggedIn = true;   // m_userId 는 GetUserIdFromToken 내부에서 설정됨
         refreshProfileAsync();
         registerDeviceAsync();
+        startPendingSyncAsync();  // [2-C] 이전 세션 미동기화 데이터 백그라운드 회수
     } else {
         loginWin.Open([&](const std::string& uid, const std::string& email, bool isNew) {
             g_recordManager.SetUserId(uid);
             loggedIn = true;
             refreshProfileAsync();
             registerDeviceAsync();
+            startPendingSyncAsync();
         });
     }
 
@@ -267,10 +302,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     }
 
 cleanup:
-    // [DB-Sync] Exit Sync — pending/ 미동기화 데이터를 종료 직전 강제 업로드.
-    // 5곡 미만이어도 한 번 시도. CURL 타임아웃 15s 내에서 끝. 실패해도 pending/
-    // 파일은 보존되므로 다음 실행 시 자동 재시도.
-    g_recordManager.ProcessBatchSync(true);
+    // [2-B] 종료 시 네트워크 동기화 제거 — 블로킹 호출이 Windows ANR 판정으로
+    // 강제 종료될 위험이 있었음. SaveInteraction 은 이미 pending/ 폴더에 즉시
+    // flush 하므로 디스크상 데이터 손실은 없음. 업로드는 다음 시작 시
+    // 백그라운드 스레드 (아래 startSyncThread) 가 자동 회수.
 
     monitor.Stop();
     ImGui_ImplDX11_Shutdown();

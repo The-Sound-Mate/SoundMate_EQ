@@ -95,6 +95,19 @@ void SettingsWindow::Open(const std::vector<std::string> &devices,
   m_onRestoreDevice = onRestoreDevice;
   m_onSurvey = onSurvey;
   m_settings = LoadSettings();
+
+  // [1-A] 저장된 defaultBands 값에 따라 m_bandIdx (UI 하이라이트 인덱스) 동기화.
+  // 기존 코드는 m_bandIdx 가 항상 0 (5-Band) 으로 초기화되어 사용자가 31밴드를
+  // 저장했어도 설정창을 다시 열 때마다 5-Band 가 선택되어 보였음 → "토글 유지 안 됨"
+  // 처럼 보이는 시각적 버그.
+  switch (m_settings.defaultBands) {
+    case 5:  m_bandIdx = 0; break;
+    case 10: m_bandIdx = 1; break;
+    case 15: m_bandIdx = 2; break;
+    case 31: m_bandIdx = 3; break;
+    default: m_bandIdx = 0; break;
+  }
+
   m_open = true;
 }
 
@@ -170,14 +183,10 @@ void SettingsWindow::Render() {
   // [PR-2D] 모든 우측 정렬 버튼이 같은 X에서 끝나도록 공통 right edge 사용.
   const float kRightEdge = cw - 4.0f;
 
-  // [PR-2D] Free 사용자가 이전에 AiAuto 등으로 저장해 둔 값이 남아있어도
-  // 강제로 OFF로 정정. UI/JSON/메모리 동기화.
-  if (!g_recordManager.IsAIEligible() && m_settings.eqMode != EqMode::Off) {
-    m_settings.eqMode = EqMode::Off;
-    m_settings.autoAnalyze = false;
-    m_settings.globalAverage = false;
-    SaveSettings(m_settings);
-  }
+  // [1-B] Free 사용자 정책: 강제 덮어쓰기 → "값 보존 + 비활성 UI" 로 변경.
+  // 사용자 데이터(이전 선택) 를 임의로 지우지 않음. Pro 업그레이드 시 자동 부활.
+  // 실제 자동 EQ 적용 분기는 IsAIEligible() 검사를 추가로 거치므로 안전.
+  const bool aiEligible = g_recordManager.IsAIEligible();
 
   // [작업 A] "기본 출력 장치" 드롭다운 제거 — 시스템 기본 출력 장치를
   // 자동 추종(Windows 사운드 설정 따라감). 사용자가 앱 내에서 잘못 선택해
