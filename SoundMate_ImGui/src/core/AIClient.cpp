@@ -1,5 +1,6 @@
 // src/core/AIClient.cpp
 #include "AIClient.h"
+#include "RecordManager.h"   // [세션 정책] 401 시 ForceRefreshAccessToken
 #include <nlohmann/json.hpp>
 #include <curl/curl.h>
 #include <cmath>
@@ -29,6 +30,14 @@ static size_t WriteCallback(char* ptr, size_t size, size_t nmemb, std::string* d
     return size * nmemb;
 }
 
+static int ProgressCallback(void* clientp, curl_off_t dltotal, curl_off_t dlnow, curl_off_t ultotal, curl_off_t ulnow) {
+    auto* abortFlag = static_cast<std::atomic<bool>*>(clientp);
+    if (abortFlag && abortFlag->load()) {
+        return 1; // Abort transfer! (CURLE_ABORTED_BY_CALLBACK)
+    }
+    return 0;
+}
+
 AIClient::AIClient() {
     curl_global_init(CURL_GLOBAL_DEFAULT);
 }
@@ -43,7 +52,8 @@ std::string AIClient::CallProxyAPI(
     const std::string& systemPref,
     const std::string& accessToken,
     long*              outHttpCode,
-    std::string*       outBody)
+    std::string*       outBody,
+    std::atomic<bool>* abortFlag)
 {
     std::string url = "https://lpcarclwfgzlfczqflgo.supabase.co/functions/v1/generate-eq";
 
@@ -81,7 +91,18 @@ std::string AIClient::CallProxyAPI(
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &responseStr);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
+    
+    if (abortFlag) {
+        curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, ProgressCallback);
+        curl_easy_setopt(curl, CURLOPT_XFERINFODATA, abortFlag);
+        curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+    }
+
+    // [Fix] Gemini 2.5-flash cold start + Supabase Edge Function 왕복 시
+    // 30초로는 부족 ("AI Proxy Error: Proxy Error 0"). 60초로 상향.
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 60L);
+    // 연결 자체는 15초 안에 못 잡으면 즉시 실패 — DNS/방화벽 문제 빨리 감지.
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 15L);
 
     CURLcode res = curl_easy_perform(curl);
     long httpCode = 0;
@@ -132,7 +153,8 @@ EQBands AIClient::GenerateAllBandsEQ(
     const std::string& genre,
     const std::string& userPref,
     const std::string& systemPref,
-    const std::string& accessToken)
+    const std::string& accessToken,
+    std::atomic<bool>* abortFlag)
 {
     EQBands result;
     result.bands5.assign(5, 0.0f);
@@ -142,10 +164,34 @@ EQBands AIClient::GenerateAllBandsEQ(
 
     long httpCode = 0;
     std::string body;
+    std::string tokenToUse = accessToken;
+
+    auto tryOnce = [&](const std::string& tok) -> std::string {
+        httpCode = 0;
+        body.clear();
+        return CallProxyAPI(title, artist, genre, userPref,
+                            systemPref, tok, &httpCode, &body, abortFlag);
+    };
+
     try {
-        std::string response = CallProxyAPI(title, artist, genre, userPref,
-                                            systemPref, accessToken,
-                                            &httpCode, &body);
+        std::string response;
+        try {
+            response = tryOnce(tokenToUse);
+        } catch (const std::exception&) {
+            // [세션 정책] 401 = 토큰 일시 만료. 강제 refresh + 1회 재시도.
+            // 사용자에게 로그인 강요 X — 자동 복구가 first-class.
+            if (httpCode == 401) {
+                std::string refreshed = g_recordManager.ForceRefreshAccessToken();
+                if (!refreshed.empty()) {
+                    tokenToUse = refreshed;
+                    response = tryOnce(tokenToUse);
+                } else {
+                    throw;  // refresh도 실패 → 원래 401 흐름
+                }
+            } else {
+                throw;
+            }
+        }
         result.bands31 = ParseGainsFromResponse(response);
         result.bands5  = Map31ToTargetBands(result.bands31, F5);
         result.bands10 = Map31ToTargetBands(result.bands31, F10);
@@ -157,7 +203,6 @@ EQBands AIClient::GenerateAllBandsEQ(
         result.errorCode = (int)httpCode;
         if (httpCode == 0) result.errorCode = -1;
 
-        // 403 인 경우 본문에서 reason 파싱 (free_no_ai / monthly_limit / ...)
         if (httpCode == 403 && !body.empty()) {
             try {
                 auto j = json::parse(body);

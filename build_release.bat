@@ -26,7 +26,7 @@ if errorlevel 1 (echo [ERROR] Build FAILED & exit /b 1)
 echo.
 echo [OK] Release build complete.
 echo.
-echo Output: build\
-dir build\*.dll build\*.exe 2>nul
+echo Output: build\Release\
+dir build\Release\*.dll build\Release\*.exe 2>nul
 
 endlocal

@@ -504,6 +504,31 @@ static std::string B64Decode(std::string payload) {
 }
 
 // Refresh the access_token using refresh_token from session file
+// [세션 정책] 디스크 토큰 파일에서 refresh_token 추출 → RefreshAccessToken 호출.
+// 401 받은 시점에 즉시 새 access_token 발급용. 실패 시 빈 string.
+std::string RecordManager::ForceRefreshAccessToken() {
+  try {
+    if (!std::filesystem::exists(m_tokenFile)) return "";
+    std::ifstream f(m_tokenFile);
+    auto token = json::parse(f);
+    std::string rt;
+    int v = token.value("v", 1);
+    if (v >= 2) {
+      std::string b64 = token.value("encrypted", "");
+      std::string plain = LoginWindow::DecryptDPAPI(b64);
+      if (plain.empty()) return "";
+      auto inner = json::parse(plain);
+      rt = inner.value("refresh_token", "");
+    } else {
+      rt = token.value("refresh_token", "");
+    }
+    if (rt.empty()) return "";
+    return RefreshAccessToken(rt);
+  } catch (...) {
+    return "";
+  }
+}
+
 std::string RecordManager::RefreshAccessToken(const std::string &refreshToken) {
   std::string url =
       std::string(SUPABASE_URL) + "/auth/v1/token?grant_type=refresh_token";
@@ -1448,6 +1473,8 @@ bool RecordManager::SyncToDB() {
   }
   if (items.empty()) return true;
 
+  WriteSyncLog({{"event","sync_start"},{"items", (int)items.size()},
+                {"user_id", m_userId}});
   try {
     // 1) track 테이블 upsert
     json tracks = json::array();
@@ -1481,11 +1508,52 @@ bool RecordManager::SyncToDB() {
     } catch (...) {
       WriteSyncLog({{"event","track_response_parse_fail"},
                     {"body", tresp.substr(0, std::min<size_t>(256, tresp.size()))}});
-      return false;
+      // 파싱 실패해도 SELECT fallback으로 한 번 더 시도
     }
 
-    // 2) user_track_history insert/upsert
-    json upserts = json::array(), inserts = json::array();
+    // [Fix] track 응답이 빈 배열이거나 일부 누락된 경우 → SELECT fallback.
+    // PostgREST 일부 버전 / Prefer 헤더 조합에 따라 merge-duplicates 응답이
+    // 비어 있는 케이스 방어. 누락된 해시만 골라서 GET 으로 id 조회.
+    std::vector<std::string> missing;
+    for (auto &it : items) {
+      std::string h = GenerateTrackHash(it.data.value("title", ""),
+                                        it.data.value("artist", ""));
+      if (!hashToId.count(h)) missing.push_back(h);
+    }
+    if (!missing.empty()) {
+      // PostgREST in.(...) 문법. 짧은 해시 ID라 batch URL 길이 안전.
+      std::string in = "in.(";
+      for (size_t i = 0; i < missing.size(); ++i) {
+        if (i) in += ",";
+        in += missing[i];
+      }
+      in += ")";
+      long sh = 0;
+      auto sresp = SupabaseRequest("GET",
+          "/rest/v1/track?select=id,track_hash&track_hash=" + in,
+          "", accessToken, &sh);
+      if (sh >= 200 && sh < 300) {
+        try {
+          auto sarr = nlohmann::json::parse(sresp);
+          for (auto &r : sarr) {
+            if (r.contains("track_hash") && r.contains("id")
+                && r["track_hash"].is_string() && r["id"].is_string()) {
+              hashToId[r["track_hash"].get<std::string>()] =
+                  r["id"].get<std::string>();
+            }
+          }
+        } catch (...) {}
+      }
+      WriteSyncLog({{"event","track_select_fallback"},
+                    {"missing_before", (int)missing.size()},
+                    {"hashToId_after", (int)hashToId.size()}});
+    }
+
+    // 2) user_track_history — 모든 source 를 upsert.
+    // UNIQUE(user_id, track_id, source) 위반(같은 곡 + 같은 source 재시도)
+    // 시 단순 INSERT 면 batch 전체 실패. on_conflict=user_id,track_id,source
+    // 로 덮어쓰기 정책 통일.
+    json batch = json::array();
     std::vector<std::filesystem::path> uploaded;
     for (auto &it : items) {
       std::string h = GenerateTrackHash(it.data.value("title", ""),
@@ -1501,35 +1569,27 @@ bool RecordManager::SyncToDB() {
                    {"source",      it.data.value("source", "")},
                    {"prompt",      it.data.value("prompt", "")},
                    {"device_name", it.data.value("device_name", "")}};
-      if (it.data.value("source", "") == "direct")
-        upserts.push_back(hist);
-      else
-        inserts.push_back(hist);
+      batch.push_back(hist);
       uploaded.push_back(it.path);
     }
+    WriteSyncLog({{"event","history_batch_prepared"},
+                  {"hashToId", (int)hashToId.size()},
+                  {"batch", (int)batch.size()},
+                  {"skipped_no_tid", (int)items.size() - (int)batch.size()}});
 
     bool ok = true;
-    if (!upserts.empty()) {
+    if (!batch.empty()) {
       long h = 0;
       auto r = SupabaseRequest("POST",
           "/rest/v1/user_track_history?on_conflict=user_id,track_id,source",
-          upserts.dump(), accessToken, &h);
+          batch.dump(), accessToken, &h);
       if (h < 200 || h >= 300) {
         ok = false;
         WriteSyncLog({{"event","history_upsert_fail"},{"http",h},
                       {"body", r.substr(0, std::min<size_t>(256, r.size()))}});
       }
     }
-    if (ok && !inserts.empty()) {
-      long h = 0;
-      auto r = SupabaseRequest("POST", "/rest/v1/user_track_history",
-                               inserts.dump(), accessToken, &h);
-      if (h < 200 || h >= 300) {
-        ok = false;
-        WriteSyncLog({{"event","history_insert_fail"},{"http",h},
-                      {"body", r.substr(0, std::min<size_t>(256, r.size()))}});
-      }
-    }
+    // (옛 direct/inserts 분기 제거됨 — 모두 단일 batch upsert로 통합.)
 
     if (ok) {
       // 업로드 성공한 pending 파일만 삭제. 실패하면 그대로 두고 다음에 재시도.

@@ -45,6 +45,11 @@ public:
   // 현재 유효한 access_token(JWT)를 반환. 만료 임박 시 자동 refresh.
   std::string GetAccessToken();
 
+  // [세션 정책] 401 받았을 때 강제 refresh. 디스크 토큰에서 refresh_token 읽어
+  // 즉시 새 access_token 발급. 호출자(AIClient)는 새 토큰으로 1회 재시도.
+  // 실패(빈 string) 시 silent 처리 — 다음 호출 시 자연 복구 시도.
+  std::string ForceRefreshAccessToken();
+
   // profiles 테이블에서 plan_type / display_name / trial_started_at 등을
   // 받아 m_cache["profile"]에 저장. 로그인 직후 1회 + 필요 시 호출.
   bool RefreshUserProfile();

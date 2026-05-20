@@ -98,11 +98,46 @@ private:
   // 이펙트 슬라이더 (선명도, 공간감 등)
   std::array<float, 5> m_effectValues = {0, 0, 0, 0, 0};
 
+  // EQ 출처 (어떤 방식으로 현재 EQ가 적용되었는지)
+  enum class EqOrigin {
+    None,          // 미적용 / 초기 상태
+    AI,            // AI 자동 분석
+    Prompt,        // 사용자 프롬프트 기반 AI
+    Preset,        // 사용자 프리셋
+    Cache,         // 로컬 캐시 (이전 AI 결과)
+    GlobalAverage, // 장르 평균
+    Manual,        // 수동 슬라이더 조작
+    Flat,          // 평탄(0dB) 리셋
+  };
+
   // 곡 정보 (Python의 current_song)
   std::string m_currentTitle;
   std::string m_currentArtist;
+  std::string m_rawTitle;          // UI 표시용 원본 제목
+  std::string m_rawArtist;         // UI 표시용 원본 아티스트
   std::string m_currentGenre;
+  std::atomic<EqOrigin> m_eqOrigin{EqOrigin::None}; // 현재 EQ 출처
+  int         m_currentDuration = 0;       // 총 재생 시간 (초)
   std::string m_displayTitle; // UI에 보이는 원본 제목 (마키용)
+
+  // [작업 4] 앨범 아트워크 텍스처 (DX11 ShaderResourceView).
+  // void* 로 보관해 헤더 의존성 최소화 (cpp에서 ID3D11ShaderResourceView* 캐스팅).
+  // m_albumArtSRV — 현재 곡의 아트워크 (없으면 nullptr)
+  // m_albumPlaceholderSRV — assets/album_placeholder.png 로 1회 로드
+  // m_albumArtKey — "title|artist" — 같은 곡이면 재사용
+  void* m_albumArtSRV          = nullptr;
+  void* m_albumPlaceholderSRV  = nullptr;
+  std::string m_albumArtKey;
+  int  m_albumArtW = 0, m_albumArtH = 0;
+  int  m_albumPlaceholderW = 0, m_albumPlaceholderH = 0;
+  std::mutex m_albumArtMutex;
+  // bytes → DX11 SRV. 실패 시 nullptr. (outW/outH 도 채움)
+  void* LoadTextureFromBytes(const uint8_t* data, size_t len,
+                              int* outW = nullptr, int* outH = nullptr);
+  void  ReleaseTexture(void** srv);
+  void  EnsurePlaceholderLoaded();
+  void  UpdateAlbumArt(const std::string& title, const std::string& artist,
+                       const std::vector<uint8_t>& bytes);
 
   // 상태
   bool m_isEqEnabled = true;
@@ -275,6 +310,7 @@ private:
 
   std::atomic<bool> m_aiProcessing{false};
   std::thread m_aiThread;
+  std::shared_ptr<std::atomic<bool>> m_aiAbortFlag;
   std::thread m_transitionThread;
   std::atomic<bool> m_running{true};
 

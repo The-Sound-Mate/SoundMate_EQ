@@ -1,5 +1,4 @@
 // src/ui/MainWindow.cpp
-#include <windows.h>
 #include "MainWindow.h"
 #include "../utils/StringUtils.h"
 #include "Theme.h"
@@ -12,17 +11,20 @@
 #include <shellapi.h>
 #include <sstream>
 #include <thread>
-#include <tlhelp32.h>   // CreateToolhelp32Snapshot — Controller 프로세스 감지
+#include <tlhelp32.h> // CreateToolhelp32Snapshot — Controller 프로세스 감지
+#include <windows.h>
 #include <winreg.h>
+
 
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "propsys.lib")
+#include "../core/FeatureFlags.h"
 #include "../core/GenreManager.h"
 #include "../core/RecordManager.h"
-#include "../core/FeatureFlags.h"
-#include <nlohmann/json.hpp>
 #include <curl/curl.h>
+#include <nlohmann/json.hpp>
 #include <urlmon.h>
+
 #pragma comment(lib, "urlmon.lib")
 
 // [PR-C] APP_VERSION은 CMake가 Version.h로 자동 생성. CMakeLists.txt의
@@ -46,20 +48,21 @@ const std::vector<std::vector<int>> MainWindow::ALL_BANDS = {
 const char *MainWindow::BAND_NAMES[] = {"5-Band", "10-Band", "15-Band",
                                         "31-Band"};
 // PRESET_NAMES 제거 — 사용자 정의 프리셋으로 대체
-#include <fstream>
 #include <filesystem>
+#include <fstream>
+
 
 MainWindow::MainWindow() { SetupEQBands(BANDS_5); }
 
 // [A-2] system("taskkill...") 은 cmd.exe 콘솔 창을 깜빡 띄움 → UX 깨짐.
 // CreateProcessA + CREATE_NO_WINDOW 로 silent 실행.
-static void SilentTaskKill(const char* imageName) {
+static void SilentTaskKill(const char *imageName) {
   char cmd[256];
   snprintf(cmd, sizeof(cmd), "taskkill /F /IM %s", imageName);
-  STARTUPINFOA si = { sizeof(si) };
+  STARTUPINFOA si = {sizeof(si)};
   PROCESS_INFORMATION pi = {};
-  if (CreateProcessA(NULL, cmd, NULL, NULL, FALSE,
-                     CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+  if (CreateProcessA(NULL, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL,
+                     &si, &pi)) {
     WaitForSingleObject(pi.hProcess, 2000);
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
@@ -70,6 +73,10 @@ MainWindow::~MainWindow() {
   m_running = false;
   if (m_aiThread.joinable())
     m_aiThread.join();
+
+  // [작업 4] DX11 SRV 정리
+  ReleaseTexture(&m_albumArtSRV);
+  ReleaseTexture(&m_albumPlaceholderSRV);
 
   // [v12.0] UI 종료 시 백그라운드 컨트롤러 함께 종료 (silent)
   SilentTaskKill("SoundMate_Controller.exe");
@@ -112,11 +119,21 @@ void MainWindow::Initialize(EQController *eq, AIClient *ai,
     if (!loadedFromConfig) {
       int bandIdx = 0;
       switch (m_settings.defaultBands) {
-        case 5:  bandIdx = 0; break;
-        case 10: bandIdx = 1; break;
-        case 15: bandIdx = 2; break;
-        case 31: bandIdx = 3; break;
-        default: bandIdx = 0; break;
+      case 5:
+        bandIdx = 0;
+        break;
+      case 10:
+        bandIdx = 1;
+        break;
+      case 15:
+        bandIdx = 2;
+        break;
+      case 31:
+        bandIdx = 3;
+        break;
+      default:
+        bandIdx = 0;
+        break;
       }
       m_selectedBandSet = bandIdx;
       SetupEQBands(ALL_BANDS[bandIdx]);
@@ -131,8 +148,10 @@ void MainWindow::Initialize(EQController *eq, AIClient *ai,
   std::thread([]() {
     std::string controllerPath = "";
 
-    // (1) installed location — installer가 여기에 SoundMate_Controller.exe 복사함
-    const char* installed = "C:\\Program Files\\SoundMate Equalizer\\SoundMate_Controller.exe";
+    // (1) installed location — installer가 여기에 SoundMate_Controller.exe
+    // 복사함
+    const char *installed =
+        "C:\\Program Files\\SoundMate Equalizer\\SoundMate_Controller.exe";
     if (std::filesystem::exists(installed)) {
       controllerPath = installed;
     } else {
@@ -148,7 +167,8 @@ void MainWindow::Initialize(EQController *eq, AIClient *ai,
         if (std::filesystem::exists(
                 curDir / "engine/SoundMate_APO/SoundMate_Controller.exe")) {
           controllerPath =
-              (curDir / "engine/SoundMate_APO/SoundMate_Controller.exe").string();
+              (curDir / "engine/SoundMate_APO/SoundMate_Controller.exe")
+                  .string();
           break;
         }
         curDir = curDir.parent_path();
@@ -168,7 +188,8 @@ void MainWindow::Initialize(EQController *eq, AIClient *ai,
 void MainWindow::EnsureControllerHealthy() {
   // EQController 측에서 SHM open 결과를 체크할 수 있어야 함. EQController의
   // 별도 메서드가 없으면 IsControllerRunning() + 짧은 대기 후 재시도.
-  if (IsControllerRunning()) return;
+  if (IsControllerRunning())
+    return;
 
   // 1) 구버전 Controller 잔존 가능성 — 강제 종료 (silent)
   SilentTaskKill("SoundMate_Controller.exe");
@@ -179,7 +200,7 @@ void MainWindow::EnsureControllerHealthy() {
     GetModuleFileNameA(nullptr, exeP, MAX_PATH);
     std::filesystem::path curDir = std::filesystem::path(exeP).parent_path();
     std::string controllerPath;
-    const char* installed =
+    const char *installed =
         "C:\\Program Files\\SoundMate Equalizer\\SoundMate_Controller.exe";
     if (std::filesystem::exists(installed)) {
       controllerPath = installed;
@@ -192,7 +213,8 @@ void MainWindow::EnsureControllerHealthy() {
         if (std::filesystem::exists(
                 curDir / "engine/SoundMate_APO/SoundMate_Controller.exe")) {
           controllerPath =
-              (curDir / "engine/SoundMate_APO/SoundMate_Controller.exe").string();
+              (curDir / "engine/SoundMate_APO/SoundMate_Controller.exe")
+                  .string();
           break;
         }
         curDir = curDir.parent_path();
@@ -229,7 +251,8 @@ void MainWindow::RefreshDefaultDevice() {
 
   IMMDeviceEnumerator *enumr = nullptr;
   if (SUCCEEDED(CoCreateInstance(__uuidof(MMDeviceEnumerator), NULL, CLSCTX_ALL,
-                                 __uuidof(IMMDeviceEnumerator), (void**)&enumr))) {
+                                 __uuidof(IMMDeviceEnumerator),
+                                 (void **)&enumr))) {
     IMMDevice *dev = nullptr;
     if (SUCCEEDED(enumr->GetDefaultAudioEndpoint(eRender, eConsole, &dev))) {
       LPWSTR id = nullptr;
@@ -242,14 +265,17 @@ void MainWindow::RefreshDefaultDevice() {
       }
       IPropertyStore *props = nullptr;
       if (SUCCEEDED(dev->OpenPropertyStore(STGM_READ, &props))) {
-        PROPVARIANT v; PropVariantInit(&v);
-        PROPERTYKEY key = {
-            {0xa45c254e, 0xdf1c, 0x4efd,
-             {0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0}}, 2};
+        PROPVARIANT v;
+        PropVariantInit(&v);
+        PROPERTYKEY key = {{0xa45c254e,
+                            0xdf1c,
+                            0x4efd,
+                            {0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0}},
+                           2};
         if (SUCCEEDED(props->GetValue(key, &v)) && v.pwszVal) {
           std::wstring wn = v.pwszVal;
-          int len = WideCharToMultiByte(CP_UTF8, 0, wn.c_str(), -1,
-                                        nullptr, 0, nullptr, nullptr);
+          int len = WideCharToMultiByte(CP_UTF8, 0, wn.c_str(), -1, nullptr, 0,
+                                        nullptr, nullptr);
           if (len > 0) {
             nameUtf8.assign(len - 1, '\0');
             WideCharToMultiByte(CP_UTF8, 0, wn.c_str(), -1, nameUtf8.data(),
@@ -269,8 +295,8 @@ void MainWindow::RefreshDefaultDevice() {
   }
 
   std::lock_guard<std::mutex> lk(m_defaultDeviceMutex);
-  m_defaultDeviceName          = nameUtf8.empty() ? "기본 출력 장치" : nameUtf8;
-  m_defaultDeviceGuid          = guidW;
+  m_defaultDeviceName = nameUtf8.empty() ? "기본 출력 장치" : nameUtf8;
+  m_defaultDeviceGuid = guidW;
   m_defaultDeviceApoRegistered = apoOk;
 }
 
@@ -371,7 +397,8 @@ std::string MainWindow::GetSelectedDeviceGuid() const {
   }
   // 폴백: 옛 경로 (FetchAudioDevices 결과)
   std::lock_guard<std::mutex> lk(m_devicesMutex);
-  if (m_devices.empty()) return "";
+  if (m_devices.empty())
+    return "";
   if (m_selectedDevice >= 0 && m_selectedDevice < (int)m_devices.size()) {
     return m_devices[m_selectedDevice].guid;
   }
@@ -389,11 +416,13 @@ std::string MainWindow::GetSelectedDeviceDisplayName() const {
 }
 
 // ── Controller 프로세스 존재 확인 (GUI-only, Process Enumeration) ───────────
-// CreateToolhelp32Snapshot 으로 시스템 프로세스 목록을 훑어 SoundMate_Controller.exe
-// 가 살아있는지 확인. 5초마다 호출되므로 부담 무시 가능 (수 ms).
+// CreateToolhelp32Snapshot 으로 시스템 프로세스 목록을 훑어
+// SoundMate_Controller.exe 가 살아있는지 확인. 5초마다 호출되므로 부담 무시
+// 가능 (수 ms).
 bool MainWindow::IsControllerRunning() const {
   HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-  if (snap == INVALID_HANDLE_VALUE) return true;   // 검사 불가 시 false alarm 피함
+  if (snap == INVALID_HANDLE_VALUE)
+    return true; // 검사 불가 시 false alarm 피함
   PROCESSENTRY32W pe{};
   pe.dwSize = sizeof(pe);
   bool found = false;
@@ -461,9 +490,16 @@ void MainWindow::UpdateEQVisualizer(const std::vector<float> &gains) {
 
 // ── 곡 변경 콜백 ─────────────────────────────────────────────────────────────
 void MainWindow::OnSongChanged(const SongInfo &song) {
-  std::lock_guard<std::mutex> lock(m_songMutex);
-  m_pendingSong = song;
-  m_pendingSongChange = true;
+  {
+    std::lock_guard<std::mutex> lock(m_songMutex);
+    m_pendingSong = song;
+    m_pendingSongChange = true;
+  }
+  // [작업 4] 앨범 아트워크 갱신은 메인 thread 무관 (DX11 device thread-safe).
+  // 백그라운드에서 처리 — UI 블로킹 방지.
+  std::thread([this, song]() {
+    UpdateAlbumArt(song.title, song.artist, song.thumbnailBytes);
+  }).detach();
 }
 
 // ── AI 생성 트리거 ───────────────────────────────────────────────────────────
@@ -477,8 +513,9 @@ void MainWindow::TriggerAIGeneration() {
   //  popup은 하단 바 "Pro 구독하기" 버튼 또는 서버 403 'free_no_ai' 응답에서만)
   if (!g_recordManager.IsAIEligible()) {
     memset(m_promptBuf, 0, sizeof(m_promptBuf));
-    SetStatus(u8"Free 플랜은 AI 기능이 제한됩니다. Pro 플랜으로 업그레이드하세요.",
-              Theme::COLOR_ORANGE);
+    SetStatus(
+        u8"Free 플랜은 AI 기능이 제한됩니다. Pro 플랜으로 업그레이드하세요.",
+        Theme::COLOR_ORANGE);
     return;
   }
 
@@ -491,74 +528,102 @@ void MainWindow::TriggerAIGeneration() {
 
   if (m_aiThread.joinable())
     m_aiThread.detach();
-  // [4-A] AI 서버에 canonical title/artist 전달 — cross-platform 학습 데이터 통합.
-  // canonical 멤버는 async 스레드가 쓰므로 snapshot 으로 안전하게 복사.
+
+  // 이전 HTTP 요청이 진행 중이면 curl 다운로드 중단
+  if (m_aiAbortFlag) {
+    m_aiAbortFlag->store(true);
+  }
+  // 새 스레드용 abort 플래그 생성
+  m_aiAbortFlag = std::make_shared<std::atomic<bool>>(false);
+  // [4-A] AI 서버에 canonical title/artist 전달 — cross-platform 학습 데이터
+  // 통합. canonical 멤버는 async 스레드가 쓰므로 snapshot 으로 안전하게 복사.
   CanonicalSnapshot canon = SnapshotCanonical();
-  std::string aiTitle  = canon.title.empty()  ? m_currentTitle  : canon.title;
+  std::string aiTitle = canon.title.empty() ? m_currentTitle : canon.title;
   std::string aiArtist = canon.artist.empty() ? m_currentArtist : canon.artist;
 
-  // [3-D] tendency 는 매번 RecordManager 에서 최신값 조회 — FetchUserTendency 가
-  // 비동기로 완료되어도 자동으로 반영됨. m_userPreference 캐시 의존 제거.
+  // [3-D] tendency 는 매번 RecordManager 에서 최신값 조회 — FetchUserTendency
+  // 가 비동기로 완료되어도 자동으로 반영됨. m_userPreference 캐시 의존 제거.
   std::string userPref = g_recordManager.GetUserTendency();
 
   // [A-1] 호출 시점의 곡 epoch 캡처 — 응답 도착 전 곡이 바뀌면 결과 폐기.
   // 옛 곡의 AI 결과가 새 곡에 잘못 적용되는 사고 방지.
   int myEpoch = m_songEpoch.load();
 
-  m_aiThread = std::thread([this, prompt, accessToken, aiTitle, aiArtist, userPref, myEpoch]() {
+  auto abortFlagPtr = m_aiAbortFlag;
+  m_aiThread = std::thread([this, prompt, accessToken, aiTitle, aiArtist,
+                            userPref, myEpoch, abortFlagPtr]() {
     if (!m_ai) {
       SetStatus("AI Setup Error: client not initialized", Theme::COLOR_RED);
       m_aiProcessing = false;
       return;
     }
 
-    // [A-1] HTTP 요청 직전에도 한 번 더 검사 — 그 사이 곡이 바뀌었으면 호출 자체를 안 함.
+    // [A-1] HTTP 요청 직전에도 한 번 더 검사 — 그 사이 곡이 바뀌었으면 호출
+    // 자체를 안 함.
     if (m_songEpoch.load() != myEpoch) {
       SetStatus(u8"AI: 곡 변경으로 취소", Theme::TEXT_GRAY);
-      m_aiProcessing = false;
       return;
     }
 
     SetStatus("AI: Sending request to Proxy...", Theme::TEXT_WHITE);
-    auto result = m_ai->GenerateAllBandsEQ(
-        aiTitle, aiArtist, m_currentGenre,
-        prompt, userPref, accessToken);
+    auto result =
+        m_ai->GenerateAllBandsEQ(aiTitle, aiArtist, m_currentGenre, prompt,
+                                 userPref, accessToken, abortFlagPtr.get());
 
-    // [A-1] 응답 도착 직후 epoch 재검사 — 사용자가 응답 대기 중 곡 바꿨으면 폐기.
+    // [A-1] 응답 도착 직후 epoch 재검사 — 사용자가 응답 대기 중 곡 바꿨으면
+    // 폐기.
     if (m_songEpoch.load() != myEpoch) {
       SetStatus(u8"AI: 응답 폐기 (곡 변경됨)", Theme::TEXT_GRAY);
-      m_aiProcessing = false;
       return;
     }
 
+    // [작업 3-c] AI 호출 실패 — Flat(0dB)로 안전 reset + SaveInteraction X.
+    // 모든 errorCode != 0 분기에 공통으로 적용. 사용자가 "엉뚱한 이전 EQ가
+    // 새 곡에 잘못 적용된 채로 남는" 케이스를 차단.
+    auto applyFlatOnAiFail = [this]() {
+      std::lock_guard<std::mutex> lk(m_eqUpdateMutex);
+      m_queuedGains.assign(m_currentBands.size(), 0.0f);
+      m_pendingEQUpdate = true;
+      m_eqOrigin = EqOrigin::Flat;
+    };
+
     if (result.errorCode == 429) {
-      SetStatus("AI Rate Limit. Wait 30s.", Theme::COLOR_RED);
-      g_recordManager.LogAiError(m_currentTitle, m_currentArtist,
-                                 "429", result.errorMsg);
+      applyFlatOnAiFail();
+      SetStatus("AI Rate Limit. Wait 30s. (EQ Flat)", Theme::COLOR_RED);
+      g_recordManager.LogAiError(m_currentTitle, m_currentArtist, "429",
+                                 result.errorMsg);
     } else if (result.errorCode == 503) {
-      SetStatus("AI Server Busy. Try again later.", Theme::COLOR_RED);
-      g_recordManager.LogAiError(m_currentTitle, m_currentArtist,
-                                 "503", result.errorMsg);
+      applyFlatOnAiFail();
+      SetStatus("AI Server Busy. (EQ Flat)", Theme::COLOR_RED);
+      g_recordManager.LogAiError(m_currentTitle, m_currentArtist, "503",
+                                 result.errorMsg);
     } else if (result.errorCode == 401) {
-      SetStatus(u8"세션이 만료되었습니다. 다시 로그인해 주세요.",
-                Theme::COLOR_RED);
-      g_recordManager.LogAiError(m_currentTitle, m_currentArtist,
-                                 "401", result.errorMsg);
+      // [세션 정책] 401은 토큰 일시 만료 — silent 처리. 자동 refresh가
+      // 다음 호출 시 재시도. 사용자에게 로그인 강요 X.
+      applyFlatOnAiFail();
+      SetStatus(u8"AI 일시 오류 — 다음 곡에서 재시도합니다.", Theme::TEXT_GRAY);
+      g_recordManager.LogAiError(m_currentTitle, m_currentArtist, "401",
+                                 result.errorMsg);
     } else if (result.errorCode == 403) {
       if (result.quotaReason == "free_no_ai") {
+        // Free는 이전 EQ 유지 정책 — Flat 적용 안 함.
         m_showUpgradePopup = true;
         SetStatus(u8"Free 플랜은 AI 기능을 사용할 수 없습니다.",
                   Theme::COLOR_ORANGE);
       } else if (result.quotaReason == "monthly_limit") {
-        SetStatus(u8"이번 달 AI 사용 한도를 모두 사용했습니다.",
+        applyFlatOnAiFail();
+        SetStatus(u8"이번 달 AI 사용 한도를 모두 사용했습니다. (EQ Flat)",
                   Theme::COLOR_ORANGE);
       } else {
+        applyFlatOnAiFail();
         SetStatus("AI Access Denied: " + result.quotaReason, Theme::COLOR_RED);
       }
-      g_recordManager.LogAiError(m_currentTitle, m_currentArtist,
-                                 "403", result.quotaReason);
+      g_recordManager.LogAiError(m_currentTitle, m_currentArtist, "403",
+                                 result.quotaReason);
     } else if (result.errorCode != 0) {
-      SetStatus("AI Proxy Error: " + result.errorMsg, Theme::COLOR_RED);
+      applyFlatOnAiFail();
+      SetStatus("AI Proxy Error: " + result.errorMsg + " (EQ Flat)",
+                Theme::COLOR_RED);
       g_recordManager.LogAiError(m_currentTitle, m_currentArtist,
                                  std::to_string(result.errorCode),
                                  result.errorMsg);
@@ -589,6 +654,7 @@ void MainWindow::TriggerAIGeneration() {
         m_queuedGains = *target;
         m_pendingEQUpdate = true;
       }
+      m_eqOrigin = prompt.empty() ? EqOrigin::AI : EqOrigin::Prompt;
       SetStatus("AI Analysis Complete!", Theme::COLOR_GREEN);
 
       // [4-A] DB 저장도 canonical key — cross-platform 매칭 일관성.
@@ -604,7 +670,9 @@ void MainWindow::TriggerAIGeneration() {
       entry.deviceName = GetSelectedDeviceGuid();
       g_recordManager.SaveInteraction(entry);
     }
-    m_aiProcessing = false;
+    if (m_songEpoch.load() == myEpoch) {
+      m_aiProcessing = false;
+    }
   });
 }
 
@@ -646,7 +714,8 @@ void MainWindow::Render() {
   if (m_controllerCheckTimer >= kControllerCheckInterval) {
     bool nowRunning = IsControllerRunning();
     if (m_controllerRunning && !nowRunning) {
-      SetStatus("⚠ Controller Not Running — EQ 변경이 적용되지 않습니다 (관리자 권한 필요)",
+      SetStatus("⚠ Controller Not Running — EQ 변경이 적용되지 않습니다 "
+                "(관리자 권한 필요)",
                 Theme::COLOR_RED);
     }
     m_controllerRunning = nowRunning;
@@ -693,7 +762,8 @@ void MainWindow::Render() {
     // (서버측 check_device_session이 force_logout 플래그를 자동 클리어하므로
     //  재폴링돼도 valid=true 반환하지만, 불필요한 호출을 방지.)
     m_deviceCheckTimer = 0.0f;
-    if (m_onForcedLogout) m_onForcedLogout();
+    if (m_onForcedLogout)
+      m_onForcedLogout();
   }
 
   // ── [작업 A] 시스템 기본 출력 장치 폴링 (3초) ──
@@ -706,7 +776,8 @@ void MainWindow::Render() {
   // ── 스무스 트랜지션 업데이트 ──
   // 트랜지션 진행 중에는 m_eqGains 가 매 프레임 보간되므로 슬라이더는 부드럽게
   // 움직인다. 동시에 200ms 마다 ApplyEQNoSave 를 호출해 실제 오디오에도 같은
-  // 보간을 적용한다 (시각/청각 동기화). 완료 시점에 한 번 더 호출해 최종 값 보장.
+  // 보간을 적용한다 (시각/청각 동기화). 완료 시점에 한 번 더 호출해 최종 값
+  // 보장.
   if (m_transitionProgress < 1.0f) {
     m_transitionProgress += m_deltaTime / m_transitionDuration;
     if (m_transitionProgress > 1.0f)
@@ -724,7 +795,7 @@ void MainWindow::Render() {
       m_transitionApplyTimer = 0.0f;
     }
     if (m_transitionProgress >= 1.0f) {
-      ApplyEQNoSave();             // 최종 값 보장
+      ApplyEQNoSave(); // 최종 값 보장
       m_transitionApplyTimer = 0.0f;
     }
   }
@@ -770,13 +841,26 @@ void MainWindow::Render() {
     }
     auto [title, artist] =
         StringUtils::NormalizeMusicInfo(song.title, song.artist);
-    if (title != m_currentTitle || artist != m_currentArtist) {
+    bool titleOrArtistChanged =
+        (title != m_currentTitle || artist != m_currentArtist);
+    bool metadataChanged = (song.durationSeconds != m_currentDuration);
+
+    if (titleOrArtistChanged || metadataChanged) {
+      m_currentDuration = song.durationSeconds;
+    }
+
+    if (titleOrArtistChanged) {
       m_currentTitle = title;
       m_currentArtist = artist;
+      m_rawTitle = song.title;
+      m_rawArtist = song.artist;
       m_displayTitle = song.title + " - " + song.artist;
       m_marqueeOffset = 0.0f;
-      // [LOG] 정규화 결과 출력 (입력 -> 결과)
-      std::string logMsg = "Normalization: [" + song.title + "] -> [" + artist + " - " + title + "]";
+      // [LOG] 정규화 결과 + 메타 출력
+      std::string logMsg =
+          artist + " - " + title +
+          " | Src=" + (song.source.empty() ? "N/A" : song.source) +
+          " | Dur=" + std::to_string(song.durationSeconds) + "s";
       SetStatus(logMsg, Theme::TEXT_WHITE);
 
       // [4-B] 곡 변경 epoch 증가 — 디바운스 스레드가 자기가 가장 최신인지 검사
@@ -798,30 +882,40 @@ void MainWindow::Render() {
 
       // [4-B] 3초 디바운스 + canonical title/artist 로 DB 매칭.
       std::thread([this, title, artist, mode, myEpoch]() {
-        // 3초 대기 — 그 사이 새 곡으로 바뀌면 이 작업 통째로 폐기.
-        std::this_thread::sleep_for(std::chrono::seconds(3));
-        if (m_songEpoch.load() != myEpoch) return;
+        // [수정] 3초 대기를 100ms 단위로 쪼개어, 중간에 곡이 바뀌면 즉시
+        // 중단(Abort)
+        for (int i = 0; i < 30; ++i) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(100));
+          if (m_songEpoch.load() != myEpoch)
+            return;
+        }
 
         // [E-1] 익명 모드: 외부 API (iTunes) 호출도 차단.
         // 로컬 캐시에 같은 키 있으면 적용, 없으면 무처리.
         if (g_recordManager.IsAnonymous()) {
-          EQEntry* cached = g_recordManager.GetCachedEQ(title, artist);
+          EQEntry *cached = g_recordManager.GetCachedEQ(title, artist);
           if (cached && mode != EqMode::Off) {
-            std::vector<float>* target = nullptr;
-            if      (m_currentBands.size() == 5  && !cached->gains5.empty())  target = &cached->gains5;
-            else if (m_currentBands.size() == 10 && !cached->gains10.empty()) target = &cached->gains10;
-            else if (m_currentBands.size() == 15 && !cached->gains15.empty()) target = &cached->gains15;
-            else if (!cached->gains31.empty())                                 target = &cached->gains31;
+            std::vector<float> *target = nullptr;
+            if (m_currentBands.size() == 5 && !cached->gains5.empty())
+              target = &cached->gains5;
+            else if (m_currentBands.size() == 10 && !cached->gains10.empty())
+              target = &cached->gains10;
+            else if (m_currentBands.size() == 15 && !cached->gains15.empty())
+              target = &cached->gains15;
+            else if (!cached->gains31.empty())
+              target = &cached->gains31;
             if (target) {
               std::lock_guard<std::mutex> lk(m_eqUpdateMutex);
               m_queuedGains = *target;
               m_pendingEQUpdate = true;
+              m_eqOrigin = EqOrigin::Cache;
               SetStatus(u8"로컬 캐시 적용 (익명 모드)", Theme::COLOR_GREEN);
             }
           } else if (!cached) {
-            SetStatus(u8"익명 모드: 회원가입 후 AI EQ 사용 가능", Theme::TEXT_GRAY);
+            SetStatus(u8"익명 모드: 회원가입 후 AI EQ 사용 가능",
+                      Theme::TEXT_GRAY);
           }
-          return;  // 익명 모드는 여기서 종료
+          return; // 익명 모드는 여기서 종료
         }
 
         // iTunes API 호출 (디스크 캐시 통해 — 같은 곡 재생 시 무료)
@@ -831,15 +925,15 @@ void MainWindow::Render() {
         // [4-A] DB key 는 canonical title/artist 사용.
         // YouTube/Spotify/Apple Music 어디서 듣든 같은 곡 → 같은 row 매칭.
         // iTunes 매칭 실패 시 원본으로 폴백.
-        std::string keyTitle  = info.valid ? info.title  : title;
+        std::string keyTitle = info.valid ? info.title : title;
         std::string keyArtist = info.valid ? info.artist : artist;
 
-        // ⚠️ canonical mutex 보호 — 메인 스레드 (RenderEQPanel slider deactivation)
-        // 와 AI 스레드 (TriggerAIGeneration 시작) 가 동시에 읽음.
+        // ⚠️ canonical mutex 보호 — 메인 스레드 (RenderEQPanel slider
+        // deactivation) 와 AI 스레드 (TriggerAIGeneration 시작) 가 동시에 읽음.
         {
           std::lock_guard<std::mutex> lk(m_canonicalMutex);
-          m_canonicalTitle   = keyTitle;
-          m_canonicalArtist  = keyArtist;
+          m_canonicalTitle = keyTitle;
+          m_canonicalArtist = keyArtist;
           m_canonicalTrackId = info.trackId;
         }
 
@@ -862,10 +956,11 @@ void MainWindow::Render() {
             target = &cached->gains31;
 
           if (target) {
-            // GlobalAverage 또는 AiAuto 모드 + 캐시가 수동/직접이 아닐 때 블렌딩
-            const bool blend = (mode == EqMode::AiAuto || mode == EqMode::GlobalAverage)
-                               && cached->source != "manual"
-                               && cached->source != "direct";
+            // GlobalAverage 또는 AiAuto 모드 + 캐시가 수동/직접이 아닐 때
+            // 블렌딩
+            const bool blend =
+                (mode == EqMode::AiAuto || mode == EqMode::GlobalAverage) &&
+                cached->source != "manual" && cached->source != "direct";
             if (blend) {
               auto baseline = g_recordManager.GetGlobalGenreAverage(
                   m_currentGenre, m_currentBands.size());
@@ -876,15 +971,18 @@ void MainWindow::Render() {
                 std::lock_guard<std::mutex> lk(m_eqUpdateMutex);
                 m_queuedGains = blended;
                 m_pendingEQUpdate = true;
+                m_eqOrigin = EqOrigin::Cache;
               } else {
                 std::lock_guard<std::mutex> lk(m_eqUpdateMutex);
                 m_queuedGains = *target;
                 m_pendingEQUpdate = true;
+                m_eqOrigin = EqOrigin::Cache;
               }
             } else {
               std::lock_guard<std::mutex> lk(m_eqUpdateMutex);
               m_queuedGains = *target;
               m_pendingEQUpdate = true;
+              m_eqOrigin = EqOrigin::Cache;
             }
             SetStatus("Local Cache Applied.", Theme::COLOR_GREEN);
           }
@@ -892,11 +990,17 @@ void MainWindow::Render() {
           // 캐시 없음 — mode에 따라 분기
           // [작업 C] iTunes 매칭 실패(빈 장르) 시 AI/Global 모두 호출 안 함.
           // m_currentGenre.empty() = 트랙 미발견 or 장르 태그 없음 → 어차피
-          // 의미있는 결과 못 받음. 이전 EQ 유지 + 상태바 안내.
+          // 의미있는 결과 못 받음. Flat(0dB) 적용 + 저장 X.
+          // [작업 3-a] AI 호출 자체가 불가능 → 안전한 기본값으로.
           if (m_currentGenre.empty()) {
-            SetStatus(u8"음원 정보를 찾을 수 없어 EQ를 적용하지 않습니다.",
-                      Theme::COLOR_YELLOW);
-          } else if (mode == EqMode::AiAuto && m_ai && !m_aiProcessing) {
+            std::lock_guard<std::mutex> lk(m_eqUpdateMutex);
+            m_queuedGains.assign(m_currentBands.size(), 0.0f);
+            m_pendingEQUpdate = true;
+            m_eqOrigin = EqOrigin::Flat;
+            SetStatus(
+                u8"음원 정보를 찾을 수 없어 EQ를 평탄(Flat)으로 설정합니다.",
+                Theme::COLOR_YELLOW);
+          } else if (mode == EqMode::AiAuto && m_ai) {
             TriggerAIGeneration();
           } else if (mode == EqMode::GlobalAverage) {
             auto baseline = g_recordManager.GetGlobalGenreAverage(
@@ -905,6 +1009,7 @@ void MainWindow::Render() {
               std::lock_guard<std::mutex> lk(m_eqUpdateMutex);
               m_queuedGains = baseline;
               m_pendingEQUpdate = true;
+              m_eqOrigin = EqOrigin::GlobalAverage;
               SetStatus("Global Average Applied.", Theme::COLOR_CYAN);
             }
           }
@@ -930,17 +1035,18 @@ void MainWindow::Render() {
 
   RenderTopBar();
   ImGui::Spacing();
-  RenderVisualizer();
-  ImGui::Spacing();
 
   // 좌우 패널 분할
   float leftW = 260.0f;
-  float totalH = io.DisplaySize.y - 280.0f;
+  // 비주얼라이저를 우측으로 옮기며 확보된 상단 공간만큼 패널 전체 높이를 늘림
+  float totalH = io.DisplaySize.y - 180.0f;
   ImGui::BeginChild("##left", {leftW, totalH}, false);
   RenderLeftPanel();
   ImGui::EndChild();
   ImGui::SameLine(0, 12);
   ImGui::BeginChild("##right", {0, totalH}, false);
+  RenderVisualizer();
+  ImGui::Spacing();
   RenderEQPanel();
   ImGui::EndChild();
 
@@ -962,12 +1068,13 @@ void MainWindow::Render() {
 
   // G1_2: 진단 패널 (헬스 점 클릭으로 m_diagnosticOpen=true 되면 표시)
   if constexpr (SoundMate::Features::kG1_2_DiagnosticPanel_Effective) {
-    if (m_diagnosticOpen) RenderDiagnosticPanel();
+    if (m_diagnosticOpen)
+      RenderDiagnosticPanel();
   }
 
   // 프리셋 저장 / 삭제 팝업
   RenderPresetPopups();
-  
+
   // 자동 업데이트 알림 팝업
   RenderUpdatePopup();
 
@@ -981,10 +1088,11 @@ void MainWindow::Render() {
 // ── 상단 바 ──────────────────────────────────────────────────────────────────
 void MainWindow::RenderTopBar() {
   float availW = ImGui::GetContentRegionAvail().x;
-  
-  // 창 너비가 좁을 때 (850px 미만) 두 줄로 나누어 배치해 겹침 현상을 완벽하게 방지합니다.
+
+  // 창 너비가 좁을 때 (850px 미만) 두 줄로 나누어 배치해 겹침 현상을 완벽하게
+  // 방지합니다.
   bool twoLines = availW < 850.0f;
-  
+
   // ── [그룹 1] 사용자 프리셋 드롭다운 & 저장/삭제 ──
   {
     std::string presetLabel;
@@ -999,8 +1107,8 @@ void MainWindow::RenderTopBar() {
       // 첫 번째 항목: 자동 AI 모드
       bool autoSel = !m_presetModeActive;
       if (ImGui::Selectable(u8"[AI] 자동", autoSel)) {
-        m_presetModeActive   = false;
-        m_selectedPresetIdx  = -1;
+        m_presetModeActive = false;
+        m_selectedPresetIdx = -1;
         SetStatus("Auto AI mode.", Theme::TEXT_WHITE);
       }
       ImGui::Separator();
@@ -1009,7 +1117,7 @@ void MainWindow::RenderTopBar() {
         bool sel = (m_presetModeActive && m_selectedPresetIdx == i);
         if (ImGui::Selectable(m_userPresets[i].name.c_str(), sel)) {
           m_selectedPresetIdx = i;
-          m_presetModeActive  = true;
+          m_presetModeActive = true;
           ApplyPreset(i);
         }
       }
@@ -1020,18 +1128,19 @@ void MainWindow::RenderTopBar() {
     }
 
     ImGui::SameLine(0, 4);
-    ImGui::PushStyleColor(ImGuiCol_Button,
-                          m_presetModeActive
-                              ? IM_COL32(60, 180, 80, 255)
-                              : IM_COL32(60, 60, 120, 255));
+    ImGui::PushStyleColor(ImGuiCol_Button, m_presetModeActive
+                                               ? IM_COL32(60, 180, 80, 255)
+                                               : IM_COL32(60, 60, 120, 255));
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(80, 200, 100, 255));
     if (ImGui::Button(u8"저장")) {
       int limit = GetPresetLimit();
       if (limit == 0) {
-        SetStatus(u8"유료 플랜에서만 프리셋을 저장할 수 있습니다.", Theme::COLOR_RED);
+        SetStatus(u8"유료 플랜에서만 프리셋을 저장할 수 있습니다.",
+                  Theme::COLOR_RED);
       } else if (limit != -1 && (int)m_userPresets.size() >= limit) {
         char msg[128];
-        snprintf(msg, sizeof(msg), u8"최대 %d개만 저장 가능한 플랜입니다.", limit);
+        snprintf(msg, sizeof(msg), u8"최대 %d개만 저장 가능한 플랜입니다.",
+                 limit);
         SetStatus(msg, Theme::COLOR_RED);
       } else {
         memset(m_newPresetName, 0, sizeof(m_newPresetName));
@@ -1042,12 +1151,12 @@ void MainWindow::RenderTopBar() {
 
     ImGui::SameLine(0, 4);
     bool canDelete = m_presetModeActive && m_selectedPresetIdx >= 0;
-    ImGui::PushStyleColor(
-        ImGuiCol_Button,
-        canDelete ? IM_COL32(180, 40, 40, 255) : IM_COL32(60, 60, 60, 255));
-    ImGui::PushStyleColor(
-        ImGuiCol_ButtonHovered,
-        canDelete ? IM_COL32(220, 60, 60, 255) : IM_COL32(60, 60, 60, 255));
+    ImGui::PushStyleColor(ImGuiCol_Button, canDelete
+                                               ? IM_COL32(180, 40, 40, 255)
+                                               : IM_COL32(60, 60, 60, 255));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
+                          canDelete ? IM_COL32(220, 60, 60, 255)
+                                    : IM_COL32(60, 60, 60, 255));
     if (ImGui::Button(u8"삭제") && canDelete)
       m_deletePresetConfirm = true;
     ImGui::PopStyleColor(2);
@@ -1062,18 +1171,22 @@ void MainWindow::RenderTopBar() {
   // ── [그룹 2] 기기 표시 (작업 A: 드롭다운 → 단순 텍스트) ──
   // 시스템 기본 출력 장치를 자동 추종. APO 미설치 시 빨간 안내 부착.
   {
-    float rightButtonsW = twoLines ? (90.0f + 70.0f + 90.0f + 40.0f) : (110.0f + 80.0f + 100.0f + 30.0f);
+    float rightButtonsW = twoLines ? (90.0f + 70.0f + 90.0f + 40.0f)
+                                   : (110.0f + 80.0f + 100.0f + 30.0f);
     float devW = ImGui::GetContentRegionAvail().x - rightButtonsW;
     devW = std::max(devW, 150.0f);
 
-    std::string name; bool apoOk;
+    std::string name;
+    bool apoOk;
     {
       std::lock_guard<std::mutex> lk(m_defaultDeviceMutex);
-      name  = m_defaultDeviceName.empty() ? "기본 출력 장치" : m_defaultDeviceName;
+      name =
+          m_defaultDeviceName.empty() ? "기본 출력 장치" : m_defaultDeviceName;
       apoOk = m_defaultDeviceApoRegistered;
     }
 
-    // ImGui::Text는 풍선 위치만 잡고, devW 너비 안에서 그리도록 BeginChild로 감쌈.
+    // ImGui::Text는 풍선 위치만 잡고, devW 너비 안에서 그리도록 BeginChild로
+    // 감쌈.
     ImGui::BeginChild("##devlabel", ImVec2(devW, ImGui::GetFrameHeight()),
                       false, ImGuiWindowFlags_NoScrollbar);
     ImGui::AlignTextToFramePadding();
@@ -1086,19 +1199,8 @@ void MainWindow::RenderTopBar() {
   }
   ImGui::SameLine(0, 8);
 
-  // ── [그룹 3] 밴드 선택 드롭다운 ──
-  {
-    float bandW = twoLines ? 90.0f : 110.0f;
-    ImGui::SetNextItemWidth(bandW);
-    if (ImGui::BeginCombo("##bands", BAND_NAMES[m_selectedBandSet])) {
-      for (int i = 0; i < 4; i++) {
-        if (ImGui::Selectable(BAND_NAMES[i], m_selectedBandSet == i))
-          ChangeBands(i);
-      }
-      ImGui::EndCombo();
-    }
-  }
-  ImGui::SameLine(0, 8);
+  // [작업 1] 상단 바 밴드 선택 드롭다운 제거.
+  // 밴드 수 변경은 Settings → EQ 제어 → 밴드 수 변환(4-segment)에서만 가능.
 
   // ── [그룹 4] 설정 버튼 ──
   {
@@ -1121,9 +1223,11 @@ void MainWindow::RenderTopBar() {
             std::thread([this]() {
               char exeP[MAX_PATH];
               GetModuleFileNameA(nullptr, exeP, MAX_PATH);
-              std::filesystem::path curDir = std::filesystem::path(exeP).parent_path();
+              std::filesystem::path curDir =
+                  std::filesystem::path(exeP).parent_path();
               std::string toolExe = "";
-              const char* installed = "C:\\Program Files\\SoundMate Equalizer\\SoundMate_setup.exe";
+              const char *installed =
+                  "C:\\Program Files\\SoundMate Equalizer\\SoundMate_setup.exe";
               if (std::filesystem::exists(installed)) {
                 toolExe = installed;
               } else {
@@ -1136,7 +1240,8 @@ void MainWindow::RenderTopBar() {
                 }
               }
               if (toolExe.empty()) {
-                SetStatus("SoundMate_setup.exe를 찾을 수 없습니다", Theme::COLOR_RED);
+                SetStatus("SoundMate_setup.exe를 찾을 수 없습니다",
+                          Theme::COLOR_RED);
                 return;
               }
               SetStatus("현재 장치에 EQ 엔진 설치 중...", Theme::TEXT_WHITE);
@@ -1149,7 +1254,8 @@ void MainWindow::RenderTopBar() {
               if (ShellExecuteExA(&sei)) {
                 WaitForSingleObject(sei.hProcess, 30000);
                 CloseHandle(sei.hProcess);
-                SetStatus("설정 완료! 현재 장치에 엔진이 주입되었습니다.", Theme::COLOR_GREEN);
+                SetStatus("설정 완료! 현재 장치에 엔진이 주입되었습니다.",
+                          Theme::COLOR_GREEN);
                 FetchAudioDevices();
               } else {
                 SetStatus("설정 실패 (권한 거부)", Theme::COLOR_RED);
@@ -1158,40 +1264,47 @@ void MainWindow::RenderTopBar() {
           },
           // [Phase 3] onRestoreDevice — dev/mj 복원: SoundMate_reset.exe 실행
           [this]() { ExecuteRestore(""); },
-          // [Phase 3] onSurvey — SurveyWindow 열기. 완료 시 취향 저장 + AI 재트리거
+          // [Phase 3] onSurvey — SurveyWindow 열기. 완료 시 취향 저장 + AI
+          // 재트리거
           [this]() {
-            // [C-4] DB/메모리에서 기존 취향 가져와 SurveyWindow prefill 로 전달.
-            // 사용자가 이전에 답한 내용이 자동으로 선택되어 보임.
+            // [C-4] DB/메모리에서 기존 취향 가져와 SurveyWindow prefill 로
+            // 전달. 사용자가 이전에 답한 내용이 자동으로 선택되어 보임.
             std::string existing = g_recordManager.GetUserTendency();
-            // 기본값 "Balanced and clear sound" 면 미설문 상태 → 빈 문자열로 전달
-            if (existing == "Balanced and clear sound") existing.clear();
+            // 기본값 "Balanced and clear sound" 면 미설문 상태 → 빈 문자열로
+            // 전달
+            if (existing == "Balanced and clear sound")
+              existing.clear();
 
-            m_surveyWin.Open([this](const std::string &pref) {
-              m_userPreference = pref;
-              g_recordManager.SaveUserTendency(pref, {});
-              SetStatus(u8"취향이 저장되었습니다.", Theme::COLOR_GREEN);
+            m_surveyWin.Open(
+                [this](const std::string &pref) {
+                  m_userPreference = pref;
+                  g_recordManager.SaveUserTendency(pref, {});
+                  SetStatus(u8"취향이 저장되었습니다.", Theme::COLOR_GREEN);
 
-              // [DB-Sync] Survey 결과를 Supabase user_audio_preferences에 업로드.
-              // pref 형식: "Bass Heavy, Forward Vocal, Huge Soundstage, High Resolution, Energetic"
-              std::thread([pref]() {
-                // 콤마+공백으로 분리하여 5개 라벨 추출
-                std::vector<std::string> parts;
-                std::string s = pref;
-                size_t pos;
-                while ((pos = s.find(", ")) != std::string::npos) {
-                  parts.push_back(s.substr(0, pos));
-                  s = s.substr(pos + 2);
-                }
-                if (!s.empty()) parts.push_back(s);
-                if (parts.size() == 5) {
-                  g_recordManager.UploadAudioPreferences(
-                      parts[0], parts[1], parts[3], parts[2], parts[4]);
-                }
-              }).detach();
+                  // [DB-Sync] Survey 결과를 Supabase user_audio_preferences에
+                  // 업로드. pref 형식: "Bass Heavy, Forward Vocal, Huge
+                  // Soundstage, High Resolution, Energetic"
+                  std::thread([pref]() {
+                    // 콤마+공백으로 분리하여 5개 라벨 추출
+                    std::vector<std::string> parts;
+                    std::string s = pref;
+                    size_t pos;
+                    while ((pos = s.find(", ")) != std::string::npos) {
+                      parts.push_back(s.substr(0, pos));
+                      s = s.substr(pos + 2);
+                    }
+                    if (!s.empty())
+                      parts.push_back(s);
+                    if (parts.size() == 5) {
+                      g_recordManager.UploadAudioPreferences(
+                          parts[0], parts[1], parts[3], parts[2], parts[4]);
+                    }
+                  }).detach();
 
-              if (!m_currentTitle.empty() && g_recordManager.IsAIEligible())
-                TriggerAIGeneration();
-            }, existing);
+                  if (!m_currentTitle.empty() && g_recordManager.IsAIEligible())
+                    TriggerAIGeneration();
+                },
+                existing);
           });
     }
   }
@@ -1202,10 +1315,13 @@ void MainWindow::RenderTopBar() {
     float powerW = twoLines ? 80.0f : 100.0f;
     if (m_isEqEnabled) {
       ImGui::PushStyleColor(ImGuiCol_Button, Theme::ToU32(Theme::ACCENT_COLOR));
-      ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Theme::ToU32(Theme::GRAD_START));
+      ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
+                            Theme::ToU32(Theme::GRAD_START));
     } else {
-      ImGui::PushStyleColor(ImGuiCol_Button, Theme::ToU32(Theme::BTN_SECONDARY));
-      ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Theme::ToU32(Theme::ACCENT_COLOR));
+      ImGui::PushStyleColor(ImGuiCol_Button,
+                            Theme::ToU32(Theme::BTN_SECONDARY));
+      ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
+                            Theme::ToU32(Theme::ACCENT_COLOR));
     }
     if (ImGui::Button(m_isEqEnabled ? "POWER ON" : "POWER OFF", {powerW, 0})) {
       m_isEqEnabled = !m_isEqEnabled;
@@ -1251,41 +1367,372 @@ void MainWindow::RenderVisualizer() {
 }
 
 // ── 좌측 패널 (이펙트 + 곡 정보) ─────────────────────────────────────────────
+// [작업 4] LeftPanel 재설계:
+//   ┌──────────────────┐
+//   │  ┌─────────┐     │
+//   │  │ Album   │     │  140x140 비율 fit
+//   │  │ Art     │     │
+//   │  └─────────┘     │
+//   │  곡 제목 - 아티스트  │  한 줄 (마키)
+//   └──────────────────┘
+// (옛 m_statusText 라인 제거 — 상태바는 RenderStatusBar 에서 별도 표시)
 void MainWindow::RenderLeftPanel() {
+  EnsurePlaceholderLoaded();
+
   float panelW = ImGui::GetContentRegionAvail().x;
   float panelH = ImGui::GetContentRegionAvail().y;
 
   ImGui::PushStyleColor(ImGuiCol_ChildBg, Theme::ToU32(Theme::PANEL_COLOR));
-
-  // 곡 정보 패널
   ImGui::BeginChild("##songinfo", {panelW, panelH}, false);
   ImDrawList *dl = ImGui::GetWindowDrawList();
   ImVec2 cpos = ImGui::GetCursorScreenPos();
-  float cw = panelW;
-  float ch = panelH;
-  Theme::DrawPanel(dl, cpos, {cpos.x + cw, cpos.y + ch});
+  Theme::DrawPanel(dl, cpos, {cpos.x + panelW, cpos.y + panelH});
 
-  ImGui::SetCursorScreenPos({cpos.x + 12, cpos.y + 12});
+  const float kPad = 16.0f;
+  float curY = cpos.y + kPad;
 
-  if (m_currentTitle.empty()) {
-    ImGui::TextColored(Theme::TEXT_GRAY, "Waiting for music...");
-  } else {
-    // 마키 텍스트 (스크롤)
-    std::string display =
-        m_displayTitle.empty() ? m_currentTitle : m_displayTitle;
-    m_marqueeOffset += m_marqueeSpeed * m_deltaTime;
-    float textW = ImGui::CalcTextSize(display.c_str()).x;
-    if (m_marqueeOffset > textW + 30)
-      m_marqueeOffset = 0;
-
-    ImGui::SetCursorPosX(ImGui::GetCursorPosX() - m_marqueeOffset);
-    ImGui::TextColored(Theme::TEXT_WHITE, "%s", display.c_str());
+  // ── 1) 앨범 아트워크 — 패널 너비에 맞춰 정사각형, 라운드 코너 ──
+  const float kArtSize = panelW - kPad * 2;
+  void *srv = nullptr;
+  int aw = 0, ah = 0;
+  {
+    std::lock_guard<std::mutex> lk(m_albumArtMutex);
+    if (m_albumArtSRV) {
+      srv = m_albumArtSRV;
+      aw = m_albumArtW;
+      ah = m_albumArtH;
+    } else if (m_albumPlaceholderSRV) {
+      srv = m_albumPlaceholderSRV;
+      aw = m_albumPlaceholderW;
+      ah = m_albumPlaceholderH;
+    }
   }
 
-  ImGui::SetCursorScreenPos({cpos.x + 12, cpos.y + 38});
-  ImGui::TextColored(Theme::TEXT_GRAY, "%s", m_statusText.c_str());
+  float artX = cpos.x + kPad;
+  // 정사각형 배경 (비정사각형 썸네일의 여백을 패널 색으로 채움)
+  ImU32 panelBg = Theme::ToU32(Theme::PANEL_COLOR);
+  dl->AddRectFilled({artX, curY}, {artX + kArtSize, curY + kArtSize}, panelBg,
+                    10.0f);
+
+  if (srv && aw > 0 && ah > 0) {
+    float scale = kArtSize / (float)std::max(aw, ah);
+    float drawW = aw * scale;
+    float drawH = ah * scale;
+    // 비정사각형 → 가운데 정렬 (좌우 또는 상하 여백은 panelBg로 자연스럽게
+    // 채워짐)
+    float ox = artX + (kArtSize - drawW) * 0.5f;
+    float oy = curY + (kArtSize - drawH) * 0.5f;
+    // 라운드 코너 클리핑
+    dl->PushClipRect({artX, curY}, {artX + kArtSize, curY + kArtSize}, true);
+    ImGui::SetCursorScreenPos({ox, oy});
+    ImGui::Image((ImTextureID)srv, ImVec2(drawW, drawH));
+    dl->PopClipRect();
+  }
+  // srv == nullptr 일 때: EnsurePlaceholderLoaded()에 의해 placeholder가
+  // 로드되면 다음 프레임부터 자동으로 표시됨. 로드 전까지는 panelBg 배경만
+  // 보임.
+  curY += kArtSize + 12.0f;
+
+  // ── 2) 곡 제목 (Bold) ──
+  ImGui::SetCursorScreenPos({cpos.x + kPad, curY});
+  if (m_rawTitle.empty() && m_currentTitle.empty()) {
+    ImGui::TextColored(Theme::TEXT_GRAY, "Waiting for music...");
+    curY += ImGui::GetTextLineHeight() + 4.0f;
+  } else {
+    // 제목 — 패널 너비에 맞게 줄바꿈
+    ImGui::PushTextWrapPos(cpos.x + panelW - kPad);
+    ImGui::TextColored(Theme::TEXT_WHITE, "%s",
+                       m_rawTitle.empty() ? m_currentTitle.c_str()
+                                          : m_rawTitle.c_str());
+    ImGui::PopTextWrapPos();
+    curY += ImGui::GetItemRectSize().y + 2.0f;
+
+    // ── 3) 아티스트 ──
+    ImGui::SetCursorScreenPos({cpos.x + kPad, curY});
+    ImGui::TextColored(Theme::TEXT_GRAY, "%s",
+                       m_rawArtist.empty() ? m_currentArtist.c_str()
+                                           : m_rawArtist.c_str());
+    curY += ImGui::GetTextLineHeight() + 8.0f;
+
+    // ── 4) 상태 로그 뱃지 ──
+    ImGui::SetCursorScreenPos({cpos.x + kPad, curY});
+    if (m_aiProcessing) {
+      // 처리 중 — 보라색 뱃지
+      ImVec2 badgePos = {cpos.x + kPad, curY};
+      const char *badgeText = u8"⚡ AI Analyzing...";
+      ImVec2 badgeSize = ImGui::CalcTextSize(badgeText);
+      float badgePadX = 10.0f, badgePadY = 4.0f;
+      dl->AddRectFilled(badgePos,
+                        {badgePos.x + badgeSize.x + badgePadX * 2,
+                         badgePos.y + badgeSize.y + badgePadY * 2},
+                        IM_COL32(90, 50, 180, 200), 6.0f);
+      ImGui::SetCursorScreenPos(
+          {badgePos.x + badgePadX, badgePos.y + badgePadY});
+      ImGui::TextColored(Theme::TEXT_WHITE, "%s", badgeText);
+      curY += badgeSize.y + badgePadY * 2 + 10.0f;
+    } else if (!m_statusText.empty()) {
+      // 마지막 상태 — 작은 뱃지
+      const char *badgeText = m_statusText.c_str();
+      // 긴 텍스트는 잘라서 표시
+      std::string shortStatus = m_statusText;
+      if (shortStatus.length() > 30)
+        shortStatus = shortStatus.substr(0, 27) + "...";
+      ImVec2 badgeSize = ImGui::CalcTextSize(shortStatus.c_str());
+      float badgePadX = 8.0f, badgePadY = 3.0f;
+      ImVec2 badgePos = {cpos.x + kPad, curY};
+      dl->AddRectFilled(badgePos,
+                        {badgePos.x + badgeSize.x + badgePadX * 2,
+                         badgePos.y + badgeSize.y + badgePadY * 2},
+                        IM_COL32(30, 120, 80, 200), 6.0f);
+      ImGui::SetCursorScreenPos(
+          {badgePos.x + badgePadX, badgePos.y + badgePadY});
+      ImGui::TextColored(Theme::COLOR_GREEN, "%s", shortStatus.c_str());
+      curY += badgeSize.y + badgePadY * 2 + 10.0f;
+    }
+  }
+
+  // ── 5) 구분선 ──
+  curY += 4.0f;
+  dl->AddLine({cpos.x + kPad, curY}, {cpos.x + panelW - kPad, curY},
+              IM_COL32(80, 80, 100, 150), 1.0f);
+  curY += 12.0f;
+
+  // ── 6) 메타데이터 행들 (아이콘 라벨 + 값) ──
+  auto DrawMetaRow = [&](const char *icon, const char *label,
+                         const char *value) {
+    ImGui::SetCursorScreenPos({cpos.x + kPad, curY});
+    ImGui::TextColored(Theme::TEXT_GRAY, "%s  %s", icon, label);
+    // 값을 우측 정렬 (적정 위치)
+    float labelEnd = cpos.x + kPad + 100.0f;
+    ImGui::SetCursorScreenPos({labelEnd, curY});
+    ImGui::TextColored(Theme::TEXT_WHITE, "%s", value);
+    curY += ImGui::GetTextLineHeight() + 6.0f;
+  };
+
+  // Duration
+  if (m_currentDuration > 0) {
+    char durBuf[16];
+    int mins = m_currentDuration / 60;
+    int secs = m_currentDuration % 60;
+    std::snprintf(durBuf, sizeof(durBuf), "%02d:%02d", mins, secs);
+    DrawMetaRow(u8"⏱", "Duration", durBuf);
+  } else {
+    DrawMetaRow(u8"⏱", "Duration", "--:--");
+  }
+
+  // Genre
+  if (!m_currentGenre.empty()) {
+    DrawMetaRow(u8"♬", "Genre", m_currentGenre.c_str());
+  } else {
+    DrawMetaRow(u8"♬", "Genre", "---");
+  }
+
+  // EQ Origin
+  const char *originStr = "---";
+  switch (m_eqOrigin.load()) {
+  case EqOrigin::AI:
+    originStr = "AI Auto";
+    break;
+  case EqOrigin::Prompt:
+    originStr = "AI Prompt";
+    break;
+  case EqOrigin::Preset:
+    originStr = "User Preset";
+    break;
+  case EqOrigin::Cache:
+    originStr = "Cache (AI)";
+    break;
+  case EqOrigin::GlobalAverage:
+    originStr = "Global Average";
+    break;
+  case EqOrigin::Manual:
+    originStr = "Manual";
+    break;
+  case EqOrigin::Flat:
+    originStr = "Flat";
+    break;
+  case EqOrigin::None:
+    originStr = "---";
+    break;
+  }
+  DrawMetaRow(u8"▶", "EQ Mode", originStr);
+
   ImGui::EndChild();
   ImGui::PopStyleColor();
+}
+
+// ─── WIC 기반 이미지 디코딩 ─────────────────────────────────────────────────
+// PNG/JPG/BMP 등 표준 포맷 모두 지원. 결과를 DX11 SRV로 업로드.
+// 실패 시 nullptr 반환.
+#include <d3d11.h>
+extern ID3D11Device *g_pd3dDevice;
+
+#include <wincodec.h>
+#pragma comment(lib, "windowscodecs.lib")
+
+void *MainWindow::LoadTextureFromBytes(const uint8_t *data, size_t len,
+                                       int *outW, int *outH) {
+  if (!data || len == 0 || !g_pd3dDevice)
+    return nullptr;
+
+  // COM 초기화 (스레드당 1회 — 안전하게 매번 호출, 이미 초기화돼있으면 S_FALSE)
+  HRESULT comInit = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+  bool needCoUninit = SUCCEEDED(comInit);
+
+  IWICImagingFactory *factory = nullptr;
+  if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr,
+                              CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory)))) {
+    if (needCoUninit)
+      CoUninitialize();
+    return nullptr;
+  }
+
+  IWICStream *stream = nullptr;
+  IWICBitmapDecoder *decoder = nullptr;
+  IWICBitmapFrameDecode *frame = nullptr;
+  IWICFormatConverter *converter = nullptr;
+  ID3D11Texture2D *tex = nullptr;
+  ID3D11ShaderResourceView *srv = nullptr;
+  UINT w = 0, h = 0;
+  std::vector<uint8_t> rgba;
+
+  bool ok = false;
+  do {
+    if (FAILED(factory->CreateStream(&stream)))
+      break;
+    if (FAILED(
+            stream->InitializeFromMemory(const_cast<BYTE *>(data), (DWORD)len)))
+      break;
+    if (FAILED(factory->CreateDecoderFromStream(
+            stream, nullptr, WICDecodeMetadataCacheOnDemand, &decoder)))
+      break;
+    if (FAILED(decoder->GetFrame(0, &frame)))
+      break;
+    if (FAILED(frame->GetSize(&w, &h)))
+      break;
+    if (FAILED(factory->CreateFormatConverter(&converter)))
+      break;
+    if (FAILED(converter->Initialize(frame, GUID_WICPixelFormat32bppRGBA,
+                                     WICBitmapDitherTypeNone, nullptr, 0.0,
+                                     WICBitmapPaletteTypeMedianCut)))
+      break;
+
+    rgba.resize((size_t)w * h * 4);
+    if (FAILED(converter->CopyPixels(nullptr, w * 4, (UINT)rgba.size(),
+                                     rgba.data())))
+      break;
+
+    D3D11_TEXTURE2D_DESC desc = {};
+    desc.Width = w;
+    desc.Height = h;
+    desc.MipLevels = 1;
+    desc.ArraySize = 1;
+    desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    desc.SampleDesc.Count = 1;
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    D3D11_SUBRESOURCE_DATA initData = {};
+    initData.pSysMem = rgba.data();
+    initData.SysMemPitch = w * 4;
+    if (FAILED(g_pd3dDevice->CreateTexture2D(&desc, &initData, &tex)))
+      break;
+
+    D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+    srvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+    srvDesc.Texture2D.MipLevels = 1;
+    if (FAILED(g_pd3dDevice->CreateShaderResourceView(tex, &srvDesc, &srv)))
+      break;
+
+    ok = true;
+  } while (0);
+
+  if (tex)
+    tex->Release();
+  if (converter)
+    converter->Release();
+  if (frame)
+    frame->Release();
+  if (decoder)
+    decoder->Release();
+  if (stream)
+    stream->Release();
+  if (factory)
+    factory->Release();
+  if (needCoUninit)
+    CoUninitialize();
+
+  if (ok) {
+    if (outW)
+      *outW = (int)w;
+    if (outH)
+      *outH = (int)h;
+    return srv;
+  }
+  if (srv)
+    srv->Release();
+  return nullptr;
+}
+
+void MainWindow::ReleaseTexture(void **srv) {
+  if (srv && *srv) {
+    ((ID3D11ShaderResourceView *)*srv)->Release();
+    *srv = nullptr;
+  }
+}
+
+void MainWindow::EnsurePlaceholderLoaded() {
+  if (m_albumPlaceholderSRV)
+    return;
+  // assets/album_placeholder.png 로드. 빌드 산출물 옆에 복사됨.
+  try {
+    char exeP[MAX_PATH];
+    GetModuleFileNameA(nullptr, exeP, MAX_PATH);
+    std::filesystem::path dir = std::filesystem::path(exeP).parent_path();
+    std::filesystem::path path = dir / "assets" / "album_placeholder.png";
+    if (!std::filesystem::exists(path))
+      return;
+    std::ifstream f(path, std::ios::binary);
+    std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(f)),
+                               std::istreambuf_iterator<char>());
+    int w = 0, h = 0;
+    void *srv = LoadTextureFromBytes(bytes.data(), bytes.size(), &w, &h);
+    if (srv) {
+      std::lock_guard<std::mutex> lk(m_albumArtMutex);
+      m_albumPlaceholderSRV = srv;
+      m_albumPlaceholderW = w;
+      m_albumPlaceholderH = h;
+    }
+  } catch (...) {
+  }
+}
+
+void MainWindow::UpdateAlbumArt(const std::string &title,
+                                const std::string &artist,
+                                const std::vector<uint8_t> &bytes) {
+  std::string key = title + "|" + artist;
+  {
+    std::lock_guard<std::mutex> lk(m_albumArtMutex);
+    if (key == m_albumArtKey && m_albumArtSRV)
+      return; // 같은 곡 — 재사용
+  }
+
+  // 새 곡 — 옛 텍스처 해제 + 새로 생성
+  void *newSrv = nullptr;
+  int w = 0, h = 0;
+  if (!bytes.empty()) {
+    newSrv = LoadTextureFromBytes(bytes.data(), bytes.size(), &w, &h);
+  }
+
+  std::lock_guard<std::mutex> lk(m_albumArtMutex);
+  if (m_albumArtSRV) {
+    ((ID3D11ShaderResourceView *)m_albumArtSRV)->Release();
+    m_albumArtSRV = nullptr;
+  }
+  m_albumArtSRV = newSrv;
+  m_albumArtW = w;
+  m_albumArtH = h;
+  m_albumArtKey = key;
 }
 
 // ── EQ 패널 (수직 슬라이더) ──────────────────────────────────────────────────
@@ -1318,11 +1765,12 @@ void MainWindow::RenderEQPanel() {
     snprintf(id, sizeof(id), "##eq%d", i);
     bool changed = ImGui::VSliderFloat(id, {14, sliderH}, &m_eqGains[i], -12.0f,
                                        12.0f, "");
-    
+
     bool isHovered = ImGui::IsItemHovered();
     bool isActive = ImGui::IsItemActive();
 
     if (changed) {
+      m_eqOrigin = EqOrigin::Manual;
       m_hasManualChanges = true;
       float now = (float)ImGui::GetTime();
       if (now - m_lastApplyTime > 0.05f) {
@@ -1335,7 +1783,7 @@ void MainWindow::RenderEQPanel() {
       // canonical 은 async 스레드가 쓰므로 snapshot 으로 안전하게 복사.
       CanonicalSnapshot canon = SnapshotCanonical();
       EQEntry entry;
-      entry.title  = canon.title.empty()  ? m_currentTitle  : canon.title;
+      entry.title = canon.title.empty() ? m_currentTitle : canon.title;
       entry.artist = canon.artist.empty() ? m_currentArtist : canon.artist;
       entry.source = "manual";
       entry.deviceName = GetSelectedDeviceGuid();
@@ -1352,7 +1800,8 @@ void MainWindow::RenderEQPanel() {
     ImGui::PopStyleColor(3);
 
     // 2. Gain 레이블 (상단)
-    // 슬라이더 슬롯 너비가 45px 미만일 때는 마우스가 올려져있거나 활성화된 경우에만 표시하여 글자 겹침 차단
+    // 슬라이더 슬롯 너비가 45px 미만일 때는 마우스가 올려져있거나 활성화된
+    // 경우에만 표시하여 글자 겹침 차단
     bool showGain = (slotW > 45.0f) || isHovered || isActive;
     if (showGain) {
       ImGui::SetCursorScreenPos(
@@ -1368,7 +1817,8 @@ void MainWindow::RenderEQPanel() {
           ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1.0f), "!");
           if (ImGui::IsItemHovered()) {
             ImGui::BeginTooltip();
-            ImGui::Text("저역 + 큰 부스트는 베이스 타이밍을 늘어지게 만들 수 있습니다.");
+            ImGui::Text("저역 + 큰 부스트는 베이스 타이밍을 늘어지게 만들 수 "
+                        "있습니다.");
             ImGui::Text("(킥/베이스 어택이 ~3-5ms 늦게 도착)");
             ImGui::EndTooltip();
           }
@@ -1377,16 +1827,20 @@ void MainWindow::RenderEQPanel() {
     }
 
     // 3. 주파수 레이블 (하단)
-    // 슬라이더 너비에 맞춰 촘촘한 대역(15, 31밴드)일 경우 주파수 글자가 겹치지 않게 건너뛰며 출력
+    // 슬라이더 너비에 맞춰 촘촘한 대역(15, 31밴드)일 경우 주파수 글자가 겹치지
+    // 않게 건너뛰며 출력
     int skip = 1;
-    if (slotW < 22.0f) skip = 4;      // 31밴드 초소형 너비: 4칸에 하나씩 표시
-    else if (slotW < 45.0f) skip = 2; // 15밴드 소형 너비: 2칸에 하나씩 표시
+    if (slotW < 22.0f)
+      skip = 4; // 31밴드 초소형 너비: 4칸에 하나씩 표시
+    else if (slotW < 45.0f)
+      skip = 2; // 15밴드 소형 너비: 2칸에 하나씩 표시
 
     if (i % skip == 0 || isHovered || isActive) {
       ImGui::SetCursorScreenPos(
           {pos.x + 12 + i * slotW, pos.y + 36 + sliderH + 4});
       ImGui::SetNextItemWidth(slotW);
-      ImVec4 freqCol = (isHovered || isActive) ? Theme::TEXT_WHITE : Theme::TEXT_DARK_GRAY;
+      ImVec4 freqCol =
+          (isHovered || isActive) ? Theme::TEXT_WHITE : Theme::TEXT_DARK_GRAY;
       ImGui::TextColored(freqCol, "%s",
                          StringUtils::FormatFreq(m_currentBands[i]).c_str());
     }
@@ -1409,7 +1863,7 @@ void MainWindow::RenderBottomBar() {
   if (aiEligible && noSongInfo) {
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 330);
     ImGui::PushStyleColor(ImGuiCol_FrameBg, IM_COL32(35, 35, 45, 255));
-    ImGui::PushStyleColor(ImGuiCol_Text,    Theme::ToU32(Theme::TEXT_GRAY));
+    ImGui::PushStyleColor(ImGuiCol_Text, Theme::ToU32(Theme::TEXT_GRAY));
     ImGui::BeginDisabled(true);
     char placeholder[160];
     std::snprintf(placeholder, sizeof(placeholder),
@@ -1428,12 +1882,13 @@ void MainWindow::RenderBottomBar() {
   } else if (!aiEligible) {
     // 비활성 InputText로 입력 영역 가로 폭 유지 (UI 흔들림 방지)
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 330);
-    ImGui::PushStyleColor(ImGuiCol_FrameBg,    IM_COL32(35, 35, 45, 255));
-    ImGui::PushStyleColor(ImGuiCol_Text,       Theme::ToU32(Theme::TEXT_GRAY));
+    ImGui::PushStyleColor(ImGuiCol_FrameBg, IM_COL32(35, 35, 45, 255));
+    ImGui::PushStyleColor(ImGuiCol_Text, Theme::ToU32(Theme::TEXT_GRAY));
     ImGui::BeginDisabled(true);
     char placeholder[160];
     std::snprintf(placeholder, sizeof(placeholder),
-                  u8"Pro 플랜 구독 시 AI 채팅 사용 가능 — 우측 버튼으로 업그레이드하세요");
+                  u8"Pro 플랜 구독 시 AI 채팅 사용 가능 — 우측 버튼으로 "
+                  u8"업그레이드하세요");
     ImGui::InputText("##prompt_locked", placeholder, sizeof(placeholder),
                      ImGuiInputTextFlags_ReadOnly);
     ImGui::EndDisabled();
@@ -1441,8 +1896,9 @@ void MainWindow::RenderBottomBar() {
     ImGui::SameLine(0, 8);
 
     // Pro 구독하기 버튼 — 모달 안내 또는 즉시 페이지 오픈
-    ImGui::PushStyleColor(ImGuiCol_Button,        Theme::ToU32(Theme::GRAD_START));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Theme::ToU32(Theme::GRAD_END));
+    ImGui::PushStyleColor(ImGuiCol_Button, Theme::ToU32(Theme::GRAD_START));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
+                          Theme::ToU32(Theme::GRAD_END));
     if (ImGui::Button(u8"Pro 구독하기", {130, 0})) {
       m_showUpgradePopup = true;
     }
@@ -1501,39 +1957,39 @@ void MainWindow::RenderBottomBar() {
 
   // AI 초기화 — Free 플랜에서는 노출 자체를 막는다 (의미 없는 버튼 제거).
   if (aiEligible) {
-  ImGui::PushStyleColor(ImGuiCol_Button, Theme::ToU32(Theme::GRAD_START));
-  if (ImGui::Button("AI 초기화", {100, 0})) {
-    g_recordManager.ClearPromptEQ(m_currentTitle, m_currentArtist);
+    ImGui::PushStyleColor(ImGuiCol_Button, Theme::ToU32(Theme::GRAD_START));
+    if (ImGui::Button("AI 초기화", {100, 0})) {
+      g_recordManager.ClearPromptEQ(m_currentTitle, m_currentArtist);
 
-    EQEntry *cached =
-        g_recordManager.GetCachedEQ(m_currentTitle, m_currentArtist);
-    bool restored = false;
-    if (cached) {
-      std::vector<float> *target = nullptr;
-      if (m_currentBands.size() == 5 && !cached->gains5.empty())
-        target = &cached->gains5;
-      else if (m_currentBands.size() == 10 && !cached->gains10.empty())
-        target = &cached->gains10;
-      else if (m_currentBands.size() == 15 && !cached->gains15.empty())
-        target = &cached->gains15;
-      else if (!cached->gains31.empty())
-        target = &cached->gains31;
+      EQEntry *cached =
+          g_recordManager.GetCachedEQ(m_currentTitle, m_currentArtist);
+      bool restored = false;
+      if (cached) {
+        std::vector<float> *target = nullptr;
+        if (m_currentBands.size() == 5 && !cached->gains5.empty())
+          target = &cached->gains5;
+        else if (m_currentBands.size() == 10 && !cached->gains10.empty())
+          target = &cached->gains10;
+        else if (m_currentBands.size() == 15 && !cached->gains15.empty())
+          target = &cached->gains15;
+        else if (!cached->gains31.empty())
+          target = &cached->gains31;
 
-      if (target) {
-        m_eqGains = *target;
-        ApplyEQNoSave();
-        SetStatus("Restored to Baseline AI.", Theme::COLOR_GREEN);
-        restored = true;
+        if (target) {
+          m_eqGains = *target;
+          ApplyEQNoSave();
+          SetStatus("Restored to Baseline AI.", Theme::COLOR_GREEN);
+          restored = true;
+        }
+      }
+
+      if (!restored) {
+        // 기록이 아예 없으면 새로 생성
+        if (!m_currentTitle.empty())
+          TriggerAIGeneration();
       }
     }
-
-    if (!restored) {
-      // 기록이 아예 없으면 새로 생성
-      if (!m_currentTitle.empty())
-        TriggerAIGeneration();
-    }
-  }
-  ImGui::PopStyleColor();
+    ImGui::PopStyleColor();
   } // end if (aiEligible) — Free 플랜은 AI 초기화 버튼 자체가 숨겨짐
 
   ImGui::EndChild();
@@ -1705,7 +2161,7 @@ void MainWindow::ExecuteRestore(const std::string &filePath) {
     // render device's FxProperties, restores Realtek originals from the
     // PreMixChild/PostMixChild backups, deletes CLSID + AudioProcessingObjects
     // entries, and restarts the audio services.
-    const char* installed =
+    const char *installed =
         "C:\\Program Files\\SoundMate Equalizer\\SoundMate_reset.exe";
     if (std::filesystem::exists(installed)) {
       cleanupExe = installed;
@@ -1755,9 +2211,11 @@ void MainWindow::ExecuteRestore(const std::string &filePath) {
 // 200Hz 이하 밴드를 ±9dB 이상 부스트/컷 → 베이스 트랜지언트 늘어짐 위험
 // ============================================================================
 bool MainWindow::IsPhaseWarningTriggered(int bandIdx) const {
-  if (bandIdx < 0 || bandIdx >= (int)m_currentBands.size()) return false;
-  if (bandIdx >= (int)m_eqGains.size()) return false;
-  int   freq = m_currentBands[bandIdx];
+  if (bandIdx < 0 || bandIdx >= (int)m_currentBands.size())
+    return false;
+  if (bandIdx >= (int)m_eqGains.size())
+    return false;
+  int freq = m_currentBands[bandIdx];
   float gain = m_eqGains[bandIdx];
   return (freq <= 200) && (std::fabs(gain) >= 9.0f);
 }
@@ -1768,21 +2226,28 @@ bool MainWindow::IsPhaseWarningTriggered(int bandIdx) const {
 void MainWindow::RenderHealthDot() {
   // 색상 결정
   ImU32 color;
-  const char* label;
+  const char *label;
   switch (m_healthReport.status) {
-    case SoundMate::EngineHealthMonitor::Status::Green:
-      color = IM_COL32(80, 220, 100, 255);  label = "정상"; break;
-    case SoundMate::EngineHealthMonitor::Status::Yellow:
-      color = IM_COL32(240, 200, 60, 255);  label = "대기"; break;
-    default:
-      color = IM_COL32(230, 70, 70, 255);   label = "문제 있음"; break;
+  case SoundMate::EngineHealthMonitor::Status::Green:
+    color = IM_COL32(80, 220, 100, 255);
+    label = "정상";
+    break;
+  case SoundMate::EngineHealthMonitor::Status::Yellow:
+    color = IM_COL32(240, 200, 60, 255);
+    label = "대기";
+    break;
+  default:
+    color = IM_COL32(230, 70, 70, 255);
+    label = "문제 있음";
+    break;
   }
 
   // 16px 컬러 원
-  ImDrawList* dl = ImGui::GetWindowDrawList();
+  ImDrawList *dl = ImGui::GetWindowDrawList();
   ImVec2 cursor = ImGui::GetCursorScreenPos();
   float radius = 8.0f;
-  ImVec2 center = ImVec2(cursor.x + radius, cursor.y + ImGui::GetTextLineHeight() * 0.5f + 4);
+  ImVec2 center = ImVec2(cursor.x + radius,
+                         cursor.y + ImGui::GetTextLineHeight() * 0.5f + 4);
   dl->AddCircleFilled(center, radius, color);
   dl->AddCircle(center, radius, IM_COL32(0, 0, 0, 120), 0, 1.5f);
 
@@ -1793,8 +2258,9 @@ void MainWindow::RenderHealthDot() {
     ImGui::BeginTooltip();
     ImGui::Text("엔진 상태: %s", label);
     ImGui::Separator();
-    ImGui::Text("현재 장치:   %s",
-                m_healthReport.currentDeviceTargeted ? "SoundMate 설치됨" : "미설치");
+    ImGui::Text("현재 장치:   %s", m_healthReport.currentDeviceTargeted
+                                       ? "SoundMate 설치됨"
+                                       : "미설치");
     if (!m_healthReport.currentDeviceName.empty()) {
       ImGui::TextDisabled("(%s)", m_healthReport.currentDeviceName.c_str());
     }
@@ -1824,20 +2290,26 @@ void MainWindow::RenderDiagnosticPanel() {
                    ImGuiWindowFlags_NoCollapse)) {
     ImGui::Text("종합 상태");
     ImGui::Separator();
-    const char* statusName = "?";
+    const char *statusName = "?";
     switch (m_healthReport.status) {
-      case SoundMate::EngineHealthMonitor::Status::Green:  statusName = "🟢 정상"; break;
-      case SoundMate::EngineHealthMonitor::Status::Yellow: statusName = "🟡 대기"; break;
-      case SoundMate::EngineHealthMonitor::Status::Red:    statusName = "🔴 문제"; break;
+    case SoundMate::EngineHealthMonitor::Status::Green:
+      statusName = "🟢 정상";
+      break;
+    case SoundMate::EngineHealthMonitor::Status::Yellow:
+      statusName = "🟡 대기";
+      break;
+    case SoundMate::EngineHealthMonitor::Status::Red:
+      statusName = "🔴 문제";
+      break;
     }
     ImGui::TextUnformatted(statusName);
     ImGui::Spacing();
 
     ImGui::Text("개별 체크");
     ImGui::Separator();
-    ImGui::BulletText("현재 장치:    %s",
-                      m_healthReport.currentDeviceTargeted ? "SoundMate 설치됨"
-                                                            : "SoundMate 없음");
+    ImGui::BulletText("현재 장치:    %s", m_healthReport.currentDeviceTargeted
+                                              ? "SoundMate 설치됨"
+                                              : "SoundMate 없음");
     ImGui::BulletText("오디오 흐름:  %s  (마지막: %s)",
                       m_healthReport.audioFlowing ? "흐름 감지" : "정지",
                       m_healthReport.normLogLastSeen.c_str());
@@ -1852,7 +2324,7 @@ void MainWindow::RenderDiagnosticPanel() {
     if (!m_healthReport.issues.empty()) {
       ImGui::Text("진단 결과");
       ImGui::Separator();
-      for (const auto& issue : m_healthReport.issues) {
+      for (const auto &issue : m_healthReport.issues) {
         ImGui::TextWrapped("• %s", issue.c_str());
       }
       ImGui::Spacing();
@@ -1862,7 +2334,8 @@ void MainWindow::RenderDiagnosticPanel() {
                         "WASAPI Exclusive 탐지 + FAQ 링크 추가 예정)");
 
     ImGui::Spacing();
-    if (ImGui::Button("닫기", ImVec2(120, 0))) m_diagnosticOpen = false;
+    if (ImGui::Button("닫기", ImVec2(120, 0)))
+      m_diagnosticOpen = false;
   }
   ImGui::End();
 }
@@ -1878,10 +2351,13 @@ void MainWindow::RenderDiagnosticPanel() {
 // expert: -1 (무제한)
 int MainWindow::GetPresetLimit() {
   std::string planType = g_recordManager.GetUserPlanType();
-  if (planType == "expert") return -1;  // 무제한
-  if (planType == "pro")    return 3;
-  if (planType == "beta")   return 3;
-  return 0;  // free
+  if (planType == "expert")
+    return -1; // 무제한
+  if (planType == "pro")
+    return 3;
+  if (planType == "beta")
+    return 3;
+  return 0; // free
 }
 
 // ── 프리셋 파일 경로 ───────────────────────────────────────────────────────
@@ -1893,17 +2369,19 @@ static std::string PresetFilePath() {
 void MainWindow::LoadUserPresets() {
   m_userPresets.clear();
   std::string path = PresetFilePath();
-  if (!std::filesystem::exists(path)) return;
+  if (!std::filesystem::exists(path))
+    return;
   try {
     std::ifstream f(path);
     auto arr = nlohmann::json::parse(f);
-    for (auto& item : arr) {
+    for (auto &item : arr) {
       UserPreset p;
-      p.name    = item.value("name", "Preset");
+      p.name = item.value("name", "Preset");
       p.gains31 = item.value("gains31", std::vector<float>(31, 0.0f));
       m_userPresets.push_back(std::move(p));
     }
-  } catch (...) {}
+  } catch (...) {
+  }
 }
 
 // ── 프리셋 목록을 JSON에 저장 ──────────────────────────────────────────────
@@ -1912,19 +2390,22 @@ void MainWindow::SaveUserPresets() {
     std::filesystem::create_directories(
         std::filesystem::path(PresetFilePath()).parent_path());
     nlohmann::json arr = nlohmann::json::array();
-    for (auto& p : m_userPresets)
+    for (auto &p : m_userPresets)
       arr.push_back({{"name", p.name}, {"gains31", p.gains31}});
     std::ofstream f(PresetFilePath());
     f << arr.dump(4);
-  } catch (...) {}
+  } catch (...) {
+  }
 }
 
 // ── 현재 EQ 게인을 31밴드로 업샘플 ────────────────────────────────────────
 // (현재 밴드 수가 31보다 적은 경우 선형 보간)
-std::vector<float> MainWindow::UpsampleTo31(const std::vector<float>& gains) {
+std::vector<float> MainWindow::UpsampleTo31(const std::vector<float> &gains) {
   const int N31 = 31;
-  if (gains.size() == N31) return gains;
-  if (gains.empty()) return std::vector<float>(N31, 0.0f);
+  if (gains.size() == N31)
+    return gains;
+  if (gains.empty())
+    return std::vector<float>(N31, 0.0f);
 
   std::vector<float> result(N31, 0.0f);
   int src = (int)gains.size();
@@ -1938,8 +2419,8 @@ std::vector<float> MainWindow::UpsampleTo31(const std::vector<float>& gains) {
 }
 
 // ── 31밴드를 N밴드로 다운샘플 (프리셋 적용 시 현재 밴드 모드에 맞게) ────
-std::vector<float> MainWindow::DownsampleTo(const std::vector<float>& g31,
-                                             int targetCount) {
+std::vector<float> MainWindow::DownsampleTo(const std::vector<float> &g31,
+                                            int targetCount) {
   const int N31 = 31;
   if (targetCount == N31 || g31.size() != N31)
     return g31;
@@ -1955,10 +2436,13 @@ std::vector<float> MainWindow::DownsampleTo(const std::vector<float>& g31,
 
 // ── 프리셋 EQ 적용 ────────────────────────────────────────────────────────
 void MainWindow::ApplyPreset(int idx) {
-  if (idx < 0 || idx >= (int)m_userPresets.size()) return;
-  auto target = DownsampleTo(m_userPresets[idx].gains31,
-                             (int)m_currentBands.size());
-  if (target.size() != m_eqGains.size()) return;
+  if (idx < 0 || idx >= (int)m_userPresets.size())
+    return;
+  auto target =
+      DownsampleTo(m_userPresets[idx].gains31, (int)m_currentBands.size());
+  if (target.size() != m_eqGains.size())
+    return;
+  m_eqOrigin = EqOrigin::Preset;
   SmoothTransition(target);
   ApplyEQNoSave();
 }
@@ -1971,7 +2455,7 @@ void MainWindow::RenderPresetPopups() {
     m_savePresetPopupOpen = false;
   }
 
-  ImGuiIO& io = ImGui::GetIO();
+  ImGuiIO &io = ImGui::GetIO();
   ImGui::SetNextWindowPos({io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f},
                           ImGuiCond_Always, {0.5f, 0.5f});
   ImGui::SetNextWindowSize({340, 0}, ImGuiCond_Always);
@@ -1981,16 +2465,17 @@ void MainWindow::RenderPresetPopups() {
 
   if (ImGui::BeginPopupModal("##save_preset_popup", nullptr,
                              ImGuiWindowFlags_NoTitleBar |
-                             ImGuiWindowFlags_NoResize |
-                             ImGuiWindowFlags_AlwaysAutoResize)) {
+                                 ImGuiWindowFlags_NoResize |
+                                 ImGuiWindowFlags_AlwaysAutoResize)) {
     ImGui::TextColored(Theme::TEXT_WHITE, "프리셋 저장");
-    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImDrawList *dl = ImGui::GetWindowDrawList();
     ImVec2 p = ImGui::GetCursorScreenPos();
     float cw = ImGui::GetContentRegionAvail().x;
-    dl->AddLine({p.x, p.y}, {p.x + cw, p.y}, IM_COL32(255,255,255,30), 1.0f);
+    dl->AddLine({p.x, p.y}, {p.x + cw, p.y}, IM_COL32(255, 255, 255, 30), 1.0f);
     ImGui::Dummy({0, 8});
 
-    ImGui::TextColored(Theme::TEXT_GRAY, "현재 슬라이더 값을 프리셋으로 저장합니다.");
+    ImGui::TextColored(Theme::TEXT_GRAY,
+                       "현재 슬라이더 값을 프리셋으로 저장합니다.");
     ImGui::Spacing();
     ImGui::TextColored(Theme::TEXT_GRAY, "이름:");
     ImGui::SetNextItemWidth(cw);
@@ -2014,32 +2499,35 @@ void MainWindow::RenderPresetPopups() {
     float btnW = (cw - 8) / 2;
     // 저장 버튼
     ImGui::PushStyleColor(ImGuiCol_Button, Theme::ToU32(Theme::GRAD_START));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Theme::ToU32(Theme::GRAD_END));
-    ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(0,0,0,255));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
+                          Theme::ToU32(Theme::GRAD_END));
+    ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(0, 0, 0, 255));
     bool doSave = ImGui::Button("저장", {btnW, 36}) || enter;
     ImGui::PopStyleColor(3);
     ImGui::SameLine(0, 8);
 
     // 취소 버튼
-    ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(60,60,60,255));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(90,90,90,255));
+    ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(60, 60, 60, 255));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(90, 90, 90, 255));
     bool doCancel = ImGui::Button("취소", {btnW, 36});
     ImGui::PopStyleColor(2);
 
     if (doSave) {
       std::string name(m_newPresetName);
-      if (name.empty()) name = "Preset " + std::to_string(m_userPresets.size() + 1);
+      if (name.empty())
+        name = "Preset " + std::to_string(m_userPresets.size() + 1);
       UserPreset p;
-      p.name    = name;
-      p.gains31 = UpsampleTo31(m_eqGains);  // 현재 EQ → 31밴드 보관
+      p.name = name;
+      p.gains31 = UpsampleTo31(m_eqGains); // 현재 EQ → 31밴드 보관
       m_userPresets.push_back(p);
       SaveUserPresets();
       m_selectedPresetIdx = (int)m_userPresets.size() - 1;
-      m_presetModeActive  = true;
+      m_presetModeActive = true;
       SetStatus("프리셋 저장됨: " + name, Theme::COLOR_GREEN);
       ImGui::CloseCurrentPopup();
     }
-    if (doCancel) ImGui::CloseCurrentPopup();
+    if (doCancel)
+      ImGui::CloseCurrentPopup();
 
     ImGui::EndPopup();
   }
@@ -2061,8 +2549,8 @@ void MainWindow::RenderPresetPopups() {
 
   if (ImGui::BeginPopupModal("##delete_preset_popup", nullptr,
                              ImGuiWindowFlags_NoTitleBar |
-                             ImGuiWindowFlags_NoResize |
-                             ImGuiWindowFlags_AlwaysAutoResize)) {
+                                 ImGuiWindowFlags_NoResize |
+                                 ImGuiWindowFlags_AlwaysAutoResize)) {
     std::string delName = (m_selectedPresetIdx >= 0 &&
                            m_selectedPresetIdx < (int)m_userPresets.size())
                               ? m_userPresets[m_selectedPresetIdx].name
@@ -2076,15 +2564,15 @@ void MainWindow::RenderPresetPopups() {
     float cw2 = ImGui::GetContentRegionAvail().x;
     float btnW2 = (cw2 - 8) / 2;
 
-    ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(180,40,40,255));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(220,60,60,255));
+    ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(180, 40, 40, 255));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(220, 60, 60, 255));
     if (ImGui::Button("삭제", {btnW2, 36})) {
       if (m_selectedPresetIdx >= 0 &&
           m_selectedPresetIdx < (int)m_userPresets.size()) {
         m_userPresets.erase(m_userPresets.begin() + m_selectedPresetIdx);
         SaveUserPresets();
         m_selectedPresetIdx = -1;
-        m_presetModeActive  = false;
+        m_presetModeActive = false;
         SetStatus("프리셋 삭제됨: " + delName, Theme::TEXT_GRAY);
       }
       ImGui::CloseCurrentPopup();
@@ -2092,9 +2580,10 @@ void MainWindow::RenderPresetPopups() {
     ImGui::PopStyleColor(2);
     ImGui::SameLine(0, 8);
 
-    ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(60,60,60,255));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(90,90,90,255));
-    if (ImGui::Button("취소", {btnW2, 36})) ImGui::CloseCurrentPopup();
+    ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(60, 60, 60, 255));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(90, 90, 90, 255));
+    if (ImGui::Button("취소", {btnW2, 36}))
+      ImGui::CloseCurrentPopup();
     ImGui::PopStyleColor(2);
 
     ImGui::EndPopup();
@@ -2107,296 +2596,318 @@ void MainWindow::RenderPresetPopups() {
 // 자동 업데이트 시스템 (Auto-Updater)
 // ============================================================================
 
-static size_t UpdateWriteCallback(void *contents, size_t size, size_t nmemb, void *userp) {
-    ((std::string*)userp)->append((char*)contents, size * nmemb);
-    return size * nmemb;
+static size_t UpdateWriteCallback(void *contents, size_t size, size_t nmemb,
+                                  void *userp) {
+  ((std::string *)userp)->append((char *)contents, size * nmemb);
+  return size * nmemb;
 }
 
 // [PR-C] SemVer 비교 — "1.0.10" > "1.0.9" 정확히 판정. 단순 문자열 != 비교는
 // "1.0.10" vs "1.0.9"에서 잘못된 결과(같다고 인식)를 낼 수 있음.
 namespace {
-    struct SemVer { int major = 0, minor = 0, patch = 0; };
-    SemVer ParseSemVer(const std::string &s) {
-        SemVer v;
-        sscanf_s(s.c_str(), "%d.%d.%d", &v.major, &v.minor, &v.patch);
-        return v;
-    }
-    // latest가 current보다 새 버전인지.
-    bool IsNewerVersion(const std::string &latest, const std::string &current) {
-        SemVer L = ParseSemVer(latest), C = ParseSemVer(current);
-        if (L.major != C.major) return L.major > C.major;
-        if (L.minor != C.minor) return L.minor > C.minor;
-        return L.patch > C.patch;
-    }
+struct SemVer {
+  int major = 0, minor = 0, patch = 0;
+};
+SemVer ParseSemVer(const std::string &s) {
+  SemVer v;
+  sscanf_s(s.c_str(), "%d.%d.%d", &v.major, &v.minor, &v.patch);
+  return v;
 }
+// latest가 current보다 새 버전인지.
+bool IsNewerVersion(const std::string &latest, const std::string &current) {
+  SemVer L = ParseSemVer(latest), C = ParseSemVer(current);
+  if (L.major != C.major)
+    return L.major > C.major;
+  if (L.minor != C.minor)
+    return L.minor > C.minor;
+  return L.patch > C.patch;
+}
+} // namespace
 
 void MainWindow::CheckForUpdates() {
-    CURL* curl = curl_easy_init();
-    if (!curl) return;
+  CURL *curl = curl_easy_init();
+  if (!curl)
+    return;
 
-    std::string response;
-    // app_releases: windows 플랫폼의 최신(is_latest=true) 릴리즈 1건 조회
-    std::string url = std::string(RecordManager::SUPABASE_URL)
-        + "/rest/v1/app_releases?select=version,file_path,release_notes,is_mandatory"
-          "&platform=eq.windows&is_latest=eq.true&order=created_at.desc&limit=1";
+  std::string response;
+  // app_releases: windows 플랫폼의 최신(is_latest=true) 릴리즈 1건 조회
+  std::string url =
+      std::string(RecordManager::SUPABASE_URL) +
+      "/rest/v1/"
+      "app_releases?select=version,file_path,release_notes,is_mandatory"
+      "&platform=eq.windows&is_latest=eq.true&order=created_at.desc&limit=1";
 
-    struct curl_slist *headers = NULL;
-    headers = curl_slist_append(headers, ("apikey: " + std::string(RecordManager::SUPABASE_KEY)).c_str());
-    headers = curl_slist_append(headers, ("Authorization: Bearer " + std::string(RecordManager::SUPABASE_KEY)).c_str());
+  struct curl_slist *headers = NULL;
+  headers = curl_slist_append(
+      headers, ("apikey: " + std::string(RecordManager::SUPABASE_KEY)).c_str());
+  headers =
+      curl_slist_append(headers, ("Authorization: Bearer " +
+                                  std::string(RecordManager::SUPABASE_KEY))
+                                     .c_str());
 
-    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, UpdateWriteCallback);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+  curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+  curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+  curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, UpdateWriteCallback);
+  curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
 
-    CURLcode res = curl_easy_perform(curl);
-    if (res == CURLE_OK && !response.empty()) {
-        try {
-            auto arr = nlohmann::json::parse(response);
-            if (arr.is_array() && arr.size() > 0) {
-                auto& latest = arr[0];
-                m_latestVersion = latest.value("version", "");
+  CURLcode res = curl_easy_perform(curl);
+  if (res == CURLE_OK && !response.empty()) {
+    try {
+      auto arr = nlohmann::json::parse(response);
+      if (arr.is_array() && arr.size() > 0) {
+        auto &latest = arr[0];
+        m_latestVersion = latest.value("version", "");
 
-                // [PR-C] SemVer 비교 — 1.0.10 > 1.0.9 정확히 판정.
-                if (!m_latestVersion.empty() &&
-                    IsNewerVersion(m_latestVersion, APP_VERSION)) {
-                    m_downloadUrl       = latest.value("file_path", "");
-                    m_releaseNotes      = latest.value("release_notes", "");
-                    m_isMandatoryUpdate = latest.value("is_mandatory", false);
-                    m_updateAvailable   = true;
-                    m_showUpdatePopup   = true;
-                }
-            }
-        } catch(...) {}
+        // [PR-C] SemVer 비교 — 1.0.10 > 1.0.9 정확히 판정.
+        if (!m_latestVersion.empty() &&
+            IsNewerVersion(m_latestVersion, APP_VERSION)) {
+          m_downloadUrl = latest.value("file_path", "");
+          m_releaseNotes = latest.value("release_notes", "");
+          m_isMandatoryUpdate = latest.value("is_mandatory", false);
+          m_updateAvailable = true;
+          m_showUpdatePopup = true;
+        }
+      }
+    } catch (...) {
     }
-    
-    curl_slist_free_all(headers);
-    curl_easy_cleanup(curl);
+  }
+
+  curl_slist_free_all(headers);
+  curl_easy_cleanup(curl);
 }
 
 void MainWindow::DownloadAndExecuteUpdate() {
-    if (m_downloadUrl.empty()) return;
-    
-    char tempPath[MAX_PATH];
-    GetTempPathA(MAX_PATH, tempPath);
-    std::string installerPath = std::string(tempPath) + "SoundMate_Setup_Update.exe";
+  if (m_downloadUrl.empty())
+    return;
 
-    HRESULT hr = URLDownloadToFileA(NULL, m_downloadUrl.c_str(), installerPath.c_str(), 0, NULL);
-    if (SUCCEEDED(hr)) {
-        // 백그라운드 설치(Silent) 진행 후 프로그램 자동 시작, 현재 프로세스 강제 종료
-        ShellExecuteA(NULL, "open", installerPath.c_str(), "/SILENT /NOCANCEL", NULL, SW_SHOWNORMAL);
-        exit(0);
-    } else {
-        SetStatus(u8"업데이트 다운로드 실패", Theme::COLOR_RED);
-    }
+  char tempPath[MAX_PATH];
+  GetTempPathA(MAX_PATH, tempPath);
+  std::string installerPath =
+      std::string(tempPath) + "SoundMate_Setup_Update.exe";
+
+  HRESULT hr = URLDownloadToFileA(NULL, m_downloadUrl.c_str(),
+                                  installerPath.c_str(), 0, NULL);
+  if (SUCCEEDED(hr)) {
+    // 백그라운드 설치(Silent) 진행 후 프로그램 자동 시작, 현재 프로세스 강제
+    // 종료
+    ShellExecuteA(NULL, "open", installerPath.c_str(), "/SILENT /NOCANCEL",
+                  NULL, SW_SHOWNORMAL);
+    exit(0);
+  } else {
+    SetStatus(u8"업데이트 다운로드 실패", Theme::COLOR_RED);
+  }
 }
 
 void MainWindow::RenderUpdatePopup() {
-    if (m_showUpdatePopup) {
-        ImGui::OpenPopup("##update_popup");
+  if (m_showUpdatePopup) {
+    ImGui::OpenPopup("##update_popup");
+    m_showUpdatePopup = false;
+  }
+
+  ImGuiIO &io = ImGui::GetIO();
+  ImGui::SetNextWindowPos({io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f},
+                          ImGuiCond_Always, {0.5f, 0.5f});
+  ImGui::SetNextWindowSize({380, 0}, ImGuiCond_Always);
+  ImGui::PushStyleColor(ImGuiCol_WindowBg, Theme::ToU32(Theme::PANEL_COLOR));
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 12.0f);
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {20.0f, 16.0f});
+
+  // 강제 업데이트일 경우 창을 끌 수 없음
+  int flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+              ImGuiWindowFlags_AlwaysAutoResize;
+  if (ImGui::BeginPopupModal("##update_popup", nullptr, flags)) {
+    ImGui::TextColored(Theme::COLOR_CYAN, u8"🚀 새로운 업데이트 가능!");
+    ImGui::Spacing();
+    ImGui::TextColored(Theme::TEXT_WHITE, u8"최신 버전: %s (현재: %s)",
+                       m_latestVersion.c_str(), APP_VERSION);
+    ImGui::Spacing();
+
+    if (!m_releaseNotes.empty()) {
+      ImGui::TextColored(Theme::TEXT_GRAY, u8"업데이트 내용:");
+      ImGui::TextWrapped("%s", m_releaseNotes.c_str());
+      ImGui::Spacing();
+    }
+
+    float cw = ImGui::GetContentRegionAvail().x;
+    float btnW = m_isMandatoryUpdate ? cw : (cw - 8) / 2;
+
+    ImGui::PushStyleColor(ImGuiCol_Button, Theme::ToU32(Theme::GRAD_START));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
+                          Theme::ToU32(Theme::GRAD_END));
+    ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(0, 0, 0, 255));
+
+    if (ImGui::Button(u8"지금 업데이트", {btnW, 36})) {
+      std::thread([this]() { DownloadAndExecuteUpdate(); }).detach();
+      ImGui::CloseCurrentPopup();
+      m_showUpdatePopup = false;
+    }
+    ImGui::PopStyleColor(3);
+
+    if (!m_isMandatoryUpdate) {
+      ImGui::SameLine(0, 8);
+      ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(60, 60, 60, 255));
+      ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(90, 90, 90, 255));
+      if (ImGui::Button(u8"나중에", {btnW, 36})) {
+        ImGui::CloseCurrentPopup();
         m_showUpdatePopup = false;
+      }
+      ImGui::PopStyleColor(2);
     }
 
-    ImGuiIO& io = ImGui::GetIO();
-    ImGui::SetNextWindowPos({io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f}, ImGuiCond_Always, {0.5f, 0.5f});
-    ImGui::SetNextWindowSize({380, 0}, ImGuiCond_Always);
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, Theme::ToU32(Theme::PANEL_COLOR));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 12.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {20.0f, 16.0f});
+    ImGui::EndPopup();
+  }
 
-    // 강제 업데이트일 경우 창을 끌 수 없음
-    int flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize;
-    if (ImGui::BeginPopupModal("##update_popup", nullptr, flags)) {
-        ImGui::TextColored(Theme::COLOR_CYAN, u8"🚀 새로운 업데이트 가능!");
-        ImGui::Spacing();
-        ImGui::TextColored(Theme::TEXT_WHITE, u8"최신 버전: %s (현재: %s)", m_latestVersion.c_str(), APP_VERSION);
-        ImGui::Spacing();
-        
-        if (!m_releaseNotes.empty()) {
-            ImGui::TextColored(Theme::TEXT_GRAY, u8"업데이트 내용:");
-            ImGui::TextWrapped("%s", m_releaseNotes.c_str());
-            ImGui::Spacing();
-        }
-
-        float cw = ImGui::GetContentRegionAvail().x;
-        float btnW = m_isMandatoryUpdate ? cw : (cw - 8) / 2;
-
-        ImGui::PushStyleColor(ImGuiCol_Button, Theme::ToU32(Theme::GRAD_START));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Theme::ToU32(Theme::GRAD_END));
-        ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(0,0,0,255));
-        
-        if (ImGui::Button(u8"지금 업데이트", {btnW, 36})) {
-            std::thread([this]() { DownloadAndExecuteUpdate(); }).detach();
-            ImGui::CloseCurrentPopup();
-            m_showUpdatePopup = false;
-        }
-        ImGui::PopStyleColor(3);
-
-        if (!m_isMandatoryUpdate) {
-            ImGui::SameLine(0, 8);
-            ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(60,60,60,255));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(90,90,90,255));
-            if (ImGui::Button(u8"나중에", {btnW, 36})) {
-                ImGui::CloseCurrentPopup();
-                m_showUpdatePopup = false;
-            }
-            ImGui::PopStyleColor(2);
-        }
-
-        ImGui::EndPopup();
-    }
-
-    ImGui::PopStyleVar(2);
-    ImGui::PopStyleColor();
+  ImGui::PopStyleVar(2);
+  ImGui::PopStyleColor();
 }
 
 // ============================================================================
 // [Phase 3] Free 플랜 → Pro 구독 안내 팝업
 // ============================================================================
 void MainWindow::OpenPricingPage() {
-    // Pricing 페이지로 이동. ShellExecuteA 는 비동기로 기본 브라우저를 띄움.
-    ShellExecuteA(nullptr, "open",
-                  "https://soundmate.kro.kr/pricing",
-                  nullptr, nullptr, SW_SHOWNORMAL);
+  // Pricing 페이지로 이동. ShellExecuteA 는 비동기로 기본 브라우저를 띄움.
+  ShellExecuteA(nullptr, "open", "https://soundmate.kro.kr/pricing", nullptr,
+                nullptr, SW_SHOWNORMAL);
 }
 
 // ============================================================================
 // [PR-A] 기기 한도 초과 안내 + 웹 대시보드
 // ============================================================================
 void MainWindow::NotifyDeviceLimitExceeded(int limit, int activeCount,
-                                            const std::string &plan) {
-    {
-        std::lock_guard<std::mutex> lk(m_deviceLimitMutex);
-        m_deviceLimit = limit;
-        m_deviceActiveCount = activeCount;
-        m_deviceLimitPlan = plan;
-    }
-    m_showDeviceLimitPopup = true;
-    SetStatus(u8"이 플랜의 기기 등록 한도를 초과했습니다.", Theme::COLOR_RED);
+                                           const std::string &plan) {
+  {
+    std::lock_guard<std::mutex> lk(m_deviceLimitMutex);
+    m_deviceLimit = limit;
+    m_deviceActiveCount = activeCount;
+    m_deviceLimitPlan = plan;
+  }
+  m_showDeviceLimitPopup = true;
+  SetStatus(u8"이 플랜의 기기 등록 한도를 초과했습니다.", Theme::COLOR_RED);
 }
 
 void MainWindow::OpenDeviceManagementPage() {
-    ShellExecuteA(nullptr, "open",
-                  "https://soundmate.kro.kr/mypage/account",
-                  nullptr, nullptr, SW_SHOWNORMAL);
+  ShellExecuteA(nullptr, "open", "https://soundmate.kro.kr/mypage/account",
+                nullptr, nullptr, SW_SHOWNORMAL);
 }
 
 void MainWindow::RenderDeviceLimitPopup() {
-    if (m_showDeviceLimitPopup.exchange(false)) {
-        ImGui::OpenPopup("##device_limit_popup");
+  if (m_showDeviceLimitPopup.exchange(false)) {
+    ImGui::OpenPopup("##device_limit_popup");
+  }
+
+  ImGuiIO &io = ImGui::GetIO();
+  ImGui::SetNextWindowPos({io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f},
+                          ImGuiCond_Always, {0.5f, 0.5f});
+  ImGui::SetNextWindowSize({440, 0}, ImGuiCond_Always);
+  ImGui::PushStyleColor(ImGuiCol_WindowBg, Theme::ToU32(Theme::PANEL_COLOR));
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 12.0f);
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {20.0f, 16.0f});
+
+  int flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+              ImGuiWindowFlags_AlwaysAutoResize;
+  if (ImGui::BeginPopupModal("##device_limit_popup", nullptr, flags)) {
+    ImGui::TextColored(Theme::COLOR_RED, u8"⚠ 기기 등록 한도 초과");
+    ImGui::Spacing();
+
+    std::string planText;
+    int limit = m_deviceLimit.load();
+    int count = m_deviceActiveCount.load();
+    {
+      std::lock_guard<std::mutex> lk(m_deviceLimitMutex);
+      planText = m_deviceLimitPlan;
     }
+    ImGui::TextWrapped(
+        u8"현재 플랜(%s)의 기기 등록 한도(%d대)를 초과했습니다.\n"
+        u8"활성 기기: %d대\n\n"
+        u8"기존 기기 중 사용하지 않는 기기를 웹 대시보드에서\n"
+        u8"해제하면 이 PC를 사용할 수 있습니다.",
+        planText.empty() ? "free" : planText.c_str(), limit, count);
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
 
-    ImGuiIO &io = ImGui::GetIO();
-    ImGui::SetNextWindowPos({io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f},
-                            ImGuiCond_Always, {0.5f, 0.5f});
-    ImGui::SetNextWindowSize({440, 0}, ImGuiCond_Always);
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, Theme::ToU32(Theme::PANEL_COLOR));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 12.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {20.0f, 16.0f});
+    float cw = ImGui::GetContentRegionAvail().x;
+    float btnW = (cw - 8) / 2;
 
-    int flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize
-              | ImGuiWindowFlags_AlwaysAutoResize;
-    if (ImGui::BeginPopupModal("##device_limit_popup", nullptr, flags)) {
-        ImGui::TextColored(Theme::COLOR_RED, u8"⚠ 기기 등록 한도 초과");
-        ImGui::Spacing();
-
-        std::string planText;
-        int limit = m_deviceLimit.load();
-        int count = m_deviceActiveCount.load();
-        {
-            std::lock_guard<std::mutex> lk(m_deviceLimitMutex);
-            planText = m_deviceLimitPlan;
-        }
-        ImGui::TextWrapped(
-            u8"현재 플랜(%s)의 기기 등록 한도(%d대)를 초과했습니다.\n"
-            u8"활성 기기: %d대\n\n"
-            u8"기존 기기 중 사용하지 않는 기기를 웹 대시보드에서\n"
-            u8"해제하면 이 PC를 사용할 수 있습니다.",
-            planText.empty() ? "free" : planText.c_str(), limit, count);
-        ImGui::Spacing();
-        ImGui::Separator();
-        ImGui::Spacing();
-
-        float cw = ImGui::GetContentRegionAvail().x;
-        float btnW = (cw - 8) / 2;
-
-        ImGui::PushStyleColor(ImGuiCol_Button,        Theme::ToU32(Theme::GRAD_START));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Theme::ToU32(Theme::GRAD_END));
-        ImGui::PushStyleColor(ImGuiCol_Text,          IM_COL32(0, 0, 0, 255));
-        if (ImGui::Button(u8"기존 기기 관리하기", {btnW, 36})) {
-            OpenDeviceManagementPage();
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::PopStyleColor(3);
-
-        ImGui::SameLine(0, 8);
-        ImGui::PushStyleColor(ImGuiCol_Button,        IM_COL32(60, 60, 60, 255));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(90, 90, 90, 255));
-        if (ImGui::Button(u8"닫기", {btnW, 36})) {
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::PopStyleColor(2);
-
-        ImGui::EndPopup();
+    ImGui::PushStyleColor(ImGuiCol_Button, Theme::ToU32(Theme::GRAD_START));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
+                          Theme::ToU32(Theme::GRAD_END));
+    ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(0, 0, 0, 255));
+    if (ImGui::Button(u8"기존 기기 관리하기", {btnW, 36})) {
+      OpenDeviceManagementPage();
+      ImGui::CloseCurrentPopup();
     }
+    ImGui::PopStyleColor(3);
 
-    ImGui::PopStyleVar(2);
-    ImGui::PopStyleColor();
+    ImGui::SameLine(0, 8);
+    ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(60, 60, 60, 255));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(90, 90, 90, 255));
+    if (ImGui::Button(u8"닫기", {btnW, 36})) {
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::PopStyleColor(2);
+
+    ImGui::EndPopup();
+  }
+
+  ImGui::PopStyleVar(2);
+  ImGui::PopStyleColor();
 }
 
 void MainWindow::RenderUpgradePopup() {
-    if (m_showUpgradePopup) {
-        ImGui::OpenPopup("##upgrade_popup");
-        m_showUpgradePopup = false;
+  if (m_showUpgradePopup) {
+    ImGui::OpenPopup("##upgrade_popup");
+    m_showUpgradePopup = false;
+  }
+
+  ImGuiIO &io = ImGui::GetIO();
+  ImGui::SetNextWindowPos({io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f},
+                          ImGuiCond_Always, {0.5f, 0.5f});
+  ImGui::SetNextWindowSize({420, 0}, ImGuiCond_Always);
+  ImGui::PushStyleColor(ImGuiCol_WindowBg, Theme::ToU32(Theme::PANEL_COLOR));
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 12.0f);
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {20.0f, 16.0f});
+
+  int flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+              ImGuiWindowFlags_AlwaysAutoResize;
+  if (ImGui::BeginPopupModal("##upgrade_popup", nullptr, flags)) {
+    ImGui::TextColored(Theme::COLOR_CYAN, u8"✨ Pro 플랜으로 업그레이드");
+    ImGui::Spacing();
+    ImGui::TextWrapped(
+        u8"SoundMate의 AI EQ 자동 매핑 / 프롬프트 기반 EQ 생성 기능은\n"
+        u8"Pro 플랜 이상에서 사용하실 수 있습니다.\n\n"
+        u8"Pro 플랜:\n"
+        u8"  • AI 자동 EQ: 월 300회\n"
+        u8"  • 프롬프트 EQ: 월 100회\n"
+        u8"  • 사용자 프리셋 저장 3개");
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    float cw = ImGui::GetContentRegionAvail().x;
+    float btnW = (cw - 8) / 2;
+
+    ImGui::PushStyleColor(ImGuiCol_Button, Theme::ToU32(Theme::GRAD_START));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
+                          Theme::ToU32(Theme::GRAD_END));
+    ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(0, 0, 0, 255));
+    if (ImGui::Button(u8"Pro 구독하기", {btnW, 36})) {
+      OpenPricingPage();
+      ImGui::CloseCurrentPopup();
     }
+    ImGui::PopStyleColor(3);
 
-    ImGuiIO& io = ImGui::GetIO();
-    ImGui::SetNextWindowPos({io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f},
-                            ImGuiCond_Always, {0.5f, 0.5f});
-    ImGui::SetNextWindowSize({420, 0}, ImGuiCond_Always);
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, Theme::ToU32(Theme::PANEL_COLOR));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 12.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {20.0f, 16.0f});
-
-    int flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize
-              | ImGuiWindowFlags_AlwaysAutoResize;
-    if (ImGui::BeginPopupModal("##upgrade_popup", nullptr, flags)) {
-        ImGui::TextColored(Theme::COLOR_CYAN, u8"✨ Pro 플랜으로 업그레이드");
-        ImGui::Spacing();
-        ImGui::TextWrapped(
-            u8"SoundMate의 AI EQ 자동 매핑 / 프롬프트 기반 EQ 생성 기능은\n"
-            u8"Pro 플랜 이상에서 사용하실 수 있습니다.\n\n"
-            u8"Pro 플랜:\n"
-            u8"  • AI 자동 EQ: 월 300회\n"
-            u8"  • 프롬프트 EQ: 월 100회\n"
-            u8"  • 사용자 프리셋 저장 3개");
-        ImGui::Spacing();
-        ImGui::Separator();
-        ImGui::Spacing();
-
-        float cw   = ImGui::GetContentRegionAvail().x;
-        float btnW = (cw - 8) / 2;
-
-        ImGui::PushStyleColor(ImGuiCol_Button,        Theme::ToU32(Theme::GRAD_START));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Theme::ToU32(Theme::GRAD_END));
-        ImGui::PushStyleColor(ImGuiCol_Text,          IM_COL32(0,0,0,255));
-        if (ImGui::Button(u8"Pro 구독하기", {btnW, 36})) {
-            OpenPricingPage();
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::PopStyleColor(3);
-
-        ImGui::SameLine(0, 8);
-        ImGui::PushStyleColor(ImGuiCol_Button,        IM_COL32(60,60,60,255));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(90,90,90,255));
-        if (ImGui::Button(u8"닫기", {btnW, 36})) {
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::PopStyleColor(2);
-
-        ImGui::EndPopup();
+    ImGui::SameLine(0, 8);
+    ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(60, 60, 60, 255));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(90, 90, 90, 255));
+    if (ImGui::Button(u8"닫기", {btnW, 36})) {
+      ImGui::CloseCurrentPopup();
     }
+    ImGui::PopStyleColor(2);
 
-    ImGui::PopStyleVar(2);
-    ImGui::PopStyleColor();
+    ImGui::EndPopup();
+  }
+
+  ImGui::PopStyleVar(2);
+  ImGui::PopStyleColor();
 }

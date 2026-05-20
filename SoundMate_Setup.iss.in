@@ -30,6 +30,9 @@ Source: "reset_registry.ps1"; DestDir: "{app}"; Flags: ignoreversion
 ; config 및 기타 필요한 리소스들
 Source: "config\*"; DestDir: "{app}\config"; Flags: ignoreversion recursesubdirs createallsubdirs
 
+; [작업 4] 앨범 placeholder 등 assets
+Source: "build\Release\assets\*"; DestDir: "{app}\assets"; Flags: ignoreversion recursesubdirs createallsubdirs
+
 [Icons]
 Name: "{group}\SoundMate Equalizer"; Filename: "{app}\SoundMate_EQ.exe"
 Name: "{commondesktop}\SoundMate Equalizer"; Filename: "{app}\SoundMate_EQ.exe"; Tasks: desktopicon

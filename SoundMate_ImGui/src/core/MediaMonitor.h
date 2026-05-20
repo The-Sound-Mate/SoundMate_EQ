@@ -8,10 +8,21 @@
 #include <atomic>
 #include <mutex>
 
+#include <vector>
+#include <cstdint>
+
 struct SongInfo {
     std::string title;
     std::string artist;
     bool        isPlaying = false;
+    // [작업 4] WinRT TryGetMediaPropertiesAsync().Thumbnail 에서 추출한
+    // raw image bytes (PNG/JPG). 디코딩은 UI 측에서 WIC로 처리.
+    // 빈 vector면 thumbnail 미제공 → placeholder 표시.
+    std::vector<uint8_t> thumbnailBytes;
+
+    // [UI 개선] 좌측 패널 메타데이터 표시용
+    std::string source;            // 재생 앱 이름 (YouTube, Spotify 등)
+    int         durationSeconds = 0; // 총 재생 시간 (초)
 };
 
 // 곡이 바뀌었을 때 호출될 콜백 타입

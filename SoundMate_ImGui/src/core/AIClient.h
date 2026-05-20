@@ -6,7 +6,7 @@
 #include <vector>
 #include <map>
 #include <functional>
-
+#include <atomic>
 struct EQBands {
     std::vector<float> bands5;   //  5밴드
     std::vector<float> bands10;  // 10밴드
@@ -37,7 +37,8 @@ public:
         const std::string& genre       = "Unknown",
         const std::string& userPref    = "",
         const std::string& systemPref  = "Balanced and clear sound",
-        const std::string& accessToken = ""
+        const std::string& accessToken = "",
+        std::atomic<bool>* abortFlag   = nullptr
     );
 
     // Python normalize_metadata() 대응
@@ -70,7 +71,8 @@ private:
         const std::string& systemPref,
         const std::string& accessToken,
         long*              outHttpCode = nullptr,
-        std::string*       outBody     = nullptr
+        std::string*       outBody     = nullptr,
+        std::atomic<bool>* abortFlag   = nullptr
     );
 
     // JSON 파싱 헬퍼 (nlohmann/json 사용)

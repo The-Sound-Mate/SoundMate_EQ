@@ -223,12 +223,18 @@ if(MSVC)
     )
 endif()
 
-# Copy libcurl runtime DLL next to the GUI exe (SoundMate_EQ depends on it).
-# Without this, launching the GUI shows: "libcurl-x64.dll missing".
+## Copy libcurl runtime DLL next to the GUI exe (SoundMate_EQ depends on it).
 add_custom_command(TARGET SoundMate_EQ POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${THIRD_PARTY}/curl/bin/libcurl-x64.dll"
         "$<TARGET_FILE_DIR:SoundMate_EQ>/libcurl-x64.dll"
+)
+
+# [작업 4] assets 폴더(앨범 placeholder 등) 빌드 산출물 옆으로 복사.
+add_custom_command(TARGET SoundMate_EQ POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${GUI_SRC_DIR}/assets"
+        "$<TARGET_FILE_DIR:SoundMate_EQ>/assets"
 )
 
 # ---------------------------------------------------------------------------
