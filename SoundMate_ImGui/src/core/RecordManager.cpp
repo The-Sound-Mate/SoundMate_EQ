@@ -3,7 +3,10 @@
 #include "../utils/StringUtils.h"
 #include "../ui/LoginWindow.h"   // [Phase 2-A] DPAPI 헬퍼 공유
 #include "SurveyMapping.h"       // [C-2] 라벨 ↔ ID 변환
+#include "AIClient.h"            // [Task 3-A] F5/F10/F15/F31 정적 주파수 테이블 공유
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <curl/curl.h>
 #include <filesystem>
 #include <fstream>
@@ -88,6 +91,47 @@ void RecordManager::EnsureRecordDir() {
 // [DB-Sync] pending/ 폴더 경로 헬퍼. (SaveInteraction과 마이그레이션 모두 사용)
 static std::string PendingDir(const std::string &recordDir) {
   return recordDir + "\\pending";
+}
+
+// [Task 3-A] log-linear 보간 — src(gains, freqs) → tgtFreqs.
+//   master 31 ↔ 5/10/15 변환에 공통 사용. AIClient::UpsampleToAllBands 와
+//   동일한 알고리즘이지만 instance-free 호출용. 양끝은 plateau로 clamp.
+static std::vector<float> SampleLogLinear(const std::vector<float>& srcGains,
+                                           const std::vector<int>& srcFreqs,
+                                           const std::vector<int>& tgtFreqs) {
+  std::vector<float> out;
+  if (srcGains.empty() || srcGains.size() != srcFreqs.size()) return out;
+  std::vector<double> logSrc;
+  logSrc.reserve(srcFreqs.size());
+  for (int f : srcFreqs) logSrc.push_back(std::log10((double)f));
+  out.reserve(tgtFreqs.size());
+  for (int f : tgtFreqs) {
+    double lt = std::log10((double)f);
+    float v;
+    if (lt <= logSrc.front()) v = srcGains.front();
+    else if (lt >= logSrc.back()) v = srcGains.back();
+    else {
+      auto it = std::lower_bound(logSrc.begin(), logSrc.end(), lt);
+      int idx = (int)(it - logSrc.begin());
+      if (idx == 0) idx = 1;
+      double x1 = logSrc[idx-1], x2 = logSrc[idx];
+      double y1 = srcGains[idx-1], y2 = srcGains[idx];
+      double w = (lt - x1) / (x2 - x1);
+      v = (float)(y1 + w * (y2 - y1));
+    }
+    out.push_back((float)(std::round(v * 10.0) / 10.0));
+  }
+  return out;
+}
+
+// [Task 3-A] master31 → 누락된 5/10/15 채우기.
+//   Save 시 호출 — 디스크 캐시는 4종 모두 유지하여 옛 빌드 호환.
+//   메모리 상 EQEntry 가 gains31 만 채워진 경우(신규 master 경로) 자동 보강.
+static void FillMissingBandsFromMaster(EQEntry& e) {
+  if (e.gains31.size() != 31) return; // master 가 없으면 처리 불가 (구 로직 유지)
+  if (e.gains5.empty())  e.gains5  = SampleLogLinear(e.gains31, AIClient::F31, AIClient::F5);
+  if (e.gains10.empty()) e.gains10 = SampleLogLinear(e.gains31, AIClient::F31, AIClient::F10);
+  if (e.gains15.empty()) e.gains15 = SampleLogLinear(e.gains31, AIClient::F31, AIClient::F15);
 }
 
 // [DB-Sync] 곡+source 조합으로 결정적 파일명 — 같은 곡 재등록 시 덮어쓰기.
@@ -398,6 +442,14 @@ bool RecordManager::IsAnonymous() const {
   // m_mutex 잠금 비용 회피 — m_userId 는 SetUserId 1번만 변경,
   // race 시 worst case 도 잠시 잘못된 결과 후 자동 정정.
   return m_userId.empty() || m_userId == "guest";
+}
+
+bool RecordManager::IsGuestMode() const {
+  return m_userId == "guest";
+}
+
+bool RecordManager::IsLoggedIn() const {
+  return !m_userId.empty() && m_userId != "guest";
 }
 
 void RecordManager::MigrateAnonymousData() {
@@ -1120,10 +1172,16 @@ SessionState RecordManager::LoadSessionState() {
 
 // EQ 엔트리 저장 — pending/<...>.json 1파일 즉시 디스크 flush.
 // 강제 종료/BSOD에도 보존. 메모리 큐(unsynced) 의존 제거.
-void RecordManager::SaveInteraction(const EQEntry &entry) {
+void RecordManager::SaveInteraction(const EQEntry &orig) {
   std::lock_guard<std::mutex> lk(m_mutex);
-  if (entry.title.empty())
+  if (orig.title.empty())
     return;
+
+  // [Task 3-A] master31 → 누락된 5/10/15 자동 채우기.
+  //   신규 master 경로에서는 호출자가 gains31 만 채워서 넘김 → 디스크 저장 전
+  //   호환용 5/10/15 downsample 채워야 옛 빌드 / DB 둘 다 깨끗.
+  EQEntry entry = orig;
+  FillMissingBandsFromMaster(entry);
 
   // AI/prompt 소스: 31밴드 모두 0이면 스킵
   if (entry.source == "AI" || entry.source == "prompt") {
@@ -1228,6 +1286,19 @@ EQEntry *RecordManager::GetCachedEQ(const std::string &title,
           e.gains15 = mb["15"].get<std::vector<float>>();
         if (mb.contains("31"))
           e.gains31 = mb["31"].get<std::vector<float>>();
+
+        // [Task 3-A] gains31 누락 시 가용한 가장 큰 밴드에서 메모리 업샘플.
+        //   디스크에는 그대로 두고 (롤백 안전), 런타임에서만 31밴드 master 생성.
+        //   우선순위: 15 > 10 > 5 (정밀도 높은 순).
+        if (e.gains31.empty()) {
+          if (e.gains15.size() == 15)
+            e.gains31 = SampleLogLinear(e.gains15, AIClient::F15, AIClient::F31);
+          else if (e.gains10.size() == 10)
+            e.gains31 = SampleLogLinear(e.gains10, AIClient::F10, AIClient::F31);
+          else if (e.gains5.size() == 5)
+            e.gains31 = SampleLogLinear(e.gains5, AIClient::F5, AIClient::F31);
+        }
+
         m_entryCache[key] = e;
         return &m_entryCache[key];
       }

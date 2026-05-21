@@ -17,7 +17,10 @@ const std::vector<int> AIClient::F31 = {
     200, 250, 315, 400, 500, 630, 800, 1000, 1250, 1600,
     2000, 2500, 3150, 4000, 5000, 6300, 8000, 10000, 12500, 16000, 20000
 };
-const std::vector<int> AIClient::F5  = { 60, 230, 910, 4000, 14000 };
+// [최종 결정] F5 ISO 표준 — F31 의 정확한 5개 부분집합.
+//   60→63, 230→250, 910→1000, 14000→16000 (1/6 옥타브 미만 변경, 청감 무차이).
+//   F31 인덱스 정확 매핑 보장 → 5밴드 슬라이더가 master[5/11/17/23/29] 단일 점 조작.
+const std::vector<int> AIClient::F5  = { 63, 250, 1000, 4000, 16000 };
 const std::vector<int> AIClient::F10 = { 31, 63, 125, 250, 500, 1000, 2000, 4000, 8000, 16000 };
 const std::vector<int> AIClient::F15 = {
     25, 40, 63, 100, 160, 250, 400, 630, 1000,
@@ -193,6 +196,16 @@ EQBands AIClient::GenerateAllBandsEQ(
             }
         }
         result.bands31 = ParseGainsFromResponse(response);
+
+        // [최종 결정] AI hallucination 방어 — ±15dB 절대 한도 + NaN/Inf 차단.
+        //   사용자 자유도 100% 보장 (베이스 cap 폐기), 단 비현실적 출력 차단.
+        //   AI 모델이 가끔 +20/-50/NaN 같은 잡음 반환 시 안전 클램프.
+        for (auto& g : result.bands31) {
+            if (!std::isfinite(g)) g = 0.f;
+            if (g > 15.f)  g = 15.f;
+            if (g < -15.f) g = -15.f;
+        }
+
         result.bands5  = Map31ToTargetBands(result.bands31, F5);
         result.bands10 = Map31ToTargetBands(result.bands31, F10);
         result.bands15 = Map31ToTargetBands(result.bands31, F15);
@@ -290,23 +303,44 @@ double AIClient::CubicSpline::Eval(double xVal) const {
     return a[idx] + b[idx]*dx + c[idx]*dx*dx + d[idx]*dx*dx*dx;
 }
 
+// [Task 3-B] 5↔10↔15↔31 밴드 간 변환은 CubicSpline → log-linear 로 전환.
+//   CubicSpline 의 overshoot/undershoot 가 라운드트립 시 잔여 게인을 만들어
+//   "5→31→15→10→5 사이클 돌리면 0이었던 밴드가 변형" 증상의 원인이었음.
+//   Linear 보간은 overshoot 0 — 정점이 정확히 보존되고, 라운드트립 정확도 ↑.
+//   실제 BiquadPeaking 응답은 부드러운 곡선이라 보간이 직선이어도 청감 동일.
 EQBands AIClient::UpsampleToAllBands(
     const std::vector<float>& currentGains,
     const std::vector<int>&   currentFreqs)
 {
     EQBands result;
+    if (currentGains.empty() || currentGains.size() != currentFreqs.size()) {
+        return result;
+    }
 
-    std::vector<double> logSrc, gainsDbl;
-    for (int   f : currentFreqs) logSrc.push_back(std::log10(f));
-    for (float g : currentGains) gainsDbl.push_back(g);
+    // log10 좌표로 소스 점 변환
+    std::vector<double> logSrc;
+    for (int f : currentFreqs) logSrc.push_back(std::log10((double)f));
 
-    CubicSpline spline;
-    spline.Build(logSrc, gainsDbl);
-
+    // 타깃 freq 에 대해 log-linear 보간 (양끝은 plateau로 clamp)
     auto sample = [&](const std::vector<int>& freqs) {
         std::vector<float> out;
+        out.reserve(freqs.size());
         for (int f : freqs) {
-            double v = spline.Eval(std::log10(f));
+            double lt = std::log10((double)f);
+            float v;
+            if (lt <= logSrc.front()) {
+                v = currentGains.front();
+            } else if (lt >= logSrc.back()) {
+                v = currentGains.back();
+            } else {
+                auto it = std::lower_bound(logSrc.begin(), logSrc.end(), lt);
+                int idx = (int)(it - logSrc.begin());
+                if (idx == 0) idx = 1;
+                double x1 = logSrc[idx - 1], x2 = logSrc[idx];
+                double y1 = currentGains[idx - 1], y2 = currentGains[idx];
+                double w  = (lt - x1) / (x2 - x1);
+                v = (float)(y1 + w * (y2 - y1));
+            }
             out.push_back((float)(std::round(v * 10.0) / 10.0));
         }
         return out;

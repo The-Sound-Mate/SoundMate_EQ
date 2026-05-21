@@ -171,46 +171,68 @@ private:
 };
 
 // ============================================================================
-// Soft + hard output limiter
-// Soft knee: rational approximation from -6 dBFS to ceiling
-// Hard clip:  beyond ±ceiling
+// SamplePeakLimiter — Fast Attack (0.1ms) / Slow Release (100ms), 0ms Latency
+// ----------------------------------------------------------------------------
+// 기존 applyLimiter(waveshaper) 의 hard-clip → 사각파 왜곡 ("깨지는 소리") 문제를
+// 해결하기 위한 정통 동적 리미터. 0dBFS 초과 시에만 짧은 순간 게인을 dynamic하게
+// 눌러서 클립을 방지. EQ 게인 합산이 +10dB 가 되어도 limiter 가 0dBFS 직전에서
+// 부드럽게 흡수하므로 사용자의 EQ 의도(타격감) 보존.
 //
-// Ceiling is 0.9661 (≈ -0.3 dBFS) instead of 1.0 — this preserves headroom for
-// inter-sample peaks (ISP). Lossy codecs (MP3, AAC, Opus) routinely produce
-// reconstructed signals where the digital samples sit below 0 dBFS but the
-// continuous waveform between samples exceeds it. The DAC then reconstructs
-// a true-peak above 0 dBFS and clips. Look-ahead limiting would solve it
-// properly but adds 5–10 ms latency (lip-sync issues for games / video) — a
-// fixed -0.3 dB ceiling kills ~99% of ISP events at zero latency cost.
+// Pipeline:  attack/release envelope → desiredGain = ceiling / max(env, ceiling)
+//   - envState 가 ceiling 이하 → desiredGain = 1.0 (passthrough)
+//   - envState 가 ceiling 초과 → desiredGain < 1.0 (감쇠)
+// Ceiling 0.9661 (-0.3 dBFS) — ISP 헤드룸 보존 (MP3/AAC 등 압축 음원의
+//   inter-sample peak 가 0dBFS 살짝 초과하는 경우 대비).
 // ============================================================================
-inline float applyLimiter(float x) {
-#if SM_LIMITER_HARD_ONLY
-  // Hard ceiling 전용 — soft knee 영역은 패스스루.
-  // ceiling 0.989 (-0.1 dBFS). 평상시 음원은 ceiling에 닿지 않으므로
-  // 완벽한 passthrough가 되며, EQ 과부스트로 0 dBFS 초과 시에만 디지털
-  // 클립을 막는 안전망 역할만 수행. 정규화기 OFF 정책의 짝.
-  const float ceiling = 0.989f;
-  if (x > ceiling)
-    return ceiling;
-  if (x < -ceiling)
-    return -ceiling;
-  return x;
-#else
-  const float ceiling = 0.9661f; // -0.3 dBFS true-peak headroom
-  const float knee = 0.5f;       // -6 dBFS knee start
-  float abs_x = fabsf(x);
-  if (abs_x <= knee)
-    return x;
-  float sign = (x > 0.f) ? 1.f : -1.f;
-  if (abs_x < ceiling) {
-    float excess = abs_x - knee;
-    float range = ceiling - knee;
-    float compressed = knee + excess / (1.f + (excess / range));
-    return sign * compressed;
+class SamplePeakLimiter {
+public:
+  SamplePeakLimiter()
+      : envState(0.f), attackCoef(0.f), releaseCoef(0.f),
+        currentGain(1.f), ceiling(0.9661f) {}
+
+  void initialize(float sampleRate) {
+    // τ = 0.1ms attack → 99% 도달까지 ≈ 0.5ms (킥드럼 트랜지언트 1-2ms 충분히 커버)
+    // τ = 100ms release → 자연스러운 회복, pumping 최소화
+    attackCoef = 1.f - expf(-1.f / (0.0001f * sampleRate));
+    releaseCoef = 1.f - expf(-1.f / (0.100f * sampleRate));
+    envState = 0.f;
+    currentGain = 1.f;
   }
-  return sign * ceiling; // hard ceiling at -0.3 dBFS
-#endif
-}
+
+  // 모든 채널 중 가장 큰 절대값(linked-stereo) 을 받아 이 frame 의 통합 gain 반환.
+  inline float processFrame(float maxAbsThisFrame) {
+    if (maxAbsThisFrame > envState) {
+      envState += (maxAbsThisFrame - envState) * attackCoef;
+    } else {
+      envState += (maxAbsThisFrame - envState) * releaseCoef;
+    }
+    // NaN/Inf 방어 + denormal flush — DSP 영구 사망 차단.
+    if (!std::isfinite(envState)) envState = 0.f;
+    if (envState < 1e-30f) envState = 0.f;
+
+    // ceiling 이하면 max(env, ceiling) = ceiling → gain = 1.0 (passthrough)
+    // ceiling 초과면 max(env, ceiling) = env → gain = ceiling/env < 1.0
+    float denom = (envState > ceiling) ? envState : ceiling;
+    currentGain = ceiling / denom;
+    return currentGain;
+  }
+
+  void reset() {
+    envState = 0.f;
+    currentGain = 1.f;
+  }
+
+  // UI 인디케이터용 — 현재 frame 에서 limiter 가 감쇠 중인지.
+  // currentGain < 0.995 (≈ -0.04dB 미만 감쇠) 이면 active.
+  bool isActive() const { return currentGain < 0.995f; }
+
+private:
+  float envState;
+  float attackCoef;
+  float releaseCoef;
+  float currentGain;
+  float ceiling;
+};
 
 // ============================================================================
 // LoudnessNormalizer — content-aware AGC ("정규화")
@@ -390,6 +412,9 @@ public:
 
     // Initialize the normalizer at the actual sample rate
     normalizer.initialize(rate);
+    // [최종] SamplePeakLimiter — 0dBFS 초과 dynamic 감쇠.
+    samplePeakLimiter.initialize(rate);
+    framesSinceLimiterActive = 0;
 
     InitializeSharedMemory();
 #if SM_NORMALIZER_DEFAULT_ENABLED
@@ -525,10 +550,28 @@ public:
       // Linked-stereo loudness normalization
       float gain = normalizer.processFrame(maxAbs);
 
-      // Final stage: apply gain + peak limiter per channel
+      // [최종] Linked-stereo SamplePeakLimiter.
+      //   normalizer gain 적용 후 peak 가 ceiling 초과 시에만 짧은 순간 감쇠.
+      //   모든 채널 동일 gain 곱 → stereo 이미지 보존.
+      float maxAbsAfterGain = maxAbs * gain;
+      float limitGain = samplePeakLimiter.processFrame(maxAbsAfterGain);
+      float totalGain = gain * limitGain;
       for (unsigned ch = 0; ch < outChannels; ++ch) {
         unsigned idx = f * outChannels + ch;
-        outBuf[idx] = applyLimiter(outBuf[idx] * gain);
+        outBuf[idx] = outBuf[idx] * totalGain;
+      }
+      // [최종] limiter active → SHM 신호 + 200ms decay 카운터.
+      //   200ms 동안 감쇠 없으면 flag=0 → UI 인디케이터 사라짐.
+      if (samplePeakLimiter.isActive()) {
+        framesSinceLimiterActive = 0;
+        if (pSettings)
+          pSettings->limiterActiveFlag.store(1, std::memory_order_relaxed);
+      } else {
+        framesSinceLimiterActive++;
+        if (framesSinceLimiterActive > (uint64_t)(sampleRate * 0.2f)) {
+          if (pSettings)
+            pSettings->limiterActiveFlag.store(0, std::memory_order_relaxed);
+        }
       }
 
       if (maxAbs > peakSinceLog)
@@ -558,6 +601,8 @@ public:
       for (auto &dc : dcBlockers)
         dc.reset();
       // 정규화기는 자체 noise floor 가드가 있어서 별도 reset 불필요
+      // [최종] Limiter 도 reset — envState 가 NaN 감염됐을 수 있음.
+      samplePeakLimiter.reset();
     }
 
 #if SM_NORMALIZER_DEFAULT_ENABLED
@@ -716,6 +761,9 @@ private:
 
   // Loudness normalizer + temp diagnostic logger
   LoudnessNormalizer normalizer;
+  // [최종] Sample peak limiter — 0dBFS dynamic 감쇠 + SHM 신호.
+  SamplePeakLimiter samplePeakLimiter;
+  uint64_t framesSinceLimiterActive = 0;
   HANDLE hDiagLog;
   uint64_t framesSinceLog;
   float peakSinceLog;

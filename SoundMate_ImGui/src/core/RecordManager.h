@@ -37,6 +37,15 @@ public:
   // 익명 시: 로컬 캐시만 동작, API/AI/DB 호출 모두 차단.
   bool IsAnonymous() const;
 
+  // 사용자가 명시적으로 "로그인하지 않고 실행하기" 를 눌러 게스트 모드에
+  // 진입한 경우에만 true. 로그아웃 직후 / 로그인 진행 중 등 "로딩 상태"
+  // (m_userId="") 와 구분 — UI 메시지/EQ 처리 분기에 사용.
+  bool IsGuestMode() const;
+
+  // m_userId 가 실제 UUID(로그인 완료) 일 때만 true.
+  // guest / "" 둘 다 false. 명시적 로그인 상태 확인용.
+  bool IsLoggedIn() const;
+
   // [E-1] 익명 → 정식 회원 전환 시 호출. m_cache 의 모든 곡 EQ + tendency 를
   // 새 user_id 로 DB 에 일괄 마이그레이션. SetUserId 가 익명→실제 전환을
   // 감지하면 자동 호출됨. 충돌 시 DB 의 ON CONFLICT 정책 (마지막 쓰기 우선).

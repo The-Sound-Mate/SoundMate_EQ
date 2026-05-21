@@ -85,7 +85,10 @@ private:
         double Eval(double xVal) const;
     };
 
+public:
     // 31밴드 표준 주파수 (Python f_31 대응)
+    // [Task 3-A] public 으로 노출 — MainWindow / RecordManager 가 master31 ↔
+    //   5/10/15 변환 시 주파수 테이블로 사용.
     static const std::vector<int> F31;
     static const std::vector<int> F5;
     static const std::vector<int> F10;

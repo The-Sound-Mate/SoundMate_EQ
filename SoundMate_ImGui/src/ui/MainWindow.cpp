@@ -440,27 +440,27 @@ bool MainWindow::IsControllerRunning() const {
 }
 
 // ── EQ 적용 ──────────────────────────────────────────────────────────────────
+// [최종] 엔진은 항상 master31 으로 동작. 뷰(5/10/15)는 UI 슬라이더만 결정.
+//   사용자가 5밴드 모드에서 1점만 만져도, 엔진엔 31 biquad 전송 — master 의
+//   비-alias 디테일도 들림 (SSOT 일관성).
 void MainWindow::ApplyEQNoSave() {
   if (!m_eqCtrl)
     return;
-  // 토글 OFF 일 때는 단순히 호출 생략이 아니라 명시적 Bypass 작성.
-  // (호출 생략하면 config.txt 에 마지막 EQ 가 그대로 남아 APO 가 계속 적용)
   if (!m_isEqEnabled) {
     m_eqCtrl->ApplyBypass();
     return;
   }
+  EnsureMaster31();
   std::string dev = GetSelectedDeviceGuid();
-  // [PR-S1 wiring] SHM write 실패 시 1회 회복 시도. 구버전 Controller가
-  // 살아있는 경우 강제 재기동 후 재적용. 그래도 실패하면 빨간 에러.
   static std::atomic<bool> s_healthRecoveryInFlight{false};
-  if (!m_eqCtrl->ApplyEQ(m_eqGains, m_currentBands, dev)) {
+  if (!m_eqCtrl->ApplyEQ(m_eqGains31Master, AIClient::F31, dev)) {
     bool expected = false;
     if (s_healthRecoveryInFlight.compare_exchange_strong(expected, true)) {
       SetStatus(u8"EQ 엔진 응답 없음 — 재기동 중...", Theme::COLOR_YELLOW);
       EnsureControllerHealthy();
       std::thread([this, dev]() {
         std::this_thread::sleep_for(std::chrono::seconds(1));
-        if (!m_eqCtrl->ApplyEQ(m_eqGains, m_currentBands, dev)) {
+        if (!m_eqCtrl->ApplyEQ(m_eqGains31Master, AIClient::F31, dev)) {
           SetStatus(u8"EQ 설정 엔진 응답 없음. 프로그램을 재시작해주세요.",
                     Theme::COLOR_RED);
         }
@@ -649,9 +649,12 @@ void MainWindow::TriggerAIGeneration() {
       }
 
       // [v12.0] 스레드 안전하게 EQ 업데이트 예약
+      // [Task 3-A] master31 도 같이 전달 — AI 는 항상 31밴드 원본 생성하므로
+      //   precision 손실 0. 사용자가 5밴드 모드라도 master 는 31밴드 정밀도 유지.
       {
         std::lock_guard<std::mutex> lk(m_eqUpdateMutex);
         m_queuedGains = *target;
+        m_queuedMaster31 = result.bands31;
         m_pendingEQUpdate = true;
       }
       m_eqOrigin = prompt.empty() ? EqOrigin::AI : EqOrigin::Prompt;
@@ -676,28 +679,80 @@ void MainWindow::TriggerAIGeneration() {
   });
 }
 
+// [최종] master31 가 비어있으면 m_eqGains 로부터 log-linear 보간 → 31밴드 채움.
+void MainWindow::EnsureMaster31() {
+  if (!m_eqGains31Master.empty()) return;
+  if (!m_ai || m_eqGains.empty() || m_currentBands.empty()) {
+    m_eqGains31Master.assign(31, 0.f);
+    return;
+  }
+  auto up = m_ai->UpsampleToAllBands(m_eqGains, m_currentBands);
+  m_eqGains31Master = up.bands31;
+}
+
+// [최종] 현재 뷰의 sliderIdx → master31 의 F31 인덱스 매핑.
+//   F5/F10/F15 모두 F31 의 정확한 부분집합이므로 단순 정수 매핑 가능.
+//   ISO 표준 F5={63,250,1000,4000,16000}, F10={31,63,125,250,500,1000,2000,4000,8000,16000},
+//   F15={25,40,63,100,160,250,400,630,1000,1600,2500,4000,6300,10000,16000} 모두 F31 부분집합.
+int MainWindow::MapViewIndexToMaster31(int viewIdx) const {
+  if (viewIdx < 0 || viewIdx >= (int)m_currentBands.size()) return -1;
+  const int freq = m_currentBands[viewIdx];
+  const auto& F31 = AIClient::F31;
+  // F31 에서 정확히 일치하는 인덱스 검색
+  for (size_t i = 0; i < F31.size(); ++i) {
+    if (F31[i] == freq) return (int)i;
+  }
+  // F31 부분집합 보장이 깨졌을 경우 — 가장 가까운 점 fallback (안전망)
+  int best = -1;
+  double bestDist = 1e9;
+  double logF = std::log10((double)freq);
+  for (size_t i = 0; i < F31.size(); ++i) {
+    double d = std::fabs(std::log10((double)F31[i]) - logF);
+    if (d < bestDist) { bestDist = d; best = (int)i; }
+  }
+  return best;
+}
+
+// [최종] master31 → 현재 뷰의 슬라이더 alias 위치에서 readout → m_eqGains 갱신.
+//   타 인덱스(master 의 디테일)는 m_eqGains 에 안 보이지만 master 에 보존됨.
+void MainWindow::SyncCurrentFromMaster() {
+  if (m_eqGains31Master.size() != 31 || m_currentBands.empty()) return;
+  if (m_eqGains.size() != m_currentBands.size()) {
+    m_eqGains.assign(m_currentBands.size(), 0.f);
+  }
+  for (size_t v = 0; v < m_currentBands.size(); ++v) {
+    int m = MapViewIndexToMaster31((int)v);
+    if (m >= 0 && m < (int)m_eqGains31Master.size()) {
+      m_eqGains[v] = m_eqGains31Master[m];
+    }
+  }
+}
+
+// [최종] master31 의 non-alias 인덱스(현재 뷰에 안 보이는 점)에 |값|>0.1dB 가
+//   있으면 true. UI 상단에 "31-band detail active" 인디케이터 표시.
+bool MainWindow::HasHiddenMasterDetail() const {
+  if (m_eqGains31Master.size() != 31) return false;
+  // 현재 뷰의 alias 인덱스 set 계산
+  std::vector<bool> isAlias(31, false);
+  for (size_t v = 0; v < m_currentBands.size(); ++v) {
+    int m = MapViewIndexToMaster31((int)v);
+    if (m >= 0 && m < 31) isAlias[m] = true;
+  }
+  for (size_t i = 0; i < 31; ++i) {
+    if (isAlias[i]) continue;
+    if (std::fabs(m_eqGains31Master[i]) > 0.1f) return true;
+  }
+  return false;
+}
+
 void MainWindow::ChangeBands(int bandIdx) {
   if (bandIdx < 0 || bandIdx >= 4)
     return;
   m_selectedBandSet = bandIdx;
-  // 현재 게인을 보간해서 새 밴드로 이식
-  if (m_ai && !m_eqGains.empty()) {
-    auto up = m_ai->UpsampleToAllBands(m_eqGains, m_currentBands);
-    std::vector<float> *newGains = nullptr;
-    if (bandIdx == 0)
-      newGains = &up.bands5;
-    else if (bandIdx == 1)
-      newGains = &up.bands10;
-    else if (bandIdx == 2)
-      newGains = &up.bands15;
-    else
-      newGains = &up.bands31;
-    SetupEQBands(ALL_BANDS[bandIdx]);
-    if (newGains)
-      m_eqGains = *newGains;
-  } else {
-    SetupEQBands(ALL_BANDS[bandIdx]);
-  }
+  // [최종] master31 가 SSOT. 새 뷰는 alias readout 으로 m_eqGains 채움.
+  EnsureMaster31();
+  SetupEQBands(ALL_BANDS[bandIdx]);
+  SyncCurrentFromMaster();
   ApplyEQNoSave();
 }
 
@@ -785,10 +840,26 @@ void MainWindow::Render() {
     float t = m_transitionProgress;
     // ease-in-out
     t = t * t * (3.0f - 2.0f * t);
-    for (size_t i = 0; i < m_eqGains.size(); i++) {
-      m_eqGains[i] = m_transitionStart[i] +
-                     (m_transitionTarget[i] - m_transitionStart[i]) * t;
+
+    // [최종] master31 도 같이 보간 — 청각/시각 동기. ApplyEQNoSave 가 매번 master 송출.
+    if (m_masterTransitionStart.size() == 31 &&
+        m_masterTransitionTarget.size() == 31 &&
+        m_eqGains31Master.size() == 31) {
+      for (size_t i = 0; i < 31; ++i) {
+        m_eqGains31Master[i] =
+            m_masterTransitionStart[i] +
+            (m_masterTransitionTarget[i] - m_masterTransitionStart[i]) * t;
+      }
+      // m_eqGains 는 master 의 alias readout 으로 동기화 (슬라이더 시각도 따라옴)
+      SyncCurrentFromMaster();
+    } else {
+      // master 미설정 fallback — legacy 직접 보간
+      for (size_t i = 0; i < m_eqGains.size(); i++) {
+        m_eqGains[i] = m_transitionStart[i] +
+                       (m_transitionTarget[i] - m_transitionStart[i]) * t;
+      }
     }
+
     m_transitionApplyTimer += m_deltaTime;
     if (m_transitionApplyTimer >= kTransitionApplyInterval) {
       ApplyEQNoSave();
@@ -811,9 +882,12 @@ void MainWindow::Render() {
   // ── 예약된 EQ 업데이트 처리 (메인 스레드 안전) ──
   if (m_pendingEQUpdate.exchange(false)) {
     std::vector<float> target;
+    std::vector<float> master31;
     {
       std::lock_guard<std::mutex> lk(m_eqUpdateMutex);
       target = m_queuedGains;
+      master31 = m_queuedMaster31;
+      m_queuedMaster31.clear();
     }
     if (target.size() == m_eqGains.size()) {
       SmoothTransition(target);
@@ -829,6 +903,20 @@ void MainWindow::Render() {
         resized[i] = target[lo] * (1.0f - frac) + target[hi] * frac;
       }
       SmoothTransition(resized);
+    }
+
+    // [최종] master31 도 transition 으로 동기 보간 — 시각/청각 sync.
+    //   source 가 31밴드면 그대로 target, 아니면 현재 m_eqGains 에서 upsample.
+    EnsureMaster31();
+    m_masterTransitionStart = m_eqGains31Master;
+    if (master31.size() == 31) {
+      m_masterTransitionTarget = master31;
+    } else if (!target.empty() && m_ai) {
+      // target(현재 뷰 size) → 31밴드 upsample
+      auto up = m_ai->UpsampleToAllBands(target, m_currentBands);
+      m_masterTransitionTarget = up.bands31;
+    } else {
+      m_masterTransitionTarget = m_eqGains31Master; // no-op transition
     }
   }
 
@@ -890,9 +978,18 @@ void MainWindow::Render() {
             return;
         }
 
-        // [E-1] 익명 모드: 외부 API (iTunes) 호출도 차단.
-        // 로컬 캐시에 같은 키 있으면 적용, 없으면 무처리.
+        // [E-1] 익명/로딩 상태 분기.
+        //   - 로딩 (m_userId="") : 로그아웃 직후 / 로그인 진행 중 → 메시지 X,
+        //                          EQ 변경 X 로 조용히 대기. 로그인 완료 후
+        //                          다음 곡 변경 때부터 정상 처리.
+        //   - 게스트 (m_userId="guest") : 명시적 비로그인 모드 →
+        //                                 로컬 캐시 적용 + 안내 메시지.
         if (g_recordManager.IsAnonymous()) {
+          if (!g_recordManager.IsGuestMode()) {
+            // 로딩 상태 — 아무것도 안 함. status bar 도 건드리지 않음.
+            return;
+          }
+          // 진짜 게스트 모드 — 외부 API/AI 차단, 로컬 캐시만 사용.
           EQEntry *cached = g_recordManager.GetCachedEQ(title, artist);
           if (cached && mode != EqMode::Off) {
             std::vector<float> *target = nullptr;
@@ -907,6 +1004,7 @@ void MainWindow::Render() {
             if (target) {
               std::lock_guard<std::mutex> lk(m_eqUpdateMutex);
               m_queuedGains = *target;
+              m_queuedMaster31 = cached->gains31; // [Task 3-A] master 정밀도 보존
               m_pendingEQUpdate = true;
               m_eqOrigin = EqOrigin::Cache;
               SetStatus(u8"로컬 캐시 적용 (익명 모드)", Theme::COLOR_GREEN);
@@ -970,17 +1068,31 @@ void MainWindow::Render() {
                   blended[i] = (blended[i] + baseline[i]) / 2.0f;
                 std::lock_guard<std::mutex> lk(m_eqUpdateMutex);
                 m_queuedGains = blended;
+                // [Task 3-A] blend 시엔 31밴드 baseline 도 함께 blend 가능하면 master 갱신.
+                //   baseline 31밴드 버전이 없으면 master 는 비워두고 pending 측에서 재구성.
+                auto baseline31 = g_recordManager.GetGlobalGenreAverage(
+                    m_currentGenre, 31);
+                if (baseline31.size() == 31 && cached->gains31.size() == 31) {
+                  std::vector<float> blendedMaster = cached->gains31;
+                  for (size_t i = 0; i < 31; ++i)
+                    blendedMaster[i] = (blendedMaster[i] + baseline31[i]) / 2.0f;
+                  m_queuedMaster31 = blendedMaster;
+                } else {
+                  m_queuedMaster31.clear();
+                }
                 m_pendingEQUpdate = true;
                 m_eqOrigin = EqOrigin::Cache;
               } else {
                 std::lock_guard<std::mutex> lk(m_eqUpdateMutex);
                 m_queuedGains = *target;
+                m_queuedMaster31 = cached->gains31;
                 m_pendingEQUpdate = true;
                 m_eqOrigin = EqOrigin::Cache;
               }
             } else {
               std::lock_guard<std::mutex> lk(m_eqUpdateMutex);
               m_queuedGains = *target;
+              m_queuedMaster31 = cached->gains31;
               m_pendingEQUpdate = true;
               m_eqOrigin = EqOrigin::Cache;
             }
@@ -1743,6 +1855,8 @@ void MainWindow::RenderEQPanel() {
   float h = ImGui::GetContentRegionAvail().y;
   Theme::DrawPanel(dl, pos, {pos.x + w, pos.y + h});
 
+  // (31-band detail active 인디케이터 출력 안 함)
+
   ImGui::SetCursorScreenPos({pos.x + 12, pos.y + 10});
 
   int n = (int)m_currentBands.size();
@@ -1772,6 +1886,15 @@ void MainWindow::RenderEQPanel() {
     if (changed) {
       m_eqOrigin = EqOrigin::Manual;
       m_hasManualChanges = true;
+
+      // [최종] 타 밴드 불간섭 — master31 의 alias 인덱스 단 1점만 변경.
+      //   인접 슬라이더, 비-alias 디테일 모두 보존.
+      EnsureMaster31();
+      int m = MapViewIndexToMaster31(i);
+      if (m >= 0 && m < (int)m_eqGains31Master.size()) {
+        m_eqGains31Master[m] = m_eqGains[i];
+      }
+
       float now = (float)ImGui::GetTime();
       if (now - m_lastApplyTime > 0.05f) {
         ApplyEQNoSave();
@@ -1780,21 +1903,15 @@ void MainWindow::RenderEQPanel() {
     }
     if (ImGui::IsItemDeactivatedAfterEdit()) {
       // [4-A] DB key = canonical (iTunes 매칭 시) 또는 원본 (폴백)
-      // canonical 은 async 스레드가 쓰므로 snapshot 으로 안전하게 복사.
       CanonicalSnapshot canon = SnapshotCanonical();
       EQEntry entry;
       entry.title = canon.title.empty() ? m_currentTitle : canon.title;
       entry.artist = canon.artist.empty() ? m_currentArtist : canon.artist;
       entry.source = "manual";
       entry.deviceName = GetSelectedDeviceGuid();
-      if (m_currentBands.size() == 5)
-        entry.gains5 = m_eqGains;
-      else if (m_currentBands.size() == 10)
-        entry.gains10 = m_eqGains;
-      else if (m_currentBands.size() == 15)
-        entry.gains15 = m_eqGains;
-      else
-        entry.gains31 = m_eqGains;
+      // [최종] master31 을 SSOT 로 저장. SaveInteraction 내부에서 5/10/15 downsample 자동 채움.
+      EnsureMaster31();
+      entry.gains31 = m_eqGains31Master;
       g_recordManager.SaveInteraction(entry);
     }
     ImGui::PopStyleColor(3);
@@ -1927,27 +2044,19 @@ void MainWindow::RenderBottomBar() {
     EQEntry *cached =
         g_recordManager.GetCachedEQ(m_currentTitle, m_currentArtist);
     bool restored = false;
-    if (cached) {
-      std::vector<float> *target = nullptr;
-      if (m_currentBands.size() == 5 && !cached->gains5.empty())
-        target = &cached->gains5;
-      else if (m_currentBands.size() == 10 && !cached->gains10.empty())
-        target = &cached->gains10;
-      else if (m_currentBands.size() == 15 && !cached->gains15.empty())
-        target = &cached->gains15;
-      else if (!cached->gains31.empty())
-        target = &cached->gains31;
-
-      if (target) {
-        m_eqGains = *target;
-        ApplyEQNoSave();
-        SetStatus("Restored to AI Original.", Theme::TEXT_GRAY);
-        restored = true;
-      }
+    if (cached && cached->gains31.size() == 31) {
+      // [최종] AI 원본 = 31밴드. master31 에 직접 복원 + 현재 뷰 alias readout.
+      m_eqGains31Master = cached->gains31;
+      SyncCurrentFromMaster();
+      ApplyEQNoSave();
+      SetStatus("Restored to AI Original.", Theme::TEXT_GRAY);
+      restored = true;
     }
 
     if (!restored) {
-      m_eqGains.assign(m_eqGains.size(), 0.0f);
+      // [최종] Reset to Flat = 전체 31밴드 master 0으로. 진정한 Flat.
+      m_eqGains31Master.assign(31, 0.f);
+      SyncCurrentFromMaster();
       ApplyEQNoSave();
       SetStatus("EQ Reset to Flat.", Theme::TEXT_GRAY);
     }
@@ -1998,10 +2107,12 @@ void MainWindow::RenderBottomBar() {
 
 // ── 상태 바 ──────────────────────────────────────────────────────────────────
 void MainWindow::RenderStatusBar() {
-  if (m_aiProcessing)
+  if (m_aiProcessing) {
     ImGui::TextColored(Theme::ACCENT_COLOR, "⚡ AI Analyzing...");
-  else
+  } else {
     ImGui::TextColored(m_statusColor, "%s", m_statusText.c_str());
+  }
+  // (Limiter active 인디케이터 출력 안 함)
 }
 
 // ── 백업 스캔 ────────────────────────────────────────────────────────────────

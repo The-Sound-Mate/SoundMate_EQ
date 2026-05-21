@@ -309,7 +309,11 @@ void LoginWindow::StartCallbackServer() {
 
 void LoginWindow::OpenBrowser() {
     StartCallbackServer();
-    std::string url = "https://soundmate.kro.kr/login?redirect=http://localhost:8080";
+    // force_login=1: 웹 페이지가 이 쿼리를 보면 Supabase OAuth 호출 시
+    //   queryParams: { prompt: 'login' } (또는 'select_account') 을 부여하여
+    //   브라우저에 살아있는 OAuth 세션 쿠키로 인한 자동 로그인을 우회.
+    // (웹 측 대응 필요 — docs/WEB_TODO_device_limit_oauth.md 참고)
+    std::string url = "https://soundmate.kro.kr/login?redirect=http://localhost:8080&force_login=1";
     ShellExecuteA(nullptr, "open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
     m_waiting   = true;
     m_statusMsg = "브라우저에서 로그인 대기 중...";

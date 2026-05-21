@@ -250,6 +250,19 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
   // LoginWindow 자체를 띄우지 않고 즉시 메인 화면으로. 토큰 만료 / 복호화
   // 실패 / 파일 없음이면 LoginWindow.Open() 으로 흐름 유지 (TryAutoLogin 이
   // v1→v2 마이그레이션 + "세션 만료" 메시지 처리 담당).
+  // [Loading-State-Fix] 미디어 모니터를 로그인 완료 후에만 켠다.
+  //   이전엔 LoginWindow 가 떠있는 동안에도 monitor 가 돌면서 곡 변경 이벤트가
+  //   들어와 → MainWindow 의 3초 디바운스가 m_userId="" 상태로 실행 → 잘못된
+  //   "익명 모드" 메시지가 status bar 에 박혀 로그인 후에도 잔존하는 문제 발생.
+  //   로그인이 완료된 순간 (auto-login 성공 또는 manual login 콜백) 에만 시작.
+  std::atomic<bool> monitorStarted{false};
+  auto startMonitorOnce = [&]() {
+    bool expected = false;
+    if (!monitorStarted.compare_exchange_strong(expected, true)) return;
+    monitor.Start(
+        [&mainWin](const SongInfo &song) { mainWin.OnSongChanged(song); });
+  };
+
   if (!g_recordManager.GetUserIdFromToken().empty()) {
     loggedIn = true; // m_userId 는 GetUserIdFromToken 내부에서 설정됨
     refreshProfileAsync();
@@ -263,6 +276,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
           refreshProfileAsync();
           registerDeviceAsync();
           startPendingSyncAsync();
+          startMonitorOnce(); // 로그인 직후 미디어 모니터 시작
         });
   }
 
@@ -272,6 +286,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
   // 로그아웃 콜백과 동일 흐름을 재사용하되 토큰 파일은 삭제하지 않음
   // (사용자 의도 로그아웃과 구분).
   mainWin.SetOnForcedLogoutCallback([&]() {
+    // [Hotfix] 토큰 파일도 삭제. 안 그러면 LoginWindow.Open → TryAutoLogin 이
+    //   여전히 존재하는 토큰으로 즉시 재로그인 → 10초 내 또 force_logout 감지 →
+    //   무한 루프. 사용자 입장에선 "로그인 창이 잠깐 떴다가 사라지고 그대로 쓸 수
+    //   있음" 으로 인식됨. 강제 로그아웃은 서버측 신뢰 종료이므로 토큰도 무효화.
+    std::remove(LoginWindow::GetTokenFilePath().c_str());
     g_recordManager.SignOut();
     AppSettings s = LoadSettings();
     s.eqMode = EqMode::Off;
@@ -285,6 +304,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
           loggedIn = true;
           refreshProfileAsync();
           registerDeviceAsync();
+          startMonitorOnce(); // forced-logout 재로그인 후에도 모니터 시작
         });
   });
 
@@ -300,19 +320,24 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     s.globalAverage = false;
     SaveSettings(s);
     loggedIn = false;
-    loginWin.Open(
-        [&](const std::string &uid, const std::string &email, bool isNew) {
-          g_recordManager.SetUserId(uid);
-          loggedIn = true;
-          refreshProfileAsync();
-          registerDeviceAsync();
-        });
+
+    // [Logout-Restart] 로그아웃 후 자동 재실행.
+    //   동일 프로세스에서 LoginWindow를 다시 띄우는 대신, 자기 자신을 새로
+    //   spawn 한 뒤 메인 루프를 종료시킴. 트레이/콜백서버/오디오 그래프 등
+    //   long-lived 리소스가 깨끗하게 재초기화돼 stale state로 인한 버그를 차단.
+    //   새 프로세스는 토큰 파일이 없으므로 LoginWindow 가 자연스럽게 뜸.
+    wchar_t exePath[MAX_PATH] = {};
+    if (GetModuleFileNameW(NULL, exePath, MAX_PATH) > 0) {
+      ShellExecuteW(NULL, L"open", exePath, NULL, NULL, SW_SHOWNORMAL);
+    }
+    PostQuitMessage(0); // 메인 루프 → cleanup: 라벨로 정상 종료
   });
   g_app = &mainWin;
 
   // ── 미디어 모니터 시작 ──
-  monitor.Start(
-      [&mainWin](const SongInfo &song) { mainWin.OnSongChanged(song); });
+  // auto-login 으로 이미 로그인된 상태면 즉시 시작.
+  // 그렇지 않으면 LoginWindow 의 m_onSuccess 콜백이 startMonitorOnce() 호출.
+  if (loggedIn) startMonitorOnce();
 
   // ── 메인 루프 ──
   MSG msg = {};

@@ -1,5 +1,6 @@
 // src/core/EQController.cpp
 #include "EQController.h"
+#include "../../../engine/SoundMate_APO/include/SoundMate_Shared.h"
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
@@ -111,13 +112,11 @@ bool EQController::WriteEQFile(const std::string &filePath,
   }
 }
 
-// Python calculate_q 와 동일
-float EQController::CalculateQ(int numBands) {
-  if (numBands <= 5)
-    return 0.667f;
-  if (numBands <= 10)
-    return 1.414f;
-  return 2.87f;
+// [최종 결정] 31밴드 SSOT 정책 — 엔진은 항상 31밴드.
+//   1/3 옥타브 표준 Q = 4.32. 인접 간섭 최소, 베이스 단단.
+//   클립 방지는 DLL 내부 SamplePeakLimiter 가 담당 (UI Preamp 꼼수 없음).
+float EQController::CalculateQ(int /*numBands*/) {
+  return 4.32f;
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -133,8 +132,10 @@ bool EQController::ApplyEQ(const std::vector<float> &gains,
     return false;
   float q = CalculateQ((int)freqs.size());
 
+  // [최종 결정] Preamp 0.0 dB 고정. UI 단 자동 감쇠 금지 — DLL 내부
+  //   SamplePeakLimiter 가 0dBFS 초과 시점만 dynamic하게 처리.
   std::ostringstream oss;
-  oss << "Preamp: 0.0 dB\n"; // 프리앰프 기본값
+  oss << "Preamp: 0.0 dB\n";
 
   // 엔진이 기대하는 형식으로 기록: Filter: [ID] [Freq] [Gain] [Q]
   for (size_t i = 0; i < freqs.size(); ++i) {
@@ -190,6 +191,29 @@ bool EQController::ApplyFlatEQ(const std::vector<int> &freqs,
                                const std::string &deviceName) {
   std::vector<float> flat(freqs.size(), 0.0f);
   return ApplyEQ(flat, freqs, deviceName);
+}
+
+// [최종] SHM read-only 매핑 — APO DLL/Controller 가 이미 만든 SHM 을 open만 함.
+//   매핑 실패 (Controller 미실행, 권한 부족 등) 시 false. 안전 default.
+bool EQController::EnsureShmMapped() {
+  if (m_shmView) return true;
+  HANDLE h = OpenFileMappingW(FILE_MAP_READ, FALSE, SOUNDMATE_SHM_NAME);
+  if (!h) return false;
+  void* view = MapViewOfFile(h, FILE_MAP_READ, 0, 0, sizeof(SoundMateSettings));
+  if (!view) {
+    CloseHandle(h);
+    return false;
+  }
+  m_shmHandle = h;
+  m_shmView   = view;
+  return true;
+}
+
+bool EQController::IsLimiterActive() {
+  if (!EnsureShmMapped()) return false;
+  auto* settings = static_cast<SoundMateSettings*>(m_shmView);
+  if (settings->magic != SOUNDMATE_MAGIC) return false;
+  return settings->limiterActiveFlag.load(std::memory_order_relaxed) != 0;
 }
 
 // ──────────────────────────────────────────────────────────────────────────

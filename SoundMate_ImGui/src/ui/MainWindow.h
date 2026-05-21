@@ -58,6 +58,21 @@ private:
   void ChangeBands(int bandCount); // Python의 change_bands()
   void ApplyEQToSystem();          // Python의 apply_eq_to_system()
   void ApplyEQNoSave();
+
+  // [최종] master31 가 비어있으면 m_eqGains 로부터 보간하여 초기화. 이미 있으면 no-op.
+  void EnsureMaster31();
+
+  // [최종] master31 → m_currentBands(F5/F10/F15/F31) 점에서 alias readout → m_eqGains.
+  //   F5/F10/F15 모두 F31 의 정확한 부분집합이므로 단순 인덱스 매핑.
+  void SyncCurrentFromMaster();
+
+  // [최종] 현재 뷰의 sliderIdx 가 master31 의 어느 인덱스에 매핑되는지 반환.
+  //   F5/F10/F15 모두 F31 부분집합 — 정확한 1:1 매핑 보장.
+  int  MapViewIndexToMaster31(int viewIdx) const;
+
+  // [최종] 31밴드 master 의 non-alias(현재 뷰에 안 보이는) 인덱스에 |값|>0.1dB
+  //   이 하나라도 있으면 true. UI 디테일 인디케이터 표시 조건.
+  bool HasHiddenMasterDetail() const;
   void SmoothTransition(
       const std::vector<float> &targetGains); // Python의 smooth_transition()
   void UpdateEQVisualizer(const std::vector<float> &gains);
@@ -84,9 +99,19 @@ private:
   MediaMonitor *m_monitor = nullptr;
 
   // EQ 상태 (Python의 eq_sliders, bands 등)
-  std::vector<float> m_eqGains;
-  std::vector<int> m_currentBands;
-  int m_selectedBandSet = 0; // 0=5밴드, 1=10밴드, ...
+  std::vector<float> m_eqGains;       // 현재 표시 중인 밴드의 게인 (UI slider 값)
+  std::vector<int> m_currentBands;    // 현재 표시 중인 밴드 주파수
+  int m_selectedBandSet = 0;          // 0=5밴드, 1=10밴드, 2=15밴드, 3=31밴드
+
+  // [최종 결정] 31밴드 master (SSOT — Single Source of Truth).
+  //   모든 EQ 데이터의 진실 공급원. 5/10/15 밴드 뷰는 master 의 5/10/15 점 alias.
+  //   엔진은 항상 31 biquad 송출 (뷰 무관). 5밴드 슬라이더 조작은 master 의
+  //   매핑된 F31 인덱스 단 1점만 변경 — 타 밴드 불간섭.
+  std::vector<float> m_eqGains31Master;
+
+  // [최종] master31 smooth transition — AI/cache 결과 적용 시 청각/시각 동기 페이드.
+  std::vector<float> m_masterTransitionStart;
+  std::vector<float> m_masterTransitionTarget;
 
   static const std::vector<int> BANDS_5;
   static const std::vector<int> BANDS_10;
@@ -212,9 +237,12 @@ public:
 
 private:
   // [PR-A] 세션 도중 force_logout / is_active 폴링.
-  // m_profileRefreshTimer 와 같은 60s 주기.
+  // [Hotfix] 60초 → 10초로 단축. 웹 대시보드에서 강제 로그아웃 시
+  //   데스크톱이 인지하기까지 최대 60초 대기는 사용자 경험상 "안 됨" 으로 인식.
+  //   10초면 서버 부담 거의 없으면서 (사용자 1명당 6 req/min) 체감 즉시성 확보.
+  //   서버 RPC는 가벼운 단일 row 조회 + 조건부 UPDATE.
   float m_deviceCheckTimer = 999.f; // 첫 프레임 즉시 검사
-  static constexpr float kDeviceCheckInterval = 60.0f;
+  static constexpr float kDeviceCheckInterval = 10.0f;
   std::atomic<bool> m_forceLogoutTriggered{false};
   std::function<void()>
       m_onForcedLogout; // main.cpp가 SignOut + LoginWindow 띄움
@@ -306,6 +334,10 @@ private:
   // AI/Cache 처리 상태
   std::atomic<bool> m_pendingEQUpdate{false};
   std::vector<float> m_queuedGains;
+  // [Task 3-A] AI/cache 결과의 31밴드 master EQ. m_queuedGains 와 함께 큐잉.
+  //   비어 있으면 pending 처리 시 m_eqGains 에서 재계산 (precision loss 가능).
+  //   채워져 있으면 master 를 그대로 사용 (정밀도 손실 0).
+  std::vector<float> m_queuedMaster31;
   std::mutex m_eqUpdateMutex;
 
   std::atomic<bool> m_aiProcessing{false};

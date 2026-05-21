@@ -41,13 +41,20 @@ public:
     // 현재 설정된 파일 경로 반환
     std::string GetConfigFilePath() const { return m_targetFilePath; }
 
+    // [최종] DLL 의 SamplePeakLimiter 가 현재 감쇠 중인지 SHM 에서 읽음.
+    //   UI 가 100ms 주기로 polling — 활성 시 "🔵 Limiter active" 표시.
+    //   SHM 매핑 실패 / Controller 미실행 시 false (안전 default).
+    bool IsLimiterActive();
+
 private:
     // HKLM\SOFTWARE\SoundMateAPO 의 InstallPath/ConfigPath 탐색 (없으면 폴백)
     std::string GetRealConfigDir();
     std::string GetRealInstallPath();
     std::string GetOfficialConfigDir();
 
-    // 밴드 수에 맞는 Q값 계산 (Python의 calculate_q)
+    // 밴드 수에 맞는 Q값 계산.
+    // [최종 결정: 31밴드 SSOT 정책] 엔진은 항상 31밴드로 동작하므로 단일 Q 반환.
+    //   4.32 = ISO 1/3 옥타브 표준. 인접 밴드 간섭 최소 + 베이스 단단.
     float CalculateQ(int numBands);
 
     // ai_eq_config.txt 를 특정 디렉토리에 기록
@@ -57,4 +64,9 @@ private:
     std::string m_officialFilePath;    // 정식 APO 설치 경로의 ai_eq_config.txt
     bool        m_isRestored = false;
     bool        m_initialized = false;
+
+    // [최종] SHM read-only 매핑 — limiterActiveFlag polling 전용.
+    void*       m_shmHandle = nullptr;  // HANDLE; void* 로 두어 windows.h 의존 줄임
+    void*       m_shmView   = nullptr;  // SoundMateSettings*
+    bool        EnsureShmMapped();
 };

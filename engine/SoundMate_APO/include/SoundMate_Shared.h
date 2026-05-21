@@ -47,7 +47,11 @@ struct SoundMateSettings {
     BandConfig              bands[SOUNDMATE_MAX_BANDS];
     std::atomic<uint64_t>   updateCounter;     // Controller 가 batch 끝에 증가
     std::atomic<uint32_t>   writeInProgress;   // 1 while writing, 0 = safe
-    uint32_t                _reserved;
+    // [최종] DLL → UI 단방향 신호. APO 의 SamplePeakLimiter 가 현재 frame 에서
+    //   감쇠 중이면 1, 200ms 이상 감쇠 없으면 0. UI 가 polling 으로 읽어
+    //   "🔵 Limiter active" 인디케이터 표시. 이전 _reserved 자리를 재활용
+    //   (struct 크기/정렬 동일 — ABI 호환).
+    std::atomic<uint32_t>   limiterActiveFlag;
 };
 
 // std::atomic 의 layout 안정성 — x64 에서 std::atomic<uint64_t> 는 정확히 8바이트,
