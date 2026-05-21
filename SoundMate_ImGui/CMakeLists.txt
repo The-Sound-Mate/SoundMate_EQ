@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(SoundMate_EQ VERSION 1.0.0 LANGUAGES CXX)
+project(SoundMate_EQ VERSION 1.0.0 LANGUAGES CXX RC)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -8,6 +8,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 if(WIN32)
     add_definitions(-DUNICODE -D_UNICODE -DWIN32_LEAN_AND_MEAN -DNOMINMAX)
     set(CMAKE_WIN32_EXECUTABLE TRUE)
+    enable_language(RC)
 endif()
 
 # ─── 서드파티 라이브러리 경로 ───
@@ -26,6 +27,17 @@ set(IMGUI_SOURCES
     ${IMGUI_DIR}/backends/imgui_impl_win32.cpp
     ${IMGUI_DIR}/backends/imgui_impl_dx11.cpp
 )
+
+# ─── Windows 리소스 설정 (아이콘 주입) ───
+if(WIN32)
+    set(LOGO_ICO_PATH "${CMAKE_CURRENT_SOURCE_DIR}/assets/logo.ico")
+    string(REPLACE "/" "\\" LOGO_ICO_PATH "${LOGO_ICO_PATH}")
+    configure_file(
+        "${CMAKE_CURRENT_SOURCE_DIR}/resource.rc.in"
+        "${CMAKE_CURRENT_BINARY_DIR}/resource.rc"
+        @ONLY
+    )
+endif()
 
 # ─── 프로젝트 소스 파일 ───
 set(APP_SOURCES
@@ -50,6 +62,7 @@ set(APP_SOURCES
     src/core/GenreManager.cpp
     src/core/GenreManager.h
     src/utils/StringUtils.h
+    "${CMAKE_CURRENT_BINARY_DIR}/resource.rc"
 )
 
 add_executable(SoundMate_EQ

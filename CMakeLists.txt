@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
-project(SoundMate_EQ VERSION 1.0.0 LANGUAGES C CXX)
+project(SoundMate_EQ VERSION 1.0.0 LANGUAGES C CXX RC)
+
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -176,6 +177,18 @@ set(IMGUI_SOURCES
     ${IMGUI_DIR}/backends/imgui_impl_dx11.cpp
 )
 
+# ---------------------------------------------------------------------------
+# Windows 리소스 설정 (아이콘 주입)
+# ---------------------------------------------------------------------------
+if(WIN32)
+    set(LOGO_ICO_PATH "${CMAKE_CURRENT_SOURCE_DIR}/SoundMate_ImGui/assets/logo.ico")
+    configure_file(
+        "${CMAKE_CURRENT_SOURCE_DIR}/SoundMate_ImGui/resource.rc.in"
+        "${CMAKE_CURRENT_BINARY_DIR}/resource.rc"
+        @ONLY
+    )
+endif()
+
 set(GUI_SOURCES
     ${GUI_SRC_DIR}/src/main.cpp
     ${GUI_SRC_DIR}/src/ui/MainWindow.cpp
@@ -189,7 +202,9 @@ set(GUI_SOURCES
     ${GUI_SRC_DIR}/src/core/GenreManager.cpp
     ${GUI_SRC_DIR}/src/core/EngineHealthMonitor.cpp
     ${GUI_SRC_DIR}/src/core/SurveyMapping.cpp
+    "${CMAKE_CURRENT_BINARY_DIR}/resource.rc"
 )
+
 
 add_executable(SoundMate_EQ WIN32
     ${GUI_SOURCES}

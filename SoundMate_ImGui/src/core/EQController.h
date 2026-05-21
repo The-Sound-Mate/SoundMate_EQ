@@ -5,6 +5,10 @@
 #include <vector>
 #include <windows.h>
 
+#ifdef IsRestored
+#undef IsRestored
+#endif
+
 class EQController {
 public:
     EQController();

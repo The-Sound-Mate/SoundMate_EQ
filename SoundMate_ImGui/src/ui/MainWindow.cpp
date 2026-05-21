@@ -1196,14 +1196,14 @@ void MainWindow::Render() {
 
   // [PR-A] 기기 한도 초과 안내 팝업
   RenderDeviceLimitPopup();
+
+  // 종료 확인 팝업
+  RenderExitPopup();
 }
 
 // ── 상단 바 ──────────────────────────────────────────────────────────────────
 void MainWindow::RenderTopBar() {
   float availW = ImGui::GetContentRegionAvail().x;
-
-  // 창 너비가 좁을 때 (850px 미만) 두 줄로 나누어 배치해 겹침 현상을 완벽하게
-  // 방지합니다.
   bool twoLines = availW < 850.0f;
 
   // ── [그룹 1] 사용자 프리셋 드롭다운 & 저장/삭제 ──
@@ -1214,10 +1214,10 @@ void MainWindow::RenderTopBar() {
     else
       presetLabel = m_userPresets[m_selectedPresetIdx].name;
 
-    float comboW = twoLines ? 130.0f : 150.0f;
+    // 프리셋 콤보박스의 가로 너비를 널찍하게 늘려 비어 보이지 않게 합니다.
+    float comboW = twoLines ? 160.0f : 200.0f;
     ImGui::SetNextItemWidth(comboW);
     if (ImGui::BeginCombo("##preset", presetLabel.c_str())) {
-      // 첫 번째 항목: 자동 AI 모드
       bool autoSel = !m_presetModeActive;
       if (ImGui::Selectable(u8"[AI] 자동", autoSel)) {
         m_presetModeActive = false;
@@ -1225,7 +1225,6 @@ void MainWindow::RenderTopBar() {
         SetStatus("Auto AI mode.", Theme::TEXT_WHITE);
       }
       ImGui::Separator();
-      // 저장된 프리셋 목록
       for (int i = 0; i < (int)m_userPresets.size(); i++) {
         bool sel = (m_presetModeActive && m_selectedPresetIdx == i);
         if (ImGui::Selectable(m_userPresets[i].name.c_str(), sel)) {
@@ -1240,7 +1239,7 @@ void MainWindow::RenderTopBar() {
       ImGui::EndCombo();
     }
 
-    ImGui::SameLine(0, 4);
+    ImGui::SameLine(0, 8); // 간격 넓힘 (원래 4)
     ImGui::PushStyleColor(ImGuiCol_Button, m_presetModeActive
                                                ? IM_COL32(60, 180, 80, 255)
                                                : IM_COL32(60, 60, 120, 255));
@@ -1248,12 +1247,10 @@ void MainWindow::RenderTopBar() {
     if (ImGui::Button(u8"저장")) {
       int limit = GetPresetLimit();
       if (limit == 0) {
-        SetStatus(u8"유료 플랜에서만 프리셋을 저장할 수 있습니다.",
-                  Theme::COLOR_RED);
+        SetStatus(u8"유료 플랜에서만 프리셋을 저장할 수 있습니다.", Theme::COLOR_RED);
       } else if (limit != -1 && (int)m_userPresets.size() >= limit) {
         char msg[128];
-        snprintf(msg, sizeof(msg), u8"최대 %d개만 저장 가능한 플랜입니다.",
-                 limit);
+        snprintf(msg, sizeof(msg), u8"최대 %d개만 저장 가능한 플랜입니다.", limit);
         SetStatus(msg, Theme::COLOR_RED);
       } else {
         memset(m_newPresetName, 0, sizeof(m_newPresetName));
@@ -1262,7 +1259,7 @@ void MainWindow::RenderTopBar() {
     }
     ImGui::PopStyleColor(2);
 
-    ImGui::SameLine(0, 4);
+    ImGui::SameLine(0, 8); // 간격 넓힘 (원래 4)
     bool canDelete = m_presetModeActive && m_selectedPresetIdx >= 0;
     ImGui::PushStyleColor(ImGuiCol_Button, canDelete
                                                ? IM_COL32(180, 40, 40, 255)
@@ -1276,71 +1273,69 @@ void MainWindow::RenderTopBar() {
   }
 
   if (twoLines) {
-    ImGui::Spacing(); // 좁을 땐 다음 라인으로
+    ImGui::Spacing();
   } else {
-    ImGui::SameLine(0, 10);
+    ImGui::SameLine(0, 20); // 그룹 간 여백을 널찍하게 20px로 지정
   }
 
-  // ── [그룹 2] 기기 표시 (작업 A: 드롭다운 → 단순 텍스트) ──
-  // 시스템 기본 출력 장치를 자동 추종. APO 미설치 시 빨간 안내 부착.
-  {
-    float rightButtonsW = twoLines ? (90.0f + 70.0f + 90.0f + 40.0f)
-                                   : (110.0f + 80.0f + 100.0f + 30.0f);
-    float devW = ImGui::GetContentRegionAvail().x - rightButtonsW;
-    devW = std::max(devW, 150.0f);
+  // ── [우측 영역] 기기, 설정, 전원, 헬스점 ──
+  // 가로 너비를 크게 설정하여 상단바를 고급스럽게 꽉 채웁니다.
+  float settingsW = twoLines ? 90.0f : 110.0f;  // 원래 70.0f / 80.0f 에서 상향
+  float powerW = twoLines ? 100.0f : 130.0f;    // 원래 80.0f / 100.0f 에서 상향
+  float healthW = SoundMate::Features::kG1_1_HealthIndicator ? 24.0f : 0.0f;
+  float spacing = 16.0f;                        // 원래 8.0f 패딩에서 16.0f로 2배 증가
+  
+  // 우측 버튼들의 총 너비 합산 (X버튼 제거됨)
+  float rightButtonsW = settingsW + spacing + powerW + (healthW > 0 ? (spacing + healthW) : 0.0f);
+  
+  // 기기 표시 라벨 가용 너비 계산
+  float devW = ImGui::GetContentRegionAvail().x - rightButtonsW - spacing;
+  devW = std::max(devW, 200.0f); // 최소 너비를 100.0f -> 200.0f로 상향하여 긴 장치명도 넉넉히 수용
 
+  {
     std::string name;
     bool apoOk;
     {
       std::lock_guard<std::mutex> lk(m_defaultDeviceMutex);
-      name =
-          m_defaultDeviceName.empty() ? "기본 출력 장치" : m_defaultDeviceName;
+      name = m_defaultDeviceName.empty() ? "기본 출력 장치" : m_defaultDeviceName;
       apoOk = m_defaultDeviceApoRegistered;
     }
-
-    // ImGui::Text는 풍선 위치만 잡고, devW 너비 안에서 그리도록 BeginChild로
-    // 감쌈.
-    ImGui::BeginChild("##devlabel", ImVec2(devW, ImGui::GetFrameHeight()),
-                      false, ImGuiWindowFlags_NoScrollbar);
+    ImGui::BeginChild("##devlabel", ImVec2(devW, ImGui::GetFrameHeight()), false, ImGuiWindowFlags_NoScrollbar);
     ImGui::AlignTextToFramePadding();
     ImGui::TextColored(Theme::TEXT_WHITE, "%s", name.c_str());
     if (!apoOk) {
       ImGui::SameLine(0, 6);
-      ImGui::TextColored(Theme::COLOR_RED, u8"- 장치설정 요함(설정에서 가능)");
+      ImGui::TextColored(Theme::COLOR_RED, u8"- 장치설정 요함");
     }
     ImGui::EndChild();
   }
-  ImGui::SameLine(0, 8);
 
-  // [작업 1] 상단 바 밴드 선택 드롭다운 제거.
-  // 밴드 수 변경은 Settings → EQ 제어 → 밴드 수 변환(4-segment)에서만 가능.
+  ImGui::SameLine(0, spacing);
 
-  // ── [그룹 4] 설정 버튼 ──
-  {
-    float settingsW = twoLines ? 70.0f : 80.0f;
-    if (ImGui::Button("Settings", {settingsW, 0})) {
-      std::vector<std::string> names;
-      {
-        std::lock_guard<std::mutex> lk(m_devicesMutex);
-        for (auto &d : m_devices)
-          names.push_back(d.displayName);
-      }
-      m_settingsWin.Open(
-          names, [this](int bIdx) { ChangeBands(bIdx); },
-          [this]() {
-            if (m_onLogout)
-              m_onLogout();
-          },
-          [this](const AppSettings &s) { m_settings = s; },
-          [this]() {
+  // 우측 마진을 자연스럽게 맞추기 위한 커서 강제 배치
+  float targetX = ImGui::GetWindowWidth() - rightButtonsW - 20.0f;
+  if (ImGui::GetCursorPosX() < targetX) {
+      ImGui::SetCursorPosX(targetX);
+  }
+
+  // Settings 버튼
+  if (ImGui::Button("Settings", {settingsW, 0})) {
+    std::vector<std::string> names;
+    {
+      std::lock_guard<std::mutex> lk(m_devicesMutex);
+      for (auto &d : m_devices) names.push_back(d.displayName);
+    }
+    m_settingsWin.Open(
+        names, [this](int bIdx) { ChangeBands(bIdx); },
+        [this]() { if (m_onLogout) m_onLogout(); },
+        [this](const AppSettings &s) { m_settings = s; },
+        [this]() {
             std::thread([this]() {
               char exeP[MAX_PATH];
               GetModuleFileNameA(nullptr, exeP, MAX_PATH);
-              std::filesystem::path curDir =
-                  std::filesystem::path(exeP).parent_path();
+              std::filesystem::path curDir = std::filesystem::path(exeP).parent_path();
               std::string toolExe = "";
-              const char *installed =
-                  "C:\\Program Files\\SoundMate Equalizer\\SoundMate_setup.exe";
+              const char *installed = "C:\\Program Files\\SoundMate Equalizer\\SoundMate_setup.exe";
               if (std::filesystem::exists(installed)) {
                 toolExe = installed;
               } else {
@@ -1353,8 +1348,7 @@ void MainWindow::RenderTopBar() {
                 }
               }
               if (toolExe.empty()) {
-                SetStatus("SoundMate_setup.exe를 찾을 수 없습니다",
-                          Theme::COLOR_RED);
+                SetStatus("SoundMate_setup.exe를 찾을 수 없습니다", Theme::COLOR_RED);
                 return;
               }
               SetStatus("현재 장치에 EQ 엔진 설치 중...", Theme::TEXT_WHITE);
@@ -1367,38 +1361,23 @@ void MainWindow::RenderTopBar() {
               if (ShellExecuteExA(&sei)) {
                 WaitForSingleObject(sei.hProcess, 30000);
                 CloseHandle(sei.hProcess);
-                SetStatus("설정 완료! 현재 장치에 엔진이 주입되었습니다.",
-                          Theme::COLOR_GREEN);
+                SetStatus("설정 완료! 현재 장치에 엔진이 주입되었습니다.", Theme::COLOR_GREEN);
                 FetchAudioDevices();
               } else {
                 SetStatus("설정 실패 (권한 거부)", Theme::COLOR_RED);
               }
             }).detach();
-          },
-          // [Phase 3] onRestoreDevice — dev/mj 복원: SoundMate_reset.exe 실행
-          [this]() { ExecuteRestore(""); },
-          // [Phase 3] onSurvey — SurveyWindow 열기. 완료 시 취향 저장 + AI
-          // 재트리거
-          [this]() {
-            // [C-4] DB/메모리에서 기존 취향 가져와 SurveyWindow prefill 로
-            // 전달. 사용자가 이전에 답한 내용이 자동으로 선택되어 보임.
+        },
+        [this]() { ExecuteRestore(""); },
+        [this]() {
             std::string existing = g_recordManager.GetUserTendency();
-            // 기본값 "Balanced and clear sound" 면 미설문 상태 → 빈 문자열로
-            // 전달
-            if (existing == "Balanced and clear sound")
-              existing.clear();
-
+            if (existing == "Balanced and clear sound") existing.clear();
             m_surveyWin.Open(
                 [this](const std::string &pref) {
                   m_userPreference = pref;
                   g_recordManager.SaveUserTendency(pref, {});
                   SetStatus(u8"취향이 저장되었습니다.", Theme::COLOR_GREEN);
-
-                  // [DB-Sync] Survey 결과를 Supabase user_audio_preferences에
-                  // 업로드. pref 형식: "Bass Heavy, Forward Vocal, Huge
-                  // Soundstage, High Resolution, Energetic"
                   std::thread([pref]() {
-                    // 콤마+공백으로 분리하여 5개 라벨 추출
                     std::vector<std::string> parts;
                     std::string s = pref;
                     size_t pos;
@@ -1406,52 +1385,41 @@ void MainWindow::RenderTopBar() {
                       parts.push_back(s.substr(0, pos));
                       s = s.substr(pos + 2);
                     }
-                    if (!s.empty())
-                      parts.push_back(s);
+                    if (!s.empty()) parts.push_back(s);
                     if (parts.size() == 5) {
-                      g_recordManager.UploadAudioPreferences(
-                          parts[0], parts[1], parts[3], parts[2], parts[4]);
+                      g_recordManager.UploadAudioPreferences(parts[0], parts[1], parts[3], parts[2], parts[4]);
                     }
                   }).detach();
-
-                  if (!m_currentTitle.empty() && g_recordManager.IsAIEligible())
-                    TriggerAIGeneration();
+                  if (!m_currentTitle.empty() && g_recordManager.IsAIEligible()) TriggerAIGeneration();
                 },
                 existing);
-          });
-    }
+        });
   }
-  ImGui::SameLine(0, 8);
 
-  // ── [그룹 5] 전원 버튼 ──
-  {
-    float powerW = twoLines ? 80.0f : 100.0f;
-    if (m_isEqEnabled) {
-      ImGui::PushStyleColor(ImGuiCol_Button, Theme::ToU32(Theme::ACCENT_COLOR));
-      ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
-                            Theme::ToU32(Theme::GRAD_START));
+  ImGui::SameLine(0, spacing);
+
+  // 전원 버튼 (POWER ON/OFF)
+  if (m_isEqEnabled) {
+    ImGui::PushStyleColor(ImGuiCol_Button, Theme::ToU32(Theme::ACCENT_COLOR));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Theme::ToU32(Theme::GRAD_START));
+  } else {
+    ImGui::PushStyleColor(ImGuiCol_Button, Theme::ToU32(Theme::BTN_SECONDARY));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Theme::ToU32(Theme::ACCENT_COLOR));
+  }
+  if (ImGui::Button(m_isEqEnabled ? "POWER ON" : "POWER OFF", {powerW, 0})) {
+    m_isEqEnabled = !m_isEqEnabled;
+    if (!m_isEqEnabled) {
+      std::string dev = GetSelectedDeviceGuid();
+      m_eqCtrl->ApplyFlatEQ(m_currentBands, dev);
+      SetStatus("System Bypassed.", Theme::TEXT_GRAY);
     } else {
-      ImGui::PushStyleColor(ImGuiCol_Button,
-                            Theme::ToU32(Theme::BTN_SECONDARY));
-      ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
-                            Theme::ToU32(Theme::ACCENT_COLOR));
+      ApplyEQToSystem();
     }
-    if (ImGui::Button(m_isEqEnabled ? "POWER ON" : "POWER OFF", {powerW, 0})) {
-      m_isEqEnabled = !m_isEqEnabled;
-      if (!m_isEqEnabled) {
-        std::string dev = GetSelectedDeviceGuid();
-        m_eqCtrl->ApplyFlatEQ(m_currentBands, dev);
-        SetStatus("System Bypassed.", Theme::TEXT_GRAY);
-      } else {
-        ApplyEQToSystem();
-      }
-    }
-    ImGui::PopStyleColor(2);
   }
+  ImGui::PopStyleColor(2);
 
-  // ── [그룹 6] 엔진 헬스 점 (G1_1) ──
   if constexpr (SoundMate::Features::kG1_1_HealthIndicator) {
-    ImGui::SameLine(0, 8);
+    ImGui::SameLine(0, spacing);
     RenderHealthDot();
   }
 }
@@ -1791,6 +1759,31 @@ void MainWindow::ReleaseTexture(void **srv) {
   if (srv && *srv) {
     ((ID3D11ShaderResourceView *)*srv)->Release();
     *srv = nullptr;
+  }
+}
+
+void MainWindow::EnsureAppLogoLoaded() {
+  if (m_appLogoSRV)
+    return;
+  try {
+    char exeP[MAX_PATH];
+    GetModuleFileNameA(nullptr, exeP, MAX_PATH);
+    std::filesystem::path dir = std::filesystem::path(exeP).parent_path();
+    std::filesystem::path path = dir / "assets" / "logo.png";
+    if (!std::filesystem::exists(path))
+      return;
+    std::ifstream f(path, std::ios::binary);
+    std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(f)),
+                               std::istreambuf_iterator<char>());
+    int w = 0, h = 0;
+    void *srv = LoadTextureFromBytes(bytes.data(), bytes.size(), &w, &h);
+    if (srv) {
+      std::lock_guard<std::mutex> lk(m_albumArtMutex);
+      m_appLogoSRV = srv;
+      m_appLogoW = w;
+      m_appLogoH = h;
+    }
+  } catch (...) {
   }
 }
 
@@ -2704,6 +2697,66 @@ void MainWindow::RenderPresetPopups() {
   ImGui::PopStyleColor();
 }
 
+void MainWindow::RenderExitPopup() {
+  if (m_showExitModal) {
+    ImGui::OpenPopup("##exit_confirm_popup");
+    m_showExitModal = false;
+  }
+
+  ImGuiIO &io = ImGui::GetIO();
+  ImGui::SetNextWindowPos({io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f},
+                          ImGuiCond_Always, {0.5f, 0.5f});
+  ImGui::SetNextWindowSize({380, 0}, ImGuiCond_Always);
+  ImGui::PushStyleColor(ImGuiCol_WindowBg, Theme::ToU32(Theme::PANEL_COLOR));
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 12.0f);
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {20.0f, 16.0f});
+
+  if (ImGui::BeginPopupModal("##exit_confirm_popup", nullptr,
+                             ImGuiWindowFlags_NoTitleBar |
+                                 ImGuiWindowFlags_NoResize |
+                                 ImGuiWindowFlags_AlwaysAutoResize)) {
+    ImGui::TextColored(Theme::TEXT_WHITE, "SoundMate EQ 종료");
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    ImVec2 p = ImGui::GetCursorScreenPos();
+    float cw = ImGui::GetContentRegionAvail().x;
+    dl->AddLine({p.x, p.y}, {p.x + cw, p.y}, IM_COL32(255, 255, 255, 30), 1.0f);
+    ImGui::Dummy({0, 8});
+
+    ImGui::TextColored(Theme::TEXT_GRAY, "프로그램을 완전히 종료하시겠습니까,\n아니면 트레이 아이콘으로 최소화하시겠습니까?");
+    ImGui::Spacing();
+    ImGui::Dummy({0, 8});
+
+    // Buttons
+    extern void AppMinimizeToTray();
+    extern void AppExit();
+
+    if (PurpleButton("트레이 최소화", {cw, 36})) {
+      AppMinimizeToTray();
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::Spacing();
+    
+    if (ImGui::Button("프로그램 종료", {cw, 36})) {
+      AppExit();
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::Spacing();
+
+    ImGui::PushStyleColor(ImGuiCol_Button, Theme::ToU32(Theme::COLOR_RED));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(255, 100, 100, 255));
+    if (ImGui::Button("취소", {cw, 36})) {
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::PopStyleColor(2);
+
+    ImGui::EndPopup();
+  }
+
+  ImGui::PopStyleVar(2);
+  ImGui::PopStyleColor();
+}
+
+
 // ============================================================================
 // 자동 업데이트 시스템 (Auto-Updater)
 // ============================================================================
@@ -3023,3 +3076,17 @@ void MainWindow::RenderUpgradePopup() {
   ImGui::PopStyleVar(2);
   ImGui::PopStyleColor();
 }
+
+bool MainWindow::PurpleButton(const char *label, ImVec2 size) {
+  ImGui::PushStyleColor(ImGuiCol_Button, Theme::ToU32(Theme::ACCENT_COLOR));
+  ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Theme::ToU32(Theme::ACCENT_HOVER));
+  ImGui::PushStyleColor(ImGuiCol_ButtonActive, Theme::ToU32(Theme::GRAD_START));
+  bool res = ImGui::Button(label, size);
+  ImGui::PopStyleColor(3);
+  return res;
+}
+
+bool MainWindow::GradientButton(const char *label, ImVec2 size) {
+  return ImGui::Button(label, size);
+}
+

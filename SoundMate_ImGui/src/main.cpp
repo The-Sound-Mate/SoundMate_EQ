@@ -8,6 +8,7 @@
 #include <string>
 #include <tchar.h>
 #include <windows.h>
+#include <windowsx.h>
 
 
 #include "backends/imgui_impl_dx11.h"
@@ -40,7 +41,7 @@ static void TrayAdd(HWND hWnd) {
   g_tray.uID = 1;
   g_tray.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
   g_tray.uCallbackMessage = SM_WM_TRAYICON;
-  g_tray.hIcon = LoadIcon(nullptr, IDI_APPLICATION);
+  g_tray.hIcon = LoadIconW(GetModuleHandle(nullptr), MAKEINTRESOURCEW(101));
   wcsncpy_s(g_tray.szTip, L"SoundMate EQ", _TRUNCATE);
   Shell_NotifyIconW(NIM_ADD, &g_tray);
   g_trayInstalled = true;
@@ -82,9 +83,24 @@ ID3D11Device *g_pd3dDevice = nullptr;
 static ID3D11DeviceContext *g_pd3dDeviceContext = nullptr;
 static IDXGISwapChain *g_pSwapChain = nullptr;
 static ID3D11RenderTargetView *g_mainRenderTargetView = nullptr;
-static HWND g_hWnd = nullptr;
+HWND g_hWnd = nullptr;
 
 static MainWindow *g_app = nullptr;
+
+// ─── 종료/최소화 헬퍼 (MainWindow에서 호출) ───────────────────────────────────
+void AppMinimizeToTray() {
+  if (g_hWnd) {
+    ShowWindow(g_hWnd, SW_HIDE);
+    TrayAdd(g_hWnd);
+  }
+}
+
+void AppExit() {
+  if (g_hWnd) {
+    DestroyWindow(g_hWnd);
+  }
+}
+
 
 // ─── 프로토타입 ─────────────────────────────────────────────────────────────
 bool CreateDeviceD3D(HWND hWnd);
@@ -108,22 +124,27 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
                     0L,
                     0L,
                     GetModuleHandle(nullptr),
-                    nullptr,
-                    nullptr,
+                    LoadIconW(GetModuleHandle(nullptr), MAKEINTRESOURCEW(101)),
+                    LoadCursor(nullptr, IDC_ARROW),
                     nullptr,
                     nullptr,
                     L"SoundMate_EQ",
-                    nullptr};
+                    LoadIconW(GetModuleHandle(nullptr), MAKEINTRESOURCEW(101))};
   RegisterClassExW(&wc);
 
-  // DPI에 맞게 창 크기 조정
+  // DPI에 맞게 창 크기 조정 및 타이틀바/테두리를 감안한 외부 크기 계산 (AdjustWindowRect)
   int width = (int)(1100 * dpiScale);
   int height = (int)(750 * dpiScale);
+  RECT rect = { 0, 0, width, height };
+  DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
+  AdjustWindowRect(&rect, style, FALSE);
+  int winW = rect.right - rect.left;
+  int winH = rect.bottom - rect.top;
 
   g_hWnd = CreateWindowW(
       wc.lpszClassName, L"SoundMate Equalizer",
-      WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, 100, 100, width,
-      height, nullptr, nullptr, wc.hInstance, nullptr);
+      style, 100, 100, winW,
+      winH, nullptr, nullptr, wc.hInstance, nullptr);
 
   if (!CreateDeviceD3D(g_hWnd)) {
     CleanupDeviceD3D();
@@ -454,6 +475,7 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
   if (ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam))
     return true;
   switch (msg) {
+
   case WM_SIZE:
     if (g_pd3dDevice && wParam != SIZE_MINIMIZED) {
       CleanupRenderTarget();
@@ -467,7 +489,7 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       return 0;
     break;
 
-  // [PR-2B] X(닫기) 가로채기 — pro+ 사용자가 minimizeToTray ON이면 숨김+트레이.
+  // [PR-2B] X(닫기) 가로채기 — pro+ 사용자가 minimizeToTray ON이면 숨김+트레이 또는 종료 선택.
   // free 사용자 또는 minimizeToTray OFF면 일반 종료.
   case WM_CLOSE: {
     bool toTray = false;
@@ -475,9 +497,8 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       AppSettings s = LoadSettings();
       toTray = s.minimizeToTray;
     }
-    if (toTray) {
-      ShowWindow(hWnd, SW_HIDE);
-      TrayAdd(hWnd);
+    if (toTray && g_app) {
+      g_app->OpenExitModal();
       return 0;
     }
     DestroyWindow(hWnd);

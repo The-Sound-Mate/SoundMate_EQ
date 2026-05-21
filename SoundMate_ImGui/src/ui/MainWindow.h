@@ -47,6 +47,8 @@ private:
   void RenderBottomBar();    // 하단 (프롬프트 입력, 초기화 버튼)
   void RenderStatusBar();    // 상태 메시지
   void RenderPresetPopups(); // 프리셋 저장 / 삭제 팝업
+  void RenderExitPopup();    // 종료 확인 팝업
+
 
   // ── 엔진 헬스 (G1_1 / G1_2 / G1_3) — FeatureFlags.h 로 ON/OFF ─
   void RenderHealthDot();       // G1_1: 타이틀바 컬러 점 + 호버 툴팁
@@ -156,6 +158,13 @@ private:
   int  m_albumArtW = 0, m_albumArtH = 0;
   int  m_albumPlaceholderW = 0, m_albumPlaceholderH = 0;
   std::mutex m_albumArtMutex;
+
+
+  // App Logo
+  void* m_appLogoSRV = nullptr;
+  int m_appLogoW = 0, m_appLogoH = 0;
+  void EnsureAppLogoLoaded();
+
   // bytes → DX11 SRV. 실패 시 nullptr. (outW/outH 도 채움)
   void* LoadTextureFromBytes(const uint8_t* data, size_t len,
                               int* outW = nullptr, int* outH = nullptr);
@@ -169,6 +178,7 @@ private:
   bool m_hasManualChanges = false;
   float m_lastApplyTime = 0.0f;
   bool m_shouldClose = false;
+  bool m_showExitModal = false;
 
   // 마키 애니메이션
   float m_marqueeOffset = 0.0f;
@@ -234,6 +244,7 @@ public:
   // 백그라운드 thread에서 호출 안전. 다음 프레임에 모달 표시.
   void NotifyDeviceLimitExceeded(int limit, int activeCount,
                                  const std::string &plan);
+  void OpenExitModal() { m_showExitModal = true; }
 
 private:
   // [PR-A] 세션 도중 force_logout / is_active 폴링.
