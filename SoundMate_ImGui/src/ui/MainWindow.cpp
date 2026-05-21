@@ -1139,11 +1139,12 @@ void MainWindow::Render() {
   ImGuiIO &io = ImGui::GetIO();
   ImGui::SetNextWindowPos({0, 0});
   ImGui::SetNextWindowSize(io.DisplaySize);
-  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {20, 16});
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {0, 16});
   ImGui::Begin("##main", nullptr,
                ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
                    ImGuiWindowFlags_NoMove |
-                   ImGuiWindowFlags_NoBringToFrontOnFocus);
+                   ImGuiWindowFlags_NoBringToFrontOnFocus |
+                   ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 
   RenderTopBar();
   ImGui::Spacing();
@@ -1152,19 +1153,24 @@ void MainWindow::Render() {
   float leftW = 260.0f;
   // 비주얼라이저를 우측으로 옮기며 확보된 상단 공간만큼 패널 전체 높이를 늘림
   float totalH = io.DisplaySize.y - 180.0f;
+  float rightW = io.DisplaySize.x - leftW - 12.0f - 40.0f; // 좌우 20px씩 총 40px 제외
+
+  ImGui::SetCursorPosX(20.0f);
   ImGui::BeginChild("##left", {leftW, totalH}, false);
   RenderLeftPanel();
   ImGui::EndChild();
   ImGui::SameLine(0, 12);
-  ImGui::BeginChild("##right", {0, totalH}, false);
+  ImGui::BeginChild("##right", {rightW, totalH}, false);
   RenderVisualizer();
   ImGui::Spacing();
   RenderEQPanel();
   ImGui::EndChild();
 
   ImGui::Spacing();
+  ImGui::SetCursorPosX(20.0f);
   RenderBottomBar();
   ImGui::Spacing();
+  ImGui::SetCursorPosX(20.0f);
   RenderStatusBar();
 
   ImGui::End();
@@ -1200,10 +1206,16 @@ void MainWindow::Render() {
 // ── 상단 바 ──────────────────────────────────────────────────────────────────
 void MainWindow::RenderTopBar() {
   float availW = ImGui::GetContentRegionAvail().x;
-
-  // 창 너비가 좁을 때 (850px 미만) 두 줄로 나누어 배치해 겹침 현상을 완벽하게
-  // 방지합니다.
   bool twoLines = availW < 850.0f;
+  float barH = twoLines ? ImGui::GetFrameHeight() * 2.3f : ImGui::GetFrameHeight() * 1.3f;
+
+  ImGui::PushStyleColor(ImGuiCol_ChildBg, Theme::ToU32(Theme::PANEL_COLOR));
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {20.0f, 0.0f});
+  ImGui::BeginChild("##topbar_area", {0, barH}, false, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+
+  // 자식 창 내부 패딩을 기반으로 가용 너비 재계산
+  availW = ImGui::GetContentRegionAvail().x;
+  twoLines = availW < 850.0f;
 
   // ── [그룹 1] 사용자 프리셋 드롭다운 & 저장/삭제 ──
   {
@@ -1453,6 +1465,10 @@ void MainWindow::RenderTopBar() {
     ImGui::SameLine(0, 8);
     RenderHealthDot();
   }
+
+  ImGui::EndChild();
+  ImGui::PopStyleVar();
+  ImGui::PopStyleColor();
 }
 
 // ── 비주얼라이저 ─────────────────────────────────────────────────────────────
@@ -1969,7 +1985,7 @@ void MainWindow::RenderEQPanel() {
 // ── 하단 바 ──────────────────────────────────────────────────────────────────
 void MainWindow::RenderBottomBar() {
   ImGui::PushStyleColor(ImGuiCol_ChildBg, Theme::ToU32(Theme::PANEL_COLOR));
-  ImGui::BeginChild("##bottom", {0, 54}, false);
+  ImGui::BeginChild("##bottom", {ImGui::GetIO().DisplaySize.x - 40.0f, 54}, false);
 
   // [Phase 3] Free 플랜은 프롬프트 입력 자체를 비활성. 안내 + 구독 버튼만 노출.
   const bool aiEligible = g_recordManager.IsAIEligible();
