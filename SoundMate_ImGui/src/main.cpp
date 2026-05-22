@@ -391,10 +391,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
   }
 
 cleanup:
-  // [2-B] 종료 시 네트워크 동기화 제거 — 블로킹 호출이 Windows ANR 판정으로
-  // 강제 종료될 위험이 있었음. SaveInteraction 은 이미 pending/ 폴더에 즉시
-  // flush 하므로 디스크상 데이터 손실은 없음. 업로드는 다음 시작 시
-  // 백그라운드 스레드 (아래 startSyncThread) 가 자동 회수.
+  // [2-B] 종료 시 네트워크 동기화 강제 수행 (네트워크 지연 대비 최대 3초 타임아웃 제한)
+  g_recordManager.ProcessBatchSync(true, 3);
 
   monitor.Stop();
   ImGui_ImplDX11_Shutdown();

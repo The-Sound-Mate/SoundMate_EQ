@@ -12,6 +12,7 @@
 #include <fstream>
 #include <iomanip>
 #include <sstream>
+#include <tuple>
 #include <windows.h>
 
 
@@ -134,10 +135,9 @@ static void FillMissingBandsFromMaster(EQEntry& e) {
   if (e.gains15.empty()) e.gains15 = SampleLogLinear(e.gains31, AIClient::F31, AIClient::F15);
 }
 
-// [DB-Sync] 곡+source 조합으로 결정적 파일명 — 같은 곡 재등록 시 덮어쓰기.
+// [DB-Sync] 곡 조합으로 결정적 파일명 — 같은 곡 재등록 시 덮어쓰기 (중복 방지).
 static std::string PendingFilenameFor(const std::string &title,
-                                      const std::string &artist,
-                                      const std::string &source) {
+                                      const std::string &artist) {
   uint32_t h = 2166136261u;
   auto mix = [&](const std::string &s) {
     for (char c : s) { h ^= (unsigned char)c; h *= 16777619u; }
@@ -145,7 +145,7 @@ static std::string PendingFilenameFor(const std::string &title,
   mix(title); mix("\x01"); mix(artist);
   char hex[9];
   snprintf(hex, sizeof(hex), "%08x", h);
-  return std::string("pending_") + source + "_" + hex + ".json";
+  return std::string("pending_") + hex + ".json";
 }
 
 static std::string DefaultCacheJson() {
@@ -186,7 +186,7 @@ static void MigrateUnsyncedToPending(nlohmann::json &cache,
                           {"device_name", item.value("device_name", "")},
                           {"prompt",      item.value("prompt", "")}};
     try {
-      std::string path = dir + "\\" + PendingFilenameFor(title, artist, source);
+      std::string path = dir + "\\" + PendingFilenameFor(title, artist);
       std::ofstream f(path, std::ios::binary | std::ios::trunc);
       if (f) { f << rec.dump(); f.flush(); }
     } catch (...) {}
@@ -1218,7 +1218,7 @@ void RecordManager::SaveInteraction(const EQEntry &orig) {
       std::string dir = PendingDir(m_recordDir);
       std::filesystem::create_directories(dir);
       writtenPath = dir + "\\" +
-                    PendingFilenameFor(entry.title, entry.artist, entry.source);
+                    PendingFilenameFor(entry.title, entry.artist);
       // atomic write — .tmp → rename. 강종 시에도 본 파일은 손상 안 됨.
       std::string tmp = writtenPath + ".tmp";
       {
@@ -1365,7 +1365,8 @@ std::string RecordManager::SupabaseRequest(const std::string &method,
                                            const std::string &endpoint,
                                            const std::string &body,
                                            const std::string &accessToken,
-                                           long *outHttpCode) {
+                                           long *outHttpCode,
+                                           long timeoutSecs) {
   if (outHttpCode) *outHttpCode = 0;
   std::string url = std::string(SUPABASE_URL) + endpoint;
   std::string response;
@@ -1390,7 +1391,7 @@ std::string RecordManager::SupabaseRequest(const std::string &method,
   curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
   curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
   curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
-  curl_easy_setopt(curl, CURLOPT_TIMEOUT, 15L);
+  curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeoutSecs);
 
   if (method == "POST") {
     curl_easy_setopt(curl, CURLOPT_POST, 1L);
@@ -1510,7 +1511,7 @@ bool RecordManager::CheckUserHistory(const std::string &title,
 
 // [DB-Sync] pending/ 디렉터리에서 모든 .json 파일을 읽어 batch upload.
 // 성공한 파일만 정확히 삭제 → 실패 항목은 다음 시도에서 재처리.
-bool RecordManager::SyncToDB() {
+bool RecordManager::SyncToDB(long timeoutSecs) {
   std::string accessToken = GetUserIdFromToken();
   if (accessToken.empty() || m_userId.empty()) {
     WriteSyncLog({{"event","skip"},{"reason","no_auth"}});
@@ -1547,21 +1548,26 @@ bool RecordManager::SyncToDB() {
   WriteSyncLog({{"event","sync_start"},{"items", (int)items.size()},
                 {"user_id", m_userId}});
   try {
-    // 1) track 테이블 upsert
-    json tracks = json::array();
-    std::map<std::string, std::string> hashToId;
+    // 1) track 테이블 upsert (deduplicated by track_hash)
+    std::map<std::string, json> uniqueTracks;
     for (auto &it : items) {
       std::string h = GenerateTrackHash(it.data.value("title", ""),
                                         it.data.value("artist", ""));
-      tracks.push_back({{"track_hash", h},
-                        {"title",  it.data.value("title", "")},
-                        {"artist", it.data.value("artist", "")},
-                        {"genre",  it.data.value("genre", "")}});
+      uniqueTracks[h] = {{"track_hash", h},
+                         {"title",  it.data.value("title", "")},
+                         {"artist", it.data.value("artist", "")},
+                         {"genre",  it.data.value("genre", "")}};
     }
+    json tracks = json::array();
+    for (auto &[h, trackJson] : uniqueTracks) {
+      tracks.push_back(trackJson);
+    }
+
+    std::map<std::string, std::string> hashToId;
     long thttp = 0;
     auto tresp = SupabaseRequest("POST",
         "/rest/v1/track?on_conflict=track_hash", tracks.dump(),
-        accessToken, &thttp);
+        accessToken, &thttp, timeoutSecs);
     if (thttp < 200 || thttp >= 300) {
       WriteSyncLog({{"event","track_upsert_fail"},{"http",thttp},
                     {"body", tresp.substr(0, std::min<size_t>(256, tresp.size()))}});
@@ -1602,7 +1608,7 @@ bool RecordManager::SyncToDB() {
       long sh = 0;
       auto sresp = SupabaseRequest("GET",
           "/rest/v1/track?select=id,track_hash&track_hash=" + in,
-          "", accessToken, &sh);
+          "", accessToken, &sh, timeoutSecs);
       if (sh >= 200 && sh < 300) {
         try {
           auto sarr = nlohmann::json::parse(sresp);
@@ -1624,24 +1630,35 @@ bool RecordManager::SyncToDB() {
     // UNIQUE(user_id, track_id, source) 위반(같은 곡 + 같은 source 재시도)
     // 시 단순 INSERT 면 batch 전체 실패. on_conflict=user_id,track_id,source
     // 로 덮어쓰기 정책 통일.
-    json batch = json::array();
+    // 중복 방지를 위해 (user_id, track_id, source) 별로 맵에서 관리하며,
+    // 이전 중복 파일들의 경로는 업로드 성공 시 삭제되도록 uploaded 목록에 수집.
+    std::map<std::tuple<std::string, std::string, std::string>, std::pair<json, std::filesystem::path>> uniqueHistory;
     std::vector<std::filesystem::path> uploaded;
     for (auto &it : items) {
       std::string h = GenerateTrackHash(it.data.value("title", ""),
                                         it.data.value("artist", ""));
       std::string tid = hashToId.count(h) ? hashToId[h] : "";
       if (tid.empty()) continue;
+      std::string src = it.data.value("source", "");
+      auto key = std::make_tuple(m_userId, tid, src);
       json hist = {{"user_id", m_userId},
                    {"track_id", tid},
                    {"eq_5",  it.data.value("eq_5",  json())},
                    {"eq_10", it.data.value("eq_10", json())},
                    {"eq_15", it.data.value("eq_15", json())},
                    {"eq_31", it.data.value("eq_31", json())},
-                   {"source",      it.data.value("source", "")},
+                   {"source",      src},
                    {"prompt",      it.data.value("prompt", "")},
                    {"device_name", it.data.value("device_name", "")}};
-      batch.push_back(hist);
-      uploaded.push_back(it.path);
+      if (uniqueHistory.count(key)) {
+        uploaded.push_back(uniqueHistory[key].second);
+      }
+      uniqueHistory[key] = {hist, it.path};
+    }
+    json batch = json::array();
+    for (auto &[k, val] : uniqueHistory) {
+      batch.push_back(val.first);
+      uploaded.push_back(val.second);
     }
     WriteSyncLog({{"event","history_batch_prepared"},
                   {"hashToId", (int)hashToId.size()},
@@ -1653,7 +1670,7 @@ bool RecordManager::SyncToDB() {
       long h = 0;
       auto r = SupabaseRequest("POST",
           "/rest/v1/user_track_history?on_conflict=user_id,track_id,source",
-          batch.dump(), accessToken, &h);
+          batch.dump(), accessToken, &h, timeoutSecs);
       if (h < 200 || h >= 300) {
         ok = false;
         WriteSyncLog({{"event","history_upsert_fail"},{"http",h},
@@ -1682,7 +1699,7 @@ bool RecordManager::SyncToDB() {
 }
 
 // [Q5 결정] 5개 이상 OR forceAll만 sync. 시간 기반 폴링 없음.
-void RecordManager::ProcessBatchSync(bool forceAll) {
+void RecordManager::ProcessBatchSync(bool forceAll, long timeoutSecs) {
   ConsolidateLocalRecords(forceAll);
 
   // pending/ 파일 개수 카운트 — 메모리 큐 의존 제거
@@ -1705,7 +1722,7 @@ void RecordManager::ProcessBatchSync(bool forceAll) {
                 {"force_all", forceAll},
                 {"will_sync", (forceAll || cnt >= 5)}});
   if (forceAll || cnt >= 5) {
-    SyncToDB();
+    SyncToDB(timeoutSecs);
   }
 }
 

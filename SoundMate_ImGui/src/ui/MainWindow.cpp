@@ -271,7 +271,7 @@ void MainWindow::RefreshDefaultDevice() {
                             0xdf1c,
                             0x4efd,
                             {0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0}},
-                           2};
+                           14};
         if (SUCCEEDED(props->GetValue(key, &v)) && v.pwszVal) {
           std::wstring wn = v.pwszVal;
           int len = WideCharToMultiByte(CP_UTF8, 0, wn.c_str(), -1, nullptr, 0,
@@ -332,7 +332,7 @@ void MainWindow::FetchAudioDevices() {
                  0xdf1c,
                  0x4efd,
                  {0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0}},
-                2};
+                14};
             if (SUCCEEDED(pProps->GetValue(key, &varName))) {
               std::wstring wName =
                   varName.pwszVal ? varName.pwszVal : L"Unknown Device";
@@ -2548,6 +2548,12 @@ void MainWindow::ApplyPreset(int idx) {
   if (target.size() != m_eqGains.size())
     return;
   m_eqOrigin = EqOrigin::Preset;
+
+  // 마스터 31밴드 트랜지션 타깃 설정 추가
+  EnsureMaster31();
+  m_masterTransitionStart = m_eqGains31Master;
+  m_masterTransitionTarget = m_userPresets[idx].gains31;
+
   SmoothTransition(target);
   ApplyEQNoSave();
 }
@@ -2623,7 +2629,15 @@ void MainWindow::RenderPresetPopups() {
         name = "Preset " + std::to_string(m_userPresets.size() + 1);
       UserPreset p;
       p.name = name;
-      p.gains31 = UpsampleTo31(m_eqGains); // 현재 EQ → 31밴드 보관
+
+      // 마스터 31밴드가 존재한다면 오차 없는 오리지널 그대로 보관
+      EnsureMaster31();
+      if (m_eqGains31Master.size() == 31) {
+        p.gains31 = m_eqGains31Master;
+      } else {
+        p.gains31 = UpsampleTo31(m_eqGains);
+      }
+
       m_userPresets.push_back(p);
       SaveUserPresets();
       m_selectedPresetIdx = (int)m_userPresets.size() - 1;

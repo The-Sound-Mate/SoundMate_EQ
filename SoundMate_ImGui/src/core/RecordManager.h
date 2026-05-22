@@ -139,8 +139,8 @@ public:
   std::vector<float> GetGlobalGenreAverage(const std::string &genre,
                                            int bandCount = 5);
   bool CheckUserHistory(const std::string &title, const std::string &artist);
-  bool SyncToDB();
-  void ProcessBatchSync(bool forceAll = false); // Python의 process_batch_sync()
+  bool SyncToDB(long timeoutSecs = 15);
+  void ProcessBatchSync(bool forceAll = false, long timeoutSecs = 15); // Python의 process_batch_sync()
 
   // ── AI 에러 로그 ───────────────────────────────────────────────
   void LogAiError(const std::string &title, const std::string &artist,
@@ -163,7 +163,8 @@ private:
                               const std::string &endpoint,
                               const std::string &body = "",
                               const std::string &accessToken = "",
-                              long *outHttpCode = nullptr);
+                              long *outHttpCode = nullptr,
+                              long timeoutSecs = 15);
 
   // [Sync 디버그] sync_log.jsonl에 한 줄 append. 5MB 초과 시 앞부분 자동 잘라냄.
   void WriteSyncLog(const nlohmann::json &record);
