@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(SoundMate_EQ VERSION 1.0.0 LANGUAGES C CXX RC)
+project(SoundMate_EQ VERSION 0.0.1 LANGUAGES C CXX RC)
 
 
 set(CMAKE_CXX_STANDARD 17)
@@ -232,6 +232,7 @@ if(MSVC)
     # 승인으로 모든 admin 작업 처리. Controller는 asInvoker로 두어도 UI 자식
     # 으로 spawn되면 admin 컨텍스트 상속.
     set_target_properties(SoundMate_EQ PROPERTIES
+        OUTPUT_NAME "SoundMate Equalizer"
         LINK_FLAGS "/MANIFESTUAC:level='requireAdministrator' /SUBSYSTEM:WINDOWS"
         RUNTIME_OUTPUT_DIRECTORY_DEBUG   "${CMAKE_BINARY_DIR}/Debug"
         RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/Release"

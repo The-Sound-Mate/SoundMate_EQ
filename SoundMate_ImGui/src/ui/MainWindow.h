@@ -384,5 +384,11 @@ private:
   void ExecuteRestore(const std::string &filePath);
 
 public:
+  void ApplyFlatEQImmediately();
   void SetOnLogoutCallback(std::function<void()> cb) { m_onLogout = cb; }
+  void SetBlockedByFreePlan(bool blocked) { m_isBlockedByFreePlan = blocked; }
+  bool IsBlockedByFreePlan() const { return m_isBlockedByFreePlan; }
+
+private:
+  bool m_isBlockedByFreePlan = false;
 };

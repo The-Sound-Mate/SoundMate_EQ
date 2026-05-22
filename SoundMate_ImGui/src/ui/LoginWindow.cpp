@@ -2,6 +2,7 @@
 #include "LoginWindow.h"
 #include "Theme.h"
 #include "../core/RecordManager.h"
+#include "../core/FeatureFlags.h"
 #include <windows.h>
 #include <shellapi.h>
 #include <winsock2.h>
@@ -364,6 +365,12 @@ void LoginWindow::HandleWebLogin(const std::string& at, const std::string& rt) {
 }
 
 void LoginWindow::LoginAsGuest() {
+    if constexpr (SoundMate::Features::kBetaTestRestriction) {
+        MessageBoxW(nullptr, L"베타테스트 기간에는 로그인한 유저만 프로그램을 이용할 수 있습니다.", L"SoundMate EQ", MB_OK | MB_ICONWARNING);
+        extern void AppExit();
+        AppExit();
+        return;
+    }
     m_open = false;
     if (m_onSuccess) m_onSuccess("guest","guest",false);
 }
@@ -408,11 +415,13 @@ void LoginWindow::Render() {
     ImGui::Spacing();
 
     // 게스트 버튼
-    ImGui::SetCursorPosX(30);
-    ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(0,0,0,0));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Theme::ToU32(Theme::BTN_SECONDARY));
-    if (ImGui::Button("로그인하지 않고 실행하기", {cw-60, 38})) LoginAsGuest();
-    ImGui::PopStyleColor(2);
+    if constexpr (!SoundMate::Features::kBetaTestRestriction) {
+        ImGui::SetCursorPosX(30);
+        ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(0,0,0,0));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Theme::ToU32(Theme::BTN_SECONDARY));
+        if (ImGui::Button("로그인하지 않고 실행하기", {cw-60, 38})) LoginAsGuest();
+        ImGui::PopStyleColor(2);
+    }
 
     ImGui::Spacing();
 

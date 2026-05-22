@@ -14,6 +14,10 @@
 // ============================================================================
 namespace SoundMate::Features {
 
+// kBetaTestRestriction: 베타테스트 제한 활성화 여부
+// true 설정 시 무료(Free) 플랜 유저 및 로그인하지 않은(게스트) 유저의 실행을 제한하고 종료합니다.
+constexpr bool kBetaTestRestriction = true;
+
 // G1_1: 엔진 헬스 인디케이터 — 타이틀바 컬러 점 (🟢🟡🔴) + 호버 툴팁
 constexpr bool kG1_1_HealthIndicator = false;
 

@@ -21,6 +21,7 @@
 #include "core/GenreManager.h"
 #include "core/MediaMonitor.h"
 #include "core/RecordManager.h"
+#include "core/FeatureFlags.h"
 #include "ui/LoginWindow.h"
 #include "ui/MainWindow.h"
 #include "ui/SettingsWindow.h"
@@ -73,6 +74,19 @@ static void TrayMenu(HWND hWnd) {
   } else if (cmd == 1002) {
     TrayRemove();
     DestroyWindow(hWnd);
+  }
+}
+
+static void SilentTaskKill(const char *imageName) {
+  char cmd[256];
+  snprintf(cmd, sizeof(cmd), "taskkill /F /IM %s", imageName);
+  STARTUPINFOA si = {sizeof(si)};
+  PROCESS_INFORMATION pi = {};
+  if (CreateProcessA(NULL, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL,
+                     &si, &pi)) {
+    WaitForSingleObject(pi.hProcess, 2000);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
   }
 }
 
@@ -233,6 +247,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
   // ── 로그인 창 ──
   LoginWindow loginWin;
   MainWindow mainWin;
+  g_app = &mainWin; // [Fix] auto-login 시 nullptr 역참조 방지를 위해 조기 초기화
   bool loggedIn = false;
 
   // [Phase 3] 로그인 성공 직후 profile(plan_type, display_name 등)을
@@ -242,6 +257,41 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     std::thread([]() {
       g_recordManager.RefreshUserProfile();
       g_recordManager.FetchUserTendency();
+
+      if constexpr (SoundMate::Features::kBetaTestRestriction) {
+        std::string plan = g_recordManager.GetUserPlanType();
+
+        if (plan == "free") {
+          // [Fix] 알림창이 떠 있는 동안에도 메인 창에서 슬라이더 조작이 되는 문제를 막기 위해
+          // 메인 창 차단 플래그를 세우고 시스템 EQ를 평탄(Bypassed) 상태로 리셋 적용하며 메인 창을 즉시 숨깁니다.
+          if (g_app) {
+            g_app->SetBlockedByFreePlan(true);
+            g_app->ApplyFlatEQImmediately();
+          }
+          ShowWindow(g_hWnd, SW_HIDE);
+
+          // [Fix] 알림창이 떠 있는 동안 백그라운드 오디오 엔진의 임의 적용을 완전히 차단하기 위해
+          // 오디오 필터 컨트롤러 백그라운드 프로세스를 즉시 강제종료합니다.
+          SilentTaskKill("SoundMate_Controller.exe");
+          SilentTaskKill("MainController.exe");
+
+          MessageBoxW(nullptr, 
+                      L"베타테스트 기간에는 베타테스터만 프로그램을 이용할 수 있습니다.\n베타테스터가 아닌 경우 사용이 제한되어 프로그램을 종료합니다.", 
+                      L"SoundMate EQ - 베타테스트 안내", 
+                      MB_OK | MB_ICONWARNING);
+
+          // 로그아웃 처리 (토큰 삭제, 세션 정리, 프리셋 기본 OFF 초기화)
+          std::remove(LoginWindow::GetTokenFilePath().c_str());
+          g_recordManager.SignOut();
+          AppSettings s = LoadSettings();
+          s.eqMode = EqMode::Off;
+          s.autoAnalyze = false;
+          s.globalAverage = false;
+          SaveSettings(s);
+
+          PostMessageW(g_hWnd, WM_CLOSE, 0, 0);
+        }
+      }
     }).detach();
   };
 

@@ -53,7 +53,7 @@ static bool RunResetSync() {
 static void KillProcesses() {
     // 파일 핸들을 잡고 있을 수 있는 프로세스 강제 종료.
     system("taskkill /F /IM SoundMate_Controller.exe >nul 2>&1");
-    system("taskkill /F /IM SoundMate_EQ.exe         >nul 2>&1");
+    system("taskkill /F /IM \"SoundMate Equalizer.exe\" >nul 2>&1");
     Sleep(500); // OS가 핸들 해제할 시간
 }
 

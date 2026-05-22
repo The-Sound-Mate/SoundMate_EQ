@@ -52,7 +52,10 @@ const char *MainWindow::BAND_NAMES[] = {"5-Band", "10-Band", "15-Band",
 #include <fstream>
 
 
-MainWindow::MainWindow() { SetupEQBands(BANDS_5); }
+MainWindow::MainWindow() {
+  m_isBlockedByFreePlan = false;
+  SetupEQBands(BANDS_5);
+}
 
 // [A-2] system("taskkill...") 은 cmd.exe 콘솔 창을 깜빡 띄움 → UX 깨짐.
 // CreateProcessA + CREATE_NO_WINDOW 로 silent 실행.
@@ -446,6 +449,10 @@ bool MainWindow::IsControllerRunning() const {
 void MainWindow::ApplyEQNoSave() {
   if (!m_eqCtrl)
     return;
+  if (m_isBlockedByFreePlan) {
+    m_eqCtrl->ApplyBypass();
+    return;
+  }
   if (!m_isEqEnabled) {
     m_eqCtrl->ApplyBypass();
     return;
@@ -471,12 +478,18 @@ void MainWindow::ApplyEQNoSave() {
 }
 
 void MainWindow::ApplyEQToSystem() {
+  if (m_isBlockedByFreePlan) {
+    if (m_eqCtrl) m_eqCtrl->ApplyBypass();
+    return;
+  }
   ApplyEQNoSave();
   SetStatus("EQ Applied!", Theme::COLOR_GREEN);
 }
 
 // ── 스무스 트랜지션 (Python smooth_transition) ──────────────────────────────
 void MainWindow::SmoothTransition(const std::vector<float> &target) {
+  if (m_isBlockedByFreePlan)
+    return;
   m_transitionStart = m_eqGains;
   m_transitionTarget = target;
   m_transitionProgress = 0.0f;
@@ -2541,6 +2554,8 @@ std::vector<float> MainWindow::DownsampleTo(const std::vector<float> &g31,
 
 // ── 프리셋 EQ 적용 ────────────────────────────────────────────────────────
 void MainWindow::ApplyPreset(int idx) {
+  if (m_isBlockedByFreePlan)
+    return;
   if (idx < 0 || idx >= (int)m_userPresets.size())
     return;
   auto target =
@@ -3102,5 +3117,14 @@ bool MainWindow::PurpleButton(const char *label, ImVec2 size) {
 
 bool MainWindow::GradientButton(const char *label, ImVec2 size) {
   return ImGui::Button(label, size);
+}
+
+void MainWindow::ApplyFlatEQImmediately() {
+  if (m_eqCtrl) {
+    std::string dev = GetSelectedDeviceGuid();
+    m_eqCtrl->ApplyFlatEQ(m_currentBands, dev);
+    m_isEqEnabled = false;
+    SetStatus("System Bypassed.", Theme::TEXT_GRAY);
+  }
 }
 

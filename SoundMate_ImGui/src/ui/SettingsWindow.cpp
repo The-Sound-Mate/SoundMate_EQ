@@ -309,7 +309,6 @@ void SettingsWindow::Render() {
     };
     static const ModeOption kOptions[] = {
         {EqMode::Off, u8"OFF"},
-        {EqMode::GlobalAverage, u8"글로벌 평균"},
         {EqMode::AiAuto, u8"AI 자동"},
     };
 
@@ -320,12 +319,12 @@ void SettingsWindow::Render() {
     // [PR-2D fix] 4px 간격(SameLine(0, 4))과 동일하게 폭 계산. ItemSpacing.x
     // (기본 8)로 계산하면 실제 우측 끝이 4px 안쪽으로 들어와 어긋남.
     const float kSegGap = 4.0f;
-    float segTotal = segW * 3.0f + kSegGap * 2.0f;
+    float segTotal = segW * 2.0f + kSegGap * 1.0f;
 
     ImGui::SameLine(kRightEdge - segTotal);
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 8.0f);
     ImGui::BeginDisabled(!eligible);
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < 2; ++i) {
       if (i > 0)
         ImGui::SameLine(0, 4);
       bool selected = (m_settings.eqMode == kOptions[i].mode);
