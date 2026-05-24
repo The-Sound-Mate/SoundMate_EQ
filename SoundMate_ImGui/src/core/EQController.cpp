@@ -114,7 +114,7 @@ bool EQController::WriteEQFile(const std::string &filePath,
 
 // [최종 결정] 31밴드 SSOT 정책 — 엔진은 항상 31밴드.
 //   1/3 옥타브 표준 Q = 4.32. 인접 간섭 최소, 베이스 단단.
-//   클립 방지는 DLL 내부 SamplePeakLimiter 가 담당 (UI Preamp 꼼수 없음).
+//   클립 방지는 DLL 내부 SamplePeakLimiter + UI 자동 Preamp 보정 2단으로.
 float EQController::CalculateQ(int /*numBands*/) {
   return 4.32f;
 }
@@ -128,14 +128,14 @@ bool EQController::ApplyEQ(const std::vector<float> &gains,
   // [v12.0] 전용 엔진 경로로 고정 (C:\Program Files\SoundMate\config.txt)
   std::string targetPath = "C:\\Program Files\\SoundMate Equalizer\\config.txt";
 
-  if (gains.size() != freqs.size())
-    return false;
   float q = CalculateQ((int)freqs.size());
 
-  // [최종 결정] Preamp 0.0 dB 고정. UI 단 자동 감쇠 금지 — DLL 내부
-  //   SamplePeakLimiter 가 0dBFS 초과 시점만 dynamic하게 처리.
+  float maxPositiveGain = 0.0f;
+  for (float g : gains) maxPositiveGain = std::max(maxPositiveGain, g);
+  float preamp = std::max(-maxPositiveGain, -1.0f);
+
   std::ostringstream oss;
-  oss << "Preamp: 0.0 dB\n";
+  oss << "Preamp: " << std::fixed << std::setprecision(1) << preamp << " dB\n";
 
   // 엔진이 기대하는 형식으로 기록: Filter: [ID] [Freq] [Gain] [Q]
   for (size_t i = 0; i < freqs.size(); ++i) {

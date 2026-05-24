@@ -217,6 +217,8 @@ private:
   std::string m_downloadUrl = "";
   std::string m_releaseNotes = "";
   bool m_isMandatoryUpdate = false;
+  std::atomic<bool> m_updateDownloading{false};
+  bool m_updateDownloadFailed = false;
 
   void CheckForUpdates();
   void DownloadAndExecuteUpdate();

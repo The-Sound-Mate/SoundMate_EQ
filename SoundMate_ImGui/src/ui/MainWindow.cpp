@@ -572,11 +572,6 @@ void MainWindow::TriggerAIGeneration() {
       ~AiProcessingGuard() { flag = false; }
     } _aiProcGuard{m_aiProcessing};
 
-    if (!m_ai) {
-      SetStatus("AI Setup Error: client not initialized", Theme::COLOR_RED);
-      return;
-    }
-
     // [A-1] HTTP 요청 직전에도 한 번 더 검사 — 그 사이 곡이 바뀌었으면 호출
     // 자체를 안 함.
     if (m_songEpoch.load() != myEpoch) {
@@ -682,21 +677,18 @@ void MainWindow::TriggerAIGeneration() {
                                  result.errorMsg);
     } else {
       SetStatus("AI: Response received. Applying EQ...", Theme::COLOR_GREEN);
-      std::vector<float> *target = nullptr;
-      if (m_currentBands.size() == 5)
-        target = &result.bands5;
-      else if (m_currentBands.size() == 10)
-        target = &result.bands10;
-      else if (m_currentBands.size() == 15)
-        target = &result.bands15;
-      else
-        target = &result.bands31;
+      // [v12-interp] target 은 master31 → 현재 뷰 주파수로 log-linear 보간.
+      //   UI BANDS_5={60,230,910,4000,14000} 가 F5={63,250,1000,4000,16000}
+      //   와 다르므로 result.bands5 를 그대로 쓰면 5밴드 슬라이더 표시값이
+      //   AI 의도와 어긋난다. master31 을 SSOT 로 두고 매번 보간.
+      std::vector<float> targetView =
+          m_ai->Map31ToTargetBands(result.bands31, m_currentBands);
       if (m_settings.globalAverage) {
         auto baseline = g_recordManager.GetGlobalGenreAverage(
             m_currentGenre, m_currentBands.size());
-        if (baseline.size() == target->size()) {
-          for (size_t i = 0; i < target->size(); ++i) {
-            (*target)[i] = ((*target)[i] + baseline[i]) / 2.0f;
+        if (baseline.size() == targetView.size()) {
+          for (size_t i = 0; i < targetView.size(); ++i) {
+            targetView[i] = (targetView[i] + baseline[i]) / 2.0f;
           }
         }
       }
@@ -706,7 +698,7 @@ void MainWindow::TriggerAIGeneration() {
       //   precision 손실 0. 사용자가 5밴드 모드라도 master 는 31밴드 정밀도 유지.
       {
         std::lock_guard<std::mutex> lk(m_eqUpdateMutex);
-        m_queuedGains = *target;
+        m_queuedGains = targetView;
         m_queuedMaster31 = result.bands31;
         m_pendingEQUpdate = true;
       }
@@ -766,19 +758,10 @@ int MainWindow::MapViewIndexToMaster31(int viewIdx) const {
   return best;
 }
 
-// [최종] master31 → 현재 뷰의 슬라이더 alias 위치에서 readout → m_eqGains 갱신.
-//   타 인덱스(master 의 디테일)는 m_eqGains 에 안 보이지만 master 에 보존됨.
+// master31 → 현재 뷰 주파수에서 log-linear 보간 → m_eqGains 갱신.
+// 호출자는 EnsureMaster31() 이후에 부른다 (SSOT 보장).
 void MainWindow::SyncCurrentFromMaster() {
-  if (m_eqGains31Master.size() != 31 || m_currentBands.empty()) return;
-  if (m_eqGains.size() != m_currentBands.size()) {
-    m_eqGains.assign(m_currentBands.size(), 0.f);
-  }
-  for (size_t v = 0; v < m_currentBands.size(); ++v) {
-    int m = MapViewIndexToMaster31((int)v);
-    if (m >= 0 && m < (int)m_eqGains31Master.size()) {
-      m_eqGains[v] = m_eqGains31Master[m];
-    }
-  }
+  m_eqGains = m_ai->Map31ToTargetBands(m_eqGains31Master, m_currentBands);
 }
 
 // [최종] master31 의 non-alias 인덱스(현재 뷰에 안 보이는 점)에 |값|>0.1dB 가
@@ -1045,18 +1028,22 @@ void MainWindow::Render() {
           // 진짜 게스트 모드 — 외부 API/AI 차단, 로컬 캐시만 사용.
           EQEntry *cached = g_recordManager.GetCachedEQ(title, artist);
           if (cached && mode != EqMode::Off) {
-            std::vector<float> *target = nullptr;
-            if (m_currentBands.size() == 5 && !cached->gains5.empty())
-              target = &cached->gains5;
-            else if (m_currentBands.size() == 10 && !cached->gains10.empty())
-              target = &cached->gains10;
-            else if (m_currentBands.size() == 15 && !cached->gains15.empty())
-              target = &cached->gains15;
-            else if (!cached->gains31.empty())
-              target = &cached->gains31;
-            if (target) {
+            std::vector<float> targetView;
+            if (!cached->gains31.empty()) {
+              targetView = m_ai->Map31ToTargetBands(cached->gains31,
+                                                   m_currentBands);
+            } else if (m_currentBands.size() == 5 && !cached->gains5.empty()) {
+              targetView = cached->gains5;
+            } else if (m_currentBands.size() == 10 && !cached->gains10.empty()) {
+              targetView = cached->gains10;
+            } else if (m_currentBands.size() == 15 && !cached->gains15.empty()) {
+              targetView = cached->gains15;
+            } else if (!cached->gains31.empty()) {
+              targetView = cached->gains31;
+            }
+            if (!targetView.empty()) {
               std::lock_guard<std::mutex> lk(m_eqUpdateMutex);
-              m_queuedGains = *target;
+              m_queuedGains = targetView;
               m_queuedMaster31 = cached->gains31; // [Task 3-A] master 정밀도 보존
               m_pendingEQUpdate = true;
               m_eqOrigin = EqOrigin::Cache;
@@ -1096,17 +1083,21 @@ void MainWindow::Render() {
         // 로컬 캐시 확인 — canonical key 로 조회
         EQEntry *cached = g_recordManager.GetCachedEQ(keyTitle, keyArtist);
         if (cached) {
-          std::vector<float> *target = nullptr;
-          if (m_currentBands.size() == 5 && !cached->gains5.empty())
-            target = &cached->gains5;
-          else if (m_currentBands.size() == 10 && !cached->gains10.empty())
-            target = &cached->gains10;
-          else if (m_currentBands.size() == 15 && !cached->gains15.empty())
-            target = &cached->gains15;
-          else if (!cached->gains31.empty())
-            target = &cached->gains31;
+          std::vector<float> targetView;
+          if (!cached->gains31.empty()) {
+            targetView = m_ai->Map31ToTargetBands(cached->gains31,
+                                                  m_currentBands);
+          } else if (m_currentBands.size() == 5 && !cached->gains5.empty()) {
+            targetView = cached->gains5;
+          } else if (m_currentBands.size() == 10 && !cached->gains10.empty()) {
+            targetView = cached->gains10;
+          } else if (m_currentBands.size() == 15 && !cached->gains15.empty()) {
+            targetView = cached->gains15;
+          } else if (!cached->gains31.empty()) {
+            targetView = cached->gains31;
+          }
 
-          if (target) {
+          if (!targetView.empty()) {
             // GlobalAverage 또는 AiAuto 모드 + 캐시가 수동/직접이 아닐 때
             // 블렌딩
             const bool blend =
@@ -1115,8 +1106,8 @@ void MainWindow::Render() {
             if (blend) {
               auto baseline = g_recordManager.GetGlobalGenreAverage(
                   m_currentGenre, m_currentBands.size());
-              if (baseline.size() == target->size()) {
-                std::vector<float> blended = *target;
+              if (baseline.size() == targetView.size()) {
+                std::vector<float> blended = targetView;
                 for (size_t i = 0; i < blended.size(); ++i)
                   blended[i] = (blended[i] + baseline[i]) / 2.0f;
                 std::lock_guard<std::mutex> lk(m_eqUpdateMutex);
@@ -1137,14 +1128,14 @@ void MainWindow::Render() {
                 m_eqOrigin = EqOrigin::Cache;
               } else {
                 std::lock_guard<std::mutex> lk(m_eqUpdateMutex);
-                m_queuedGains = *target;
+                m_queuedGains = targetView;
                 m_queuedMaster31 = cached->gains31;
                 m_pendingEQUpdate = true;
                 m_eqOrigin = EqOrigin::Cache;
               }
             } else {
               std::lock_guard<std::mutex> lk(m_eqUpdateMutex);
-              m_queuedGains = *target;
+              m_queuedGains = targetView;
               m_queuedMaster31 = cached->gains31;
               m_pendingEQUpdate = true;
               m_eqOrigin = EqOrigin::Cache;
@@ -1223,6 +1214,26 @@ void MainWindow::Render() {
 
   ImGui::End();
   ImGui::PopStyleVar();
+
+  // ── [강제 업데이트] mandatory 업데이트가 감지되면 전체 UI 위에
+  //    반투명 오버레이를 그려 조작을 완전 차단한다.
+  //    오버레이 위에 업데이트 팝업만 렌더링.
+  if (m_isMandatoryUpdate && m_updateAvailable) {
+    ImGuiIO &ioBlock = ImGui::GetIO();
+    ImGui::SetNextWindowPos({0, 0});
+    ImGui::SetNextWindowSize(ioBlock.DisplaySize);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, IM_COL32(0, 0, 0, 180));
+    ImGui::Begin("##mandatory_overlay", nullptr,
+                 ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                     ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
+                     ImGuiWindowFlags_NoInputs);
+    ImGui::End();
+    ImGui::PopStyleColor();
+
+    // 강제 업데이트 팝업만 렌더링하고 나머지 UI 팝업은 건너뜀
+    RenderUpdatePopup();
+    return;
+  }
 
   if (m_settingsWin.IsOpen()) {
     m_settingsWin.Render();
@@ -2950,7 +2961,18 @@ void MainWindow::RenderUpdatePopup() {
   int flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
               ImGuiWindowFlags_AlwaysAutoResize;
   if (ImGui::BeginPopupModal("##update_popup", nullptr, flags)) {
-    ImGui::TextColored(Theme::COLOR_CYAN, u8"🚀 새로운 업데이트 가능!");
+
+    // [강제 업데이트] mandatory 모드에서는 제목을 강조 + 경고 문구 추가
+    if (m_isMandatoryUpdate) {
+      ImGui::TextColored(Theme::COLOR_RED, u8"⚠ 필수 업데이트");
+      ImGui::Spacing();
+      ImGui::TextColored(Theme::TEXT_GRAY,
+                         u8"이 버전은 더 이상 지원되지 않습니다.");
+      ImGui::TextColored(Theme::TEXT_GRAY,
+                         u8"업데이트 후 사용할 수 있습니다.");
+    } else {
+      ImGui::TextColored(Theme::COLOR_CYAN, u8"🚀 새로운 업데이트 가능!");
+    }
     ImGui::Spacing();
     ImGui::TextColored(Theme::TEXT_WHITE, u8"최신 버전: %s (현재: %s)",
                        m_latestVersion.c_str(), APP_VERSION);
@@ -2965,27 +2987,69 @@ void MainWindow::RenderUpdatePopup() {
     float cw = ImGui::GetContentRegionAvail().x;
     float btnW = m_isMandatoryUpdate ? cw : (cw - 8) / 2;
 
-    ImGui::PushStyleColor(ImGuiCol_Button, Theme::ToU32(Theme::GRAD_START));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
-                          Theme::ToU32(Theme::GRAD_END));
-    ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(0, 0, 0, 255));
-
-    if (ImGui::Button(u8"지금 업데이트", {btnW, 36})) {
-      std::thread([this]() { DownloadAndExecuteUpdate(); }).detach();
-      ImGui::CloseCurrentPopup();
-      m_showUpdatePopup = false;
+    // ── 다운로드 진행 중 ──
+    if (m_updateDownloading.load()) {
+      ImGui::Spacing();
+      ImGui::TextColored(Theme::COLOR_CYAN, u8"⏳ 업데이트 다운로드 중...");
+      ImGui::Spacing();
     }
-    ImGui::PopStyleColor(3);
+    // ── 다운로드 실패 시 재시도 버튼 ──
+    else if (m_updateDownloadFailed) {
+      ImGui::TextColored(Theme::COLOR_RED, u8"다운로드에 실패했습니다.");
+      ImGui::Spacing();
 
-    if (!m_isMandatoryUpdate) {
-      ImGui::SameLine(0, 8);
-      ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(60, 60, 60, 255));
-      ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(90, 90, 90, 255));
-      if (ImGui::Button(u8"나중에", {btnW, 36})) {
-        ImGui::CloseCurrentPopup();
-        m_showUpdatePopup = false;
+      ImGui::PushStyleColor(ImGuiCol_Button, Theme::ToU32(Theme::GRAD_START));
+      ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
+                            Theme::ToU32(Theme::GRAD_END));
+      ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(0, 0, 0, 255));
+      if (ImGui::Button(u8"다시 시도", {cw, 36})) {
+        m_updateDownloadFailed = false;
+        m_updateDownloading = true;
+        std::thread([this]() {
+          DownloadAndExecuteUpdate();
+          // DownloadAndExecuteUpdate 가 exit(0) 하지 않았다면 실패
+          m_updateDownloading = false;
+          m_updateDownloadFailed = true;
+        }).detach();
       }
-      ImGui::PopStyleColor(2);
+      ImGui::PopStyleColor(3);
+    }
+    // ── 기본 상태: 업데이트 버튼 ──
+    else {
+      ImGui::PushStyleColor(ImGuiCol_Button, Theme::ToU32(Theme::GRAD_START));
+      ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
+                            Theme::ToU32(Theme::GRAD_END));
+      ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(0, 0, 0, 255));
+
+      if (ImGui::Button(u8"지금 업데이트", {btnW, 36})) {
+        if (m_isMandatoryUpdate) {
+          // 강제 업데이트: 팝업 닫지 않고 다운로드 시작, 완료 시 exit(0)
+          m_updateDownloading = true;
+          std::thread([this]() {
+            DownloadAndExecuteUpdate();
+            // exit(0) 안 됐으면 실패
+            m_updateDownloading = false;
+            m_updateDownloadFailed = true;
+          }).detach();
+        } else {
+          // 선택적 업데이트: 기존 동작 — 팝업 닫고 백그라운드 다운로드
+          std::thread([this]() { DownloadAndExecuteUpdate(); }).detach();
+          ImGui::CloseCurrentPopup();
+        }
+      }
+      ImGui::PopStyleColor(3);
+
+      // 선택적 업데이트일 때만 "나중에" 버튼 표시
+      if (!m_isMandatoryUpdate) {
+        ImGui::SameLine(0, 8);
+        ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(60, 60, 60, 255));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
+                              IM_COL32(90, 90, 90, 255));
+        if (ImGui::Button(u8"나중에", {btnW, 36})) {
+          ImGui::CloseCurrentPopup();
+        }
+        ImGui::PopStyleColor(2);
+      }
     }
 
     ImGui::EndPopup();
