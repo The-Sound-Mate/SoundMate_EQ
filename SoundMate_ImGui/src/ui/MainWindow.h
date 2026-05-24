@@ -115,6 +115,13 @@ private:
   std::vector<float> m_masterTransitionStart;
   std::vector<float> m_masterTransitionTarget;
 
+  // [수동 초기화 복원용] 곡별 "원본 분석 EQ" 인-메모리 스냅샷.
+  //   AI/Prompt/Cache/GlobalAverage 적용 순간의 master31 을 백업.
+  //   수동 슬라이더 조작은 origin=Manual 이라 스냅샷에 영향 X.
+  //   곡이 바뀌면 클리어 — 다음 자동 적용 시 새로 갱신.
+  std::vector<float> m_aiOriginalGains31;
+  std::string m_aiOriginalSongKey;
+
   static const std::vector<int> BANDS_5;
   static const std::vector<int> BANDS_10;
   static const std::vector<int> BANDS_15;

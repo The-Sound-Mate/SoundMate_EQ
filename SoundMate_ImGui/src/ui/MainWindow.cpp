@@ -967,6 +967,18 @@ void MainWindow::Render() {
     } else {
       m_masterTransitionTarget = m_eqGains31Master; // no-op transition
     }
+
+    // [수동 초기화 복원용] AI/Prompt/GlobalAverage 시점의 master 스냅샷.
+    //   Cache origin 은 manual 값이 캐시에서 반환된 경우도 포함하므로 제외 →
+    //   재생 시 직전 manual 이 snapshot 으로 잡혀 잘못 복원되는 사고 방지.
+    //   Cache 케이스는 수동 초기화의 2순위 (ClearManualEQ 후 캐시 재조회) 가 처리.
+    EqOrigin curOrigin = m_eqOrigin.load();
+    if (m_masterTransitionTarget.size() == 31 &&
+        (curOrigin == EqOrigin::AI || curOrigin == EqOrigin::Prompt ||
+         curOrigin == EqOrigin::GlobalAverage)) {
+      m_aiOriginalGains31 = m_masterTransitionTarget;
+      m_aiOriginalSongKey = m_currentTitle + "|" + m_currentArtist;
+    }
   }
 
   // ── 곡 변경 처리 (메인 스레드에서 안전하게) ──
@@ -993,6 +1005,9 @@ void MainWindow::Render() {
       m_rawArtist = song.artist;
       m_displayTitle = song.title + " - " + song.artist;
       m_marqueeOffset = 0.0f;
+      // [수동 초기화 복원용] 곡 바뀜 → 이전 곡 원본 스냅샷 무효화.
+      m_aiOriginalGains31.clear();
+      m_aiOriginalSongKey.clear();
       // [LOG] 정규화 결과 + 메타 출력
       std::string logMsg =
           artist + " - " + title +
@@ -2112,20 +2127,35 @@ void MainWindow::RenderBottomBar() {
   if (ImGui::Button("수동 초기화", {110, 0})) {
     g_recordManager.ClearManualEQ(m_currentTitle, m_currentArtist);
 
-    EQEntry *cached =
-        g_recordManager.GetCachedEQ(m_currentTitle, m_currentArtist);
     bool restored = false;
-    if (cached && cached->gains31.size() == 31) {
-      // [최종] AI 원본 = 31밴드. master31 에 직접 복원 + 현재 뷰 alias readout.
-      m_eqGains31Master = cached->gains31;
+
+    // [1순위] 인-메모리 "원본 분석 EQ" 스냅샷 — 캐시 miss 무관.
+    //   AI/Prompt/GlobalAverage 적용 시점에 master 가 저장돼 있음.
+    std::string curKey = m_currentTitle + "|" + m_currentArtist;
+    if (m_aiOriginalGains31.size() == 31 &&
+        !m_aiOriginalSongKey.empty() && m_aiOriginalSongKey == curKey) {
+      m_eqGains31Master = m_aiOriginalGains31;
       SyncCurrentFromMaster();
       ApplyEQNoSave();
       SetStatus("Restored to AI Original.", Theme::TEXT_GRAY);
       restored = true;
     }
 
+    // [2순위] 디스크/메모리 캐시 — 스냅샷이 비어 있을 때 fallback.
     if (!restored) {
-      // [최종] Reset to Flat = 전체 31밴드 master 0으로. 진정한 Flat.
+      EQEntry *cached =
+          g_recordManager.GetCachedEQ(m_currentTitle, m_currentArtist);
+      if (cached && cached->gains31.size() == 31) {
+        m_eqGains31Master = cached->gains31;
+        SyncCurrentFromMaster();
+        ApplyEQNoSave();
+        SetStatus("Restored to AI Original.", Theme::TEXT_GRAY);
+        restored = true;
+      }
+    }
+
+    // [3순위] 분석 이력이 전혀 없는 곡 — 어쩔 수 없이 Flat.
+    if (!restored) {
       m_eqGains31Master.assign(31, 0.f);
       SyncCurrentFromMaster();
       ApplyEQNoSave();
@@ -2136,37 +2166,27 @@ void MainWindow::RenderBottomBar() {
   ImGui::SameLine(0, 8);
 
   // AI 초기화 — Free 플랜에서는 노출 자체를 막는다 (의미 없는 버튼 제거).
+  //   [의도] 사용자 프롬프트로 추가한 "prompt" 소스만 제거하고, 원본 자동 분석
+  //   "AI" 소스의 EQ 로 복원. AI 재분석은 트리거하지 않음.
   if (aiEligible) {
     ImGui::PushStyleColor(ImGuiCol_Button, Theme::ToU32(Theme::GRAD_START));
     if (ImGui::Button("AI 초기화", {100, 0})) {
       g_recordManager.ClearPromptEQ(m_currentTitle, m_currentArtist);
 
-      EQEntry *cached =
-          g_recordManager.GetCachedEQ(m_currentTitle, m_currentArtist);
-      bool restored = false;
-      if (cached) {
-        std::vector<float> *target = nullptr;
-        if (m_currentBands.size() == 5 && !cached->gains5.empty())
-          target = &cached->gains5;
-        else if (m_currentBands.size() == 10 && !cached->gains10.empty())
-          target = &cached->gains10;
-        else if (m_currentBands.size() == 15 && !cached->gains15.empty())
-          target = &cached->gains15;
-        else if (!cached->gains31.empty())
-          target = &cached->gains31;
+      // [AI 소스 한정 조회] 우선순위(direct/manual/prompt/AI) 무시하고 "AI" 만.
+      //   direct/manual 이 있어도 무시 — 원본 자동 분석값으로 정확히 복원.
+      EQEntry *aiBaseline = g_recordManager.GetCachedEQBySource(
+          m_currentTitle, m_currentArtist, "AI");
 
-        if (target) {
-          m_eqGains = *target;
-          ApplyEQNoSave();
-          SetStatus("Restored to Baseline AI.", Theme::COLOR_GREEN);
-          restored = true;
-        }
-      }
-
-      if (!restored) {
-        // 기록이 아예 없으면 새로 생성
-        if (!m_currentTitle.empty())
-          TriggerAIGeneration();
+      if (aiBaseline && aiBaseline->gains31.size() == 31) {
+        // master31 SSOT 로 복원 + 현재 뷰는 log-linear 보간 readout.
+        m_eqGains31Master = aiBaseline->gains31;
+        SyncCurrentFromMaster();
+        ApplyEQNoSave();
+        SetStatus("Restored to Baseline AI.", Theme::COLOR_GREEN);
+      } else {
+        // 원본 AI 분석 기록 자체가 없는 곡 — 재분석 트리거 X, 상태만 안내.
+        SetStatus(u8"원본 AI 분석 기록이 없습니다.", Theme::TEXT_GRAY);
       }
     }
     ImGui::PopStyleColor();

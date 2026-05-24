@@ -122,6 +122,11 @@ public:
 
   // ── 로컬 캐시 ──────────────────────────────────────────────────
   EQEntry *GetCachedEQ(const std::string &title, const std::string &artist);
+  // 특정 source("AI"/"prompt"/"manual"/"direct") 만 골라 조회.
+  //   AI 초기화 버튼처럼 우선순위 무시하고 특정 소스만 필요한 경우 사용.
+  EQEntry *GetCachedEQBySource(const std::string &title,
+                               const std::string &artist,
+                               const std::string &source);
   void SaveInteraction(const EQEntry &entry);
   bool ClearManualEQ(const std::string &title, const std::string &artist);
   bool ClearPromptEQ(const std::string &title, const std::string &artist);

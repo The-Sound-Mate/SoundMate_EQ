@@ -1319,6 +1319,53 @@ EQEntry *RecordManager::GetCachedEQ(const std::string &title,
   return nullptr;
 }
 
+// 특정 source 만 골라 조회. GetCachedEQ 와 동일한 데이터 변환·업샘플 로직을 쓰되
+//   우선순위 순회를 건너뛰고 src 한 개만 본다.
+EQEntry *RecordManager::GetCachedEQBySource(const std::string &title,
+                                            const std::string &artist,
+                                            const std::string &source) {
+  std::string key = NormalizeKey(title, artist);
+
+  auto build = [&](const json &d) -> EQEntry * {
+    EQEntry e;
+    e.title = title;
+    e.artist = artist;
+    e.source = source;
+    auto mb = d.value("multi_bands", json::object());
+    if (mb.contains("5"))
+      e.gains5 = mb["5"].get<std::vector<float>>();
+    if (mb.contains("10"))
+      e.gains10 = mb["10"].get<std::vector<float>>();
+    if (mb.contains("15"))
+      e.gains15 = mb["15"].get<std::vector<float>>();
+    if (mb.contains("31"))
+      e.gains31 = mb["31"].get<std::vector<float>>();
+
+    if (e.gains31.empty()) {
+      if (e.gains15.size() == 15)
+        e.gains31 = SampleLogLinear(e.gains15, AIClient::F15, AIClient::F31);
+      else if (e.gains10.size() == 10)
+        e.gains31 = SampleLogLinear(e.gains10, AIClient::F10, AIClient::F31);
+      else if (e.gains5.size() == 5)
+        e.gains31 = SampleLogLinear(e.gains5, AIClient::F5, AIClient::F31);
+    }
+    // GetCachedEQ 와 동일하게 m_entryCache 슬롯에 저장해 포인터 안정성 확보.
+    m_entryCache[key] = e;
+    return &m_entryCache[key];
+  };
+
+  // history 우선 — 가장 최신 동기화본
+  if (m_historyMap.count(key) && m_historyMap[key].count(source)) {
+    auto &rec = m_historyMap[key][source];
+    return build(rec.value("data", rec));
+  }
+  if (m_cache["songs"].contains(key) &&
+      m_cache["songs"][key].contains(source)) {
+    return build(m_cache["songs"][key][source]);
+  }
+  return nullptr;
+}
+
 bool RecordManager::ClearManualEQ(const std::string &title,
                                   const std::string &artist) {
   std::string key = NormalizeKey(title, artist);
