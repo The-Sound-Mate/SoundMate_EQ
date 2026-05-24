@@ -52,8 +52,11 @@ inline void WriteAPOLog(const char *msg) {
 //   samples — no click/pop from state reset.
 // ============================================================================
 struct BiquadCoeffs {
-  float b0n, b1n, b2n; // numerator   (normalized by a0)
-  float a1n, a2n;      // denominator (normalized by a0)
+  // [double precision] 단정밀도 direct-form biquad 는 f0/fs < 0.001 (≈48Hz@48kHz)
+  //   에서 차분방정식 라운딩 누적으로 저역 정확도 급락. EqualizerAPO 와 동일하게
+  //   계수/상태를 double 로 유지 — 베이스 부스트가 sub-bass(20-40Hz) 까지 정확.
+  double b0n, b1n, b2n; // numerator   (normalized by a0)
+  double a1n, a2n;      // denominator (normalized by a0)
 };
 
 // ============================================================================
@@ -70,13 +73,13 @@ class BiquadFilter {
 public:
   static constexpr unsigned kRampLen = 1024; // ~21ms @ 48kHz
 
-  BiquadFilter() : z1(0), z2(0), rampLeft(0) {
+  BiquadFilter() : z1(0.0), z2(0.0), rampLeft(0) {
     // identity passthrough
-    current.b0n = 1.f;
-    current.b1n = 0.f;
-    current.b2n = 0.f;
-    current.a1n = 0.f;
-    current.a2n = 0.f;
+    current.b0n = 1.0;
+    current.b1n = 0.0;
+    current.b2n = 0.0;
+    current.a1n = 0.0;
+    current.a2n = 0.0;
     target = current;
   }
 
@@ -89,10 +92,11 @@ public:
   }
 
   // Called from AVRT thread — per-sample
+  // 입출력 인터페이스는 float (APO 버퍼가 float32) — 내부 산술은 double.
   inline float process(float in) {
     // 계수 lerp 진행 — 매 호출마다 (target - current) / rampLeft 만큼 이동
     if (rampLeft > 0) {
-      float step = 1.f / (float)rampLeft;
+      double step = 1.0 / (double)rampLeft;
       current.b0n += (target.b0n - current.b0n) * step;
       current.b1n += (target.b1n - current.b1n) * step;
       current.b2n += (target.b2n - current.b2n) * step;
@@ -102,39 +106,44 @@ public:
         current = target; // 부동소수 누적 제거
     }
 
-    float out = current.b0n * in + z1;
-    z1 = current.b1n * in - current.a1n * out + z2;
-    z2 = current.b2n * in - current.a2n * out;
-    // Flush denormals to zero (prevents CPU slowdown)
-    if (fabsf(z1) < 1e-30f)
-      z1 = 0.f;
-    if (fabsf(z2) < 1e-30f)
-      z2 = 0.f;
-    return out;
+    // Transposed Direct-Form II — double 산술로 저역 정확도 확보.
+    double inD = (double)in;
+    double out = current.b0n * inD + z1;
+    z1 = current.b1n * inD - current.a1n * out + z2;
+    z2 = current.b2n * inD - current.a2n * out;
+    // Flush denormals to zero (prevents CPU slowdown). double denormal ≈ 2.2e-308.
+    if (std::fabs(z1) < 1e-300)
+      z1 = 0.0;
+    if (std::fabs(z2) < 1e-300)
+      z2 = 0.0;
+    return (float)out;
   }
 
   // NaN 감염 또는 디바이스 reset 시 호출 — 모든 상태 0 으로 +
   // 진행 중인 lerp 도 즉시 종료 (current = target 으로 스냅).
   void emergencyReset() {
-    z1 = 0.f;
-    z2 = 0.f;
+    z1 = 0.0;
+    z2 = 0.0;
     current = target;
     rampLeft = 0;
   }
 
+  // [double precision] RBJ Audio EQ Cookbook peaking — double 산술로 계산.
+  //   sinf/cosf/powf(단정밀도) → sin/cos/pow(배정밀도). 입력은 편의상 float
+  //   유지하되 내부 모든 중간값은 double.
   static BiquadCoeffs makePeaking(float freq, float gainDb, float Q,
                                   float sampleRate) {
-    const float pi = 3.14159265f;
-    float w0 = 2.f * pi * freq / sampleRate;
-    float alpha = sinf(w0) / (2.f * Q);
-    float A = powf(10.f, gainDb / 40.f);
-    float a0 = 1.f + alpha / A;
+    const double pi = 3.14159265358979323846;
+    double w0 = 2.0 * pi * (double)freq / (double)sampleRate;
+    double alpha = std::sin(w0) / (2.0 * (double)Q);
+    double A = std::pow(10.0, (double)gainDb / 40.0);
+    double a0 = 1.0 + alpha / A;
     BiquadCoeffs out;
-    out.b0n = (1.f + alpha * A) / a0;
-    out.b1n = (-2.f * cosf(w0)) / a0;
-    out.b2n = (1.f - alpha * A) / a0;
-    out.a1n = (-2.f * cosf(w0)) / a0;
-    out.a2n = (1.f - alpha / A) / a0;
+    out.b0n = (1.0 + alpha * A) / a0;
+    out.b1n = (-2.0 * std::cos(w0)) / a0;
+    out.b2n = (1.0 - alpha * A) / a0;
+    out.a1n = (-2.0 * std::cos(w0)) / a0;
+    out.a2n = (1.0 - alpha / A) / a0;
     return out;
   }
 
@@ -142,7 +151,7 @@ private:
   BiquadCoeffs current; // 실제 사용 중인 계수 (process 가 lerp 로 갱신)
   BiquadCoeffs target;  // 새 setCoeffs 가 넣은 목표
   unsigned rampLeft;    // 남은 lerp 샘플 수 (0 = lerp 종료)
-  float z1, z2;
+  double z1, z2;        // [double precision] direct-form 상태 저장 — 저역 정확도.
 };
 
 // ============================================================================
@@ -150,12 +159,17 @@ private:
 // ============================================================================
 class DCBlocker {
 public:
-  DCBlocker() : x1(0), y1(0) {}
+  DCBlocker() : x1(0), y1(0), R(0.999346f) {}
+
+  // [sample rate adaptive] fc=5Hz HPF, R = 1 - 2π·fc/fs.
+  //   고정 R 이면 96/192kHz 환경에서 fc 가 10/20Hz 로 드리프트 → sub-bass 손실.
+  //   초기화 시 1회 호출하면 어떤 fs 에서도 정확히 fc=5Hz 유지.
+  void prepare(float sampleRate) {
+    R = 1.0f - (2.0f * 3.14159265f * 5.0f / sampleRate);
+  }
 
   inline float process(float x) {
-    // y[n] = x[n] - x[n-1] + R*y[n-1],  R = 1 - 2π·fc/fs
-    // fc = 5 Hz at 48 kHz → R ≈ 0.999346
-    static const float R = 0.999346f;
+    // y[n] = x[n] - x[n-1] + R*y[n-1]
     float y = x - x1 + R * y1;
     x1 = x;
     y1 = y;
@@ -168,6 +182,7 @@ public:
 
 private:
   float x1, y1;
+  float R;
 };
 
 // ============================================================================
@@ -513,6 +528,7 @@ public:
 
     activeFilters.assign(SOUNDMATE_MAX_BANDS, std::vector<BiquadFilter>(maxCh));
     dcBlockers.assign(maxCh, DCBlocker());
+    for (auto &dc : dcBlockers) dc.prepare(rate);
     masterGain = 1.f;
     activeBands = 0;
 
@@ -633,7 +649,7 @@ public:
     for (unsigned f = 0; f < frames; ++f) {
       float maxAbs = 0.f;
 
-      // Per-channel: master gain → biquad chain → DC block
+      // Per-channel: master gain → biquad chain → DC block → NaN guard
       for (unsigned ch = 0; ch < outChannels; ++ch) {
         unsigned idx = f * outChannels + ch;
         unsigned filterCh =
@@ -646,22 +662,28 @@ public:
             s = activeFilters[b][filterCh].process(s);
           s = dcBlockers[ch].process(s);
         }
+        // NaN/Inf guard — 한 번 감염되면 filter z1/z2 가 폭주.
+        if (!std::isfinite(s)) s = 0.f;
         outBuf[idx] = s;
 
         float a = fabsf(s);
-        if (a > maxAbs)
-          maxAbs = a;
+        if (a > maxAbs) maxAbs = a;
       }
 
-      // Linked-stereo loudness normalization
-      float gain = normalizer.processFrame(maxAbs);
+      // [v12-lookahead] 2ms lookahead brickwall limiter.
+      //   bass sine 가 ±1.0 천장에 부딪혀 사각파로 찌그러지는 것 방지 (hard clamp
+      //   는 fundamental 을 죽이고 고차 고조파만 생성 → 베이스 사라짐).
+      //   smooth gain reduction 으로 fundamental 보존, 깊은 저음 유지.
+      //   in-place: 출력은 2ms 지연된 신호.
+      lookaheadLimiter.processFrame(outBuf, f, outChannels, maxAbs);
 
-      // [v12-lookahead] 1) normalizer gain 적용 → 2) LookaheadLimiter (2ms 지연 +
-      //   미래 peak 미리 보고 brickwall). 출력은 in-place 로 2ms 지연된 신호.
+      // 안전망 hard clamp — limiter 가 ceiling=0.9661 보장하므로 정상 동작 시
+      // 영향 0. 만일의 드라이버 fault 차단용 마지막 보루 (BSOD 방지).
       for (unsigned ch = 0; ch < outChannels; ++ch) {
-        outBuf[f * outChannels + ch] *= gain;
+        float &s = outBuf[f * outChannels + ch];
+        if (s > 1.f)  s = 1.f;
+        else if (s < -1.f) s = -1.f;
       }
-      lookaheadLimiter.processFrame(outBuf, f, outChannels, maxAbs * gain);
 
       // limiter active → SHM 신호 + 200ms decay 카운터 (UI 인디케이터).
       if (lookaheadLimiter.isActive()) {
@@ -675,9 +697,6 @@ public:
             pSettings->limiterActiveFlag.store(0, std::memory_order_relaxed);
         }
       }
-
-      if (maxAbs > peakSinceLog)
-        peakSinceLog = maxAbs;
     }
 
     // ────────────────────────────────────────────────────────────────────

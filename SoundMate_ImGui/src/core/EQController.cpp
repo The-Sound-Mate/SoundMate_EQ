@@ -112,11 +112,17 @@ bool EQController::WriteEQFile(const std::string &filePath,
   }
 }
 
-// [최종 결정] 31밴드 SSOT 정책 — 엔진은 항상 31밴드.
-//   1/3 옥타브 표준 Q = 4.32. 인접 간섭 최소, 베이스 단단.
-//   클립 방지는 DLL 내부 SamplePeakLimiter + UI 자동 Preamp 보정 2단으로.
-float EQController::CalculateQ(int /*numBands*/) {
-  return 4.32f;
+// 옥타브 폭에 맞는 Butterworth-like peaking Q.
+//   Q = 1 / (2^(BW/2) - 2^(-BW/2)),  BW = 옥타브/밴드
+//   F31=1/3 oct, F15=2/3 oct, F10=1 oct, F5=2 oct (EqualizerAPO Peace 동일).
+float EQController::CalculateQ(int numBands) {
+  switch (numBands) {
+    case 5:  return 0.667f;   // 2 oct
+    case 10: return 1.414f;   // 1 oct
+    case 15: return 2.145f;   // 2/3 oct
+    case 31:
+    default: return 4.318f;   // 1/3 oct
+  }
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -130,9 +136,7 @@ bool EQController::ApplyEQ(const std::vector<float> &gains,
 
   float q = CalculateQ((int)freqs.size());
 
-  float maxPositiveGain = 0.0f;
-  for (float g : gains) maxPositiveGain = std::max(maxPositiveGain, g);
-  float preamp = std::max(-maxPositiveGain, -1.0f);
+  float preamp = 0.0f;
 
   std::ostringstream oss;
   oss << "Preamp: " << std::fixed << std::setprecision(1) << preamp << " dB\n";

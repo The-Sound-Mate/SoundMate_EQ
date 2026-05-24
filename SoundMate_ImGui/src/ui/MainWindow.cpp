@@ -460,14 +460,27 @@ void MainWindow::ApplyEQNoSave() {
   EnsureMaster31();
   std::string dev = GetSelectedDeviceGuid();
   static std::atomic<bool> s_healthRecoveryInFlight{false};
-  if (!m_eqCtrl->ApplyEQ(m_eqGains31Master, AIClient::F31, dev)) {
+
+  // 뷰 모드별로 N개 필터를 송신 — 엔진이 옥타브 폭에 맞는 Q 로 처리.
+  // 31밴드 외엔 master31 을 N밴드 주파수에서 log-주파수 보간 (Map31ToTargetBands).
+  std::vector<float> sendGains;
+  std::vector<int>   sendFreqs;
+  if (m_ai && !m_currentBands.empty() && (int)m_currentBands.size() != 31) {
+    sendGains = m_ai->Map31ToTargetBands(m_eqGains31Master, m_currentBands);
+    sendFreqs = m_currentBands;
+  } else {
+    sendGains = m_eqGains31Master;
+    sendFreqs = AIClient::F31;
+  }
+
+  if (!m_eqCtrl->ApplyEQ(sendGains, sendFreqs, dev)) {
     bool expected = false;
     if (s_healthRecoveryInFlight.compare_exchange_strong(expected, true)) {
       SetStatus(u8"EQ 엔진 응답 없음 — 재기동 중...", Theme::COLOR_YELLOW);
       EnsureControllerHealthy();
-      std::thread([this, dev]() {
+      std::thread([this, dev, sendGains, sendFreqs]() {
         std::this_thread::sleep_for(std::chrono::seconds(1));
-        if (!m_eqCtrl->ApplyEQ(m_eqGains31Master, AIClient::F31, dev)) {
+        if (!m_eqCtrl->ApplyEQ(sendGains, sendFreqs, dev)) {
           SetStatus(u8"EQ 설정 엔진 응답 없음. 프로그램을 재시작해주세요.",
                     Theme::COLOR_RED);
         }
