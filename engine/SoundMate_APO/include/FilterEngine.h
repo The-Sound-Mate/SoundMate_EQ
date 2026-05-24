@@ -672,10 +672,10 @@ public:
 
       // [v12-lookahead] 2ms lookahead brickwall limiter.
       //   bass sine 가 ±1.0 천장에 부딪혀 사각파로 찌그러지는 것 방지 (hard clamp
-      //   는 fundamental 을 죽이고 고차 고조파만 생성 → 베이스 사라짐).
+      //   는 fundamental 을 죽이고 고조파만 생성 → 베이스 사라짐).
       //   smooth gain reduction 으로 fundamental 보존, 깊은 저음 유지.
       //   in-place: 출력은 2ms 지연된 신호.
-      lookaheadLimiter.processFrame(outBuf, f, outChannels, maxAbs);
+      // lookaheadLimiter.processFrame(outBuf, f, outChannels, maxAbs);
 
       // 안전망 hard clamp — limiter 가 ceiling=0.9661 보장하므로 정상 동작 시
       // 영향 0. 만일의 드라이버 fault 차단용 마지막 보루 (BSOD 방지).
