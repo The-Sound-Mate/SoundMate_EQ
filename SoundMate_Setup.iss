@@ -4,16 +4,20 @@
 [Setup]
 AppName=SoundMate Equalizer
 AppVersion=0.0.1
-DefaultDirName={pf}\SoundMate Equalizer
-DefaultGroupName=SoundMate
+DefaultDirName={commonpf}\SoundMate Equalizer
+DefaultGroupName=SoundMate Equalizer
 LicenseFile=Agreement.txt
 PrivilegesRequired=admin
 OutputBaseFilename=SoundMate_Setup_v0.0.1
 OutputDir=installer_output
+SetupIconFile=SoundMate_ImGui\assets\logo.ico
 Compression=lzma
 SolidCompression=yes
-ArchitecturesAllowed=x64
-ArchitecturesInstallIn64BitMode=x64
+ArchitecturesAllowed=x64compatible
+ArchitecturesInstallIn64BitMode=x64compatible
+
+[Languages]
+Name: "korean"; MessagesFile: "Korean.isl"
 
 [Languages]
 Name: "korean"; MessagesFile: "Korean.isl"
@@ -55,8 +59,8 @@ Filename: "{cmd}"; Parameters: "/C taskkill /F /IM SoundMate_Controller.exe /IM 
 ; 설치 완료 후 C++ 드라이버 자동 등록 프로그램 실행 (PowerShell 의존성 완전 제거)
 Filename: "{app}\SoundMate_setup.exe"; Flags: waituntilterminated runhidden; StatusMsg: "사운드메이트 오디오 드라이버 설정 및 레지스트리 등록 중..."
 ; 설치 완료 후 프로그램 자동 실행
-Filename: "{app}\SoundMate Equalizer.exe"; Description: "{cm:LaunchProgram,SoundMate Equalizer}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\SoundMate Equalizer.exe"; Description: "{cm:LaunchProgram,SoundMate Equalizer}"; Flags: nowait postinstall skipifsilent shellexec
 
 ; PowerShell 의존 제거. C++ uninstall이 모든 청소 담당.
 [UninstallRun]
-Filename: "{app}\SoundMate_uninstall.exe"; Flags: runhidden waituntilterminated
+Filename: "{app}\SoundMate_uninstall.exe"; RunOnceId: "UninstallDriver"; Flags: runhidden waituntilterminated
