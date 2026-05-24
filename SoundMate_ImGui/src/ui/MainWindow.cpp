@@ -565,9 +565,15 @@ void MainWindow::TriggerAIGeneration() {
   auto abortFlagPtr = m_aiAbortFlag;
   m_aiThread = std::thread([this, prompt, accessToken, aiTitle, aiArtist,
                             userPref, myEpoch, abortFlagPtr]() {
+    // 어떤 경로로 빠져나가도 m_aiProcessing 은 반드시 false 로 복원되어야 한다.
+    // 안 그러면 후속 곡의 TriggerAIGeneration 가 영구히 차단되는 데드락 발생.
+    struct AiProcessingGuard {
+      std::atomic<bool>& flag;
+      ~AiProcessingGuard() { flag = false; }
+    } _aiProcGuard{m_aiProcessing};
+
     if (!m_ai) {
       SetStatus("AI Setup Error: client not initialized", Theme::COLOR_RED);
-      m_aiProcessing = false;
       return;
     }
 
@@ -578,14 +584,46 @@ void MainWindow::TriggerAIGeneration() {
       return;
     }
 
-    SetStatus("AI: Sending request to Proxy...", Theme::TEXT_WHITE);
-    auto result =
-        m_ai->GenerateAllBandsEQ(aiTitle, aiArtist, m_currentGenre, prompt,
-                                 userPref, accessToken, abortFlagPtr.get());
+    // [503/429 재시도] 모델 일시 과부하·레이트리밋은 지수 백오프로 최대 3회
+    //   시도. 곡 변경(epoch 불일치) 또는 abort 플래그가 켜지면 즉시 중단.
+    constexpr int kAiAttempts = 3;
+    constexpr int kAiBackoffMs[kAiAttempts] = {0, 3000, 10000};
+    EQBands result;
+    bool aiAborted = false;
 
-    // [A-1] 응답 도착 직후 epoch 재검사 — 사용자가 응답 대기 중 곡 바꿨으면
-    // 폐기.
-    if (m_songEpoch.load() != myEpoch) {
+    for (int attempt = 0; attempt < kAiAttempts; ++attempt) {
+      if (kAiBackoffMs[attempt] > 0) {
+        int slept = 0;
+        while (slept < kAiBackoffMs[attempt]) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(100));
+          slept += 100;
+          if (m_songEpoch.load() != myEpoch || abortFlagPtr->load()) {
+            aiAborted = true;
+            break;
+          }
+        }
+        if (aiAborted) break;
+        SetStatus(u8"AI 재시도 중... (" + std::to_string(attempt + 1) + "/" +
+                      std::to_string(kAiAttempts) + ")",
+                  Theme::TEXT_WHITE);
+      } else {
+        SetStatus("AI: Sending request to Proxy...", Theme::TEXT_WHITE);
+      }
+
+      result = m_ai->GenerateAllBandsEQ(aiTitle, aiArtist, m_currentGenre,
+                                        prompt, userPref, accessToken,
+                                        abortFlagPtr.get());
+
+      if (m_songEpoch.load() != myEpoch) {
+        aiAborted = true;
+        break;
+      }
+
+      // 503/429 가 아닌 결과(성공 or 다른 에러)는 즉시 결과 처리 단계로.
+      if (result.errorCode != 503 && result.errorCode != 429) break;
+    }
+
+    if (aiAborted) {
       SetStatus(u8"AI: 응답 폐기 (곡 변경됨)", Theme::TEXT_GRAY);
       return;
     }
@@ -601,13 +639,15 @@ void MainWindow::TriggerAIGeneration() {
     };
 
     if (result.errorCode == 429) {
-      applyFlatOnAiFail();
-      SetStatus("AI Rate Limit. Wait 30s. (EQ Flat)", Theme::COLOR_RED);
+      // [UX] 일시 레이트리밋 — 이전 EQ 유지. Flat 강제 X.
+      SetStatus(u8"AI Rate Limit — 이전 EQ 유지 (재시도 모두 실패)",
+                Theme::COLOR_YELLOW);
       g_recordManager.LogAiError(m_currentTitle, m_currentArtist, "429",
                                  result.errorMsg);
     } else if (result.errorCode == 503) {
-      applyFlatOnAiFail();
-      SetStatus("AI Server Busy. (EQ Flat)", Theme::COLOR_RED);
+      // [UX] 모델 일시 과부하 — 이전 EQ 유지. Flat 강제 X.
+      SetStatus(u8"AI 서버 일시 과부하 — 이전 EQ 유지 (재시도 모두 실패)",
+                Theme::COLOR_YELLOW);
       g_recordManager.LogAiError(m_currentTitle, m_currentArtist, "503",
                                  result.errorMsg);
     } else if (result.errorCode == 401) {
@@ -686,9 +726,9 @@ void MainWindow::TriggerAIGeneration() {
       entry.deviceName = GetSelectedDeviceGuid();
       g_recordManager.SaveInteraction(entry);
     }
-    if (m_songEpoch.load() == myEpoch) {
-      m_aiProcessing = false;
-    }
+    // m_aiProcessing 은 위 AiProcessingGuard 의 RAII 가 reset 한다.
+    // (이전엔 epoch 불일치 시 reset 누락으로 후속 AI 호출이 영구 차단되는
+    //  데드락 버그가 있었음.)
   });
 }
 
