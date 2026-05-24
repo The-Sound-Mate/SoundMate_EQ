@@ -26,9 +26,8 @@ Source: "build\Release\SoundMate_Controller.exe"; DestDir: "{app}"; Flags: ignor
 Source: "build\Release\SoundMate_reset.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "build\Release\SoundMate_uninstall.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "build\Release\SoundMate_setup.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "build\Release\libcurl-x64.dll"; DestDir: "{app}"; Flags: ignoreversion
 
-; 레지스트리 설정 스크립트 (수동 트러블슈팅 및 복구용 보존)
-Source: "reset_registry.ps1"; DestDir: "{app}"; Flags: ignoreversion
 
 ; config 및 기타 필요한 리소스들
 Source: "config\*"; DestDir: "{app}\config"; Flags: ignoreversion recursesubdirs createallsubdirs
