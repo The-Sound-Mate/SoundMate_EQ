@@ -2,6 +2,7 @@
 #include "SettingsWindow.h"
 #include "../core/RecordManager.h"
 #include "Theme.h"
+#include "UIScale.h"
 #include <filesystem>
 #include <fstream>
 #include <windows.h>
@@ -172,7 +173,11 @@ void SettingsWindow::Render() {
   ImGuiIO &io = ImGui::GetIO();
   ImGui::SetNextWindowPos({io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f},
                           ImGuiCond_Always, {0.5f, 0.5f});
-  ImGui::SetNextWindowSize({450, 700}, ImGuiCond_Always);
+  // 1366x768 + 150% DPI 같은 환경에서 세로 700이 화면을 넘어 버튼 잘림 →
+  // DisplaySize 의 90% 안으로 클램프. 내용이 클램프된 높이를 초과하면
+  // ImGui 가 자동으로 스크롤바를 띄움(NoScrollbar 플래그 없음).
+  ImGui::SetNextWindowSize(UIScale::ClampPopupSize(UIScale::V(450, 700)),
+                           ImGuiCond_Always);
   ImGui::PushStyleColor(ImGuiCol_WindowBg, Theme::ToU32(Theme::PANEL_COLOR));
   ImGui::Begin("오디오 설정##settingswin", &m_open,
                ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize |

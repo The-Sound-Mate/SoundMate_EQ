@@ -1,6 +1,7 @@
 // src/ui/LoginWindow.cpp
 #include "LoginWindow.h"
 #include "Theme.h"
+#include "UIScale.h"
 #include "../core/RecordManager.h"
 #include "../core/FeatureFlags.h"
 #include <windows.h>
@@ -385,7 +386,7 @@ void LoginWindow::Render() {
 
     ImGuiIO& io = ImGui::GetIO();
     ImGui::SetNextWindowPos({io.DisplaySize.x*0.5f, io.DisplaySize.y*0.5f}, ImGuiCond_Always, {0.5f,0.5f});
-    ImGui::SetNextWindowSize({420, 460}, ImGuiCond_Always);
+    ImGui::SetNextWindowSize(UIScale::ClampPopupSize(UIScale::V(420, 460)), ImGuiCond_Always);
 
     ImGui::PushStyleColor(ImGuiCol_WindowBg, Theme::ToU32(Theme::PANEL_COLOR));
     ImGui::Begin("##login", nullptr,

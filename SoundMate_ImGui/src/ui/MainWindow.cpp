@@ -2,6 +2,7 @@
 #include "MainWindow.h"
 #include "../utils/StringUtils.h"
 #include "Theme.h"
+#include "UIScale.h"
 #include "imgui.h"
 #include <algorithm>
 #include <chrono>
@@ -1211,7 +1212,7 @@ void MainWindow::Render() {
   ImGuiIO &io = ImGui::GetIO();
   ImGui::SetNextWindowPos({0, 0});
   ImGui::SetNextWindowSize(io.DisplaySize);
-  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {20, 16});
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, UIScale::V(20, 16));
   ImGui::Begin("##main", nullptr,
                ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
                    ImGuiWindowFlags_NoMove |
@@ -1221,15 +1222,22 @@ void MainWindow::Render() {
   RenderTopBar();
   ImGui::Spacing();
 
-  // 좌우 패널 분할
-  float leftW = 260.0f;
-  // 비주얼라이저를 우측으로 옮기며 확보된 상단 공간만큼 패널 전체 높이를 늘림
-  float totalH = io.DisplaySize.y - 180.0f;
-  ImGui::BeginChild("##left", {leftW, totalH}, false);
+  // [Phase 3] 매직넘버(-180) 제거 — TopBar 의 실측 끝 Y 와 하단 예약 높이로
+  // 본문 영역을 산출. 하단 예약은 BottomBar(54) + StatusBar(24) + 여백 두 줄.
+  const float bodyStartY    = ImGui::GetCursorPosY();
+  const float kBottomReserveH = UIScale::Px(54.0f + 24.0f + 16.0f);
+  const float bodyH         = std::max(UIScale::Px(120.0f),
+                                       io.DisplaySize.y - bodyStartY - kBottomReserveH);
+
+  // [Phase 3] leftW 비례화 — 22% 범위에서 240~320px(스케일 적용) 사이로 클램프.
+  const float leftW = std::clamp(io.DisplaySize.x * 0.22f,
+                                 UIScale::Px(240.0f), UIScale::Px(320.0f));
+
+  ImGui::BeginChild("##left", {leftW, bodyH}, false);
   RenderLeftPanel();
   ImGui::EndChild();
-  ImGui::SameLine(0, 12);
-  ImGui::BeginChild("##right", {0, totalH}, false);
+  ImGui::SameLine(0, UIScale::Px(12));
+  ImGui::BeginChild("##right", {0, bodyH}, false);
   RenderVisualizer();
   ImGui::Spacing();
   RenderEQPanel();
@@ -1941,13 +1949,44 @@ void MainWindow::RenderEQPanel() {
   float h = ImGui::GetContentRegionAvail().y;
   Theme::DrawPanel(dl, pos, {pos.x + w, pos.y + h});
 
-  // (31-band detail active 인디케이터 출력 안 함)
+  // [Phase 6] 뷰 레이어 단독 다운그레이드 — 설정/SSOT(m_eqGains31Master) 는
+  // 건드리지 않고 31밴드 화면이 좁을 때만 15밴드로 표시. 창이 넓어지면 자동 복귀.
+  std::vector<int>   viewBandsCopy;
+  std::vector<float> viewGainsCopy;
+  std::vector<int>*   pBands = &m_currentBands;
+  std::vector<float>* pGains = &m_eqGains;
+  bool transientDowngrade = false;
+  if ((int)m_currentBands.size() == 31) {
+    // 31밴드가 충분히 표시되려면 슬롯당 최소 ~22px 필요.
+    float requiredW = UIScale::Px(22.0f) * 31.0f + UIScale::Px(24.0f);
+    if (w < requiredW) {
+      transientDowngrade = true;
+      viewBandsCopy = MainWindow::BANDS_15;
+      // 31밴드 SSOT 기준에서 15밴드로 다운샘플 — 게인 정확도 유지.
+      EnsureMaster31();
+      viewGainsCopy = DownsampleTo(m_eqGains31Master, 15);
+      pBands = &viewBandsCopy;
+      pGains = &viewGainsCopy;
+    }
+  }
 
-  ImGui::SetCursorScreenPos({pos.x + 12, pos.y + 10});
+  // 다운그레이드 안내 — 사용자가 "왜 설정이 바뀌었지?" 라고 오해하지 않게.
+  if (transientDowngrade) {
+    ImVec2 textPos{pos.x + UIScale::Px(12), pos.y + UIScale::Px(10)};
+    ImGui::SetCursorScreenPos(textPos);
+    ImGui::TextColored(Theme::TEXT_DARK_GRAY,
+                       u8"※ 창이 좁아 15밴드로 표시 중 (창을 넓히면 31밴드 복구)");
+  }
 
-  int n = (int)m_currentBands.size();
-  float slotW = (w - 24) / n;
-  float sliderH = std::min(h - 70.0f, 220.0f);
+  ImGui::SetCursorScreenPos({pos.x + UIScale::Px(12), pos.y + UIScale::Px(10)});
+
+  int n = (int)pBands->size();
+  float slotW = (w - UIScale::Px(24)) / n;
+  float sliderH = std::min(h - UIScale::Px(70.0f), UIScale::Px(220.0f));
+
+  // 다운그레이드 모드에서는 슬라이더 편집을 막아 master31 alias 일관성 보호.
+  // 창을 다시 넓히면 31밴드 편집 가능 상태로 자동 복귀.
+  if (transientDowngrade) ImGui::BeginDisabled(true);
 
   for (int i = 0; i < n; i++) {
     ImVec4 col = Theme::GetBandColor(i, n);
@@ -1955,7 +1994,8 @@ void MainWindow::RenderEQPanel() {
 
     // 1. 수직 슬라이더 그리기 (먼저 그려서 상태 체크)
     ImGui::SetCursorScreenPos(
-        {pos.x + 12 + i * slotW + slotW * 0.5f - 7, pos.y + 36});
+        {pos.x + UIScale::Px(12) + i * slotW + slotW * 0.5f - UIScale::Px(7),
+         pos.y + UIScale::Px(36)});
     ImGui::PushStyleColor(ImGuiCol_SliderGrab, Theme::ToU32(col));
     ImGui::PushStyleColor(ImGuiCol_SliderGrabActive,
                           Theme::ToU32(Theme::TEXT_WHITE));
@@ -1963,13 +2003,15 @@ void MainWindow::RenderEQPanel() {
 
     char id[32];
     snprintf(id, sizeof(id), "##eq%d", i);
-    bool changed = ImGui::VSliderFloat(id, {14, sliderH}, &m_eqGains[i], -12.0f,
-                                       12.0f, "");
+    // pGains 가 viewGainsCopy 를 가리킬 때는 transientDowngrade==true 라
+    // 슬라이더가 BeginDisabled 로 막혀 있어 안전.
+    bool changed = ImGui::VSliderFloat(id, {UIScale::Px(14), sliderH},
+                                       &(*pGains)[i], -12.0f, 12.0f, "");
 
     bool isHovered = ImGui::IsItemHovered();
     bool isActive = ImGui::IsItemActive();
 
-    if (changed) {
+    if (changed && !transientDowngrade) {
       m_eqOrigin = EqOrigin::Manual;
       m_hasManualChanges = true;
 
@@ -2005,17 +2047,19 @@ void MainWindow::RenderEQPanel() {
     // 2. Gain 레이블 (상단)
     // 슬라이더 슬롯 너비가 45px 미만일 때는 마우스가 올려져있거나 활성화된
     // 경우에만 표시하여 글자 겹침 차단
-    bool showGain = (slotW > 45.0f) || isHovered || isActive;
+    bool showGain = (slotW > UIScale::Px(45.0f)) || isHovered || isActive;
     if (showGain) {
       ImGui::SetCursorScreenPos(
-          {pos.x + 12 + i * slotW + slotW * 0.5f - 20, pos.y + 14});
+          {pos.x + UIScale::Px(12) + i * slotW + slotW * 0.5f - UIScale::Px(20),
+           pos.y + UIScale::Px(14)});
       ImVec4 gainCol = (isHovered || isActive) ? Theme::TEXT_WHITE : col;
       ImGui::TextColored(gainCol, "%s",
-                         StringUtils::FormatGain(m_eqGains[i]).c_str());
+                         StringUtils::FormatGain((*pGains)[i]).c_str());
 
-      // G1_3: 위상 왜곡 경고 — 저역 + 큰 부스트 시 베이스 타이밍 늘어짐
+      // G1_3: 위상 왜곡 경고 — 다운그레이드 모드에서는 alias 인덱스가 어긋나
+      // 잘못된 경고를 줄 수 있어 31밴드 정상 표시일 때만 검사.
       if constexpr (SoundMate::Features::kG1_3_PhaseWarning) {
-        if (IsPhaseWarningTriggered(i)) {
+        if (!transientDowngrade && IsPhaseWarningTriggered(i)) {
           ImGui::SameLine(0, 4);
           ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1.0f), "!");
           if (ImGui::IsItemHovered()) {
@@ -2033,23 +2077,26 @@ void MainWindow::RenderEQPanel() {
     // 슬라이더 너비에 맞춰 촘촘한 대역(15, 31밴드)일 경우 주파수 글자가 겹치지
     // 않게 건너뛰며 출력
     int skip = 1;
-    if (slotW < 22.0f)
+    if (slotW < UIScale::Px(22.0f))
       skip = 4; // 31밴드 초소형 너비: 4칸에 하나씩 표시
-    else if (slotW < 45.0f)
+    else if (slotW < UIScale::Px(45.0f))
       skip = 2; // 15밴드 소형 너비: 2칸에 하나씩 표시
 
     if (i % skip == 0 || isHovered || isActive) {
       ImGui::SetCursorScreenPos(
-          {pos.x + 12 + i * slotW, pos.y + 36 + sliderH + 4});
+          {pos.x + UIScale::Px(12) + i * slotW,
+           pos.y + UIScale::Px(36) + sliderH + UIScale::Px(4)});
       ImGui::SetNextItemWidth(slotW);
       ImVec4 freqCol =
           (isHovered || isActive) ? Theme::TEXT_WHITE : Theme::TEXT_DARK_GRAY;
       ImGui::TextColored(freqCol, "%s",
-                         StringUtils::FormatFreq(m_currentBands[i]).c_str());
+                         StringUtils::FormatFreq((*pBands)[i]).c_str());
     }
 
     ImGui::PopID();
   }
+
+  if (transientDowngrade) ImGui::EndDisabled();
 }
 
 // ── 하단 바 ──────────────────────────────────────────────────────────────────
@@ -2268,7 +2315,8 @@ void MainWindow::RenderRestorePopup() {
   ImGuiIO &io = ImGui::GetIO();
   ImGui::SetNextWindowPos({io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f},
                           ImGuiCond_Always, {0.5f, 0.5f});
-  ImGui::SetNextWindowSize({460, 400}, ImGuiCond_Always);
+  ImGui::SetNextWindowSize(UIScale::ClampPopupSize(UIScale::V(460, 400)),
+                           ImGuiCond_Always);
   ImGui::PushStyleColor(ImGuiCol_WindowBg, Theme::ToU32(Theme::PANEL_COLOR));
   ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 12.0f);
 
@@ -2487,7 +2535,8 @@ void MainWindow::RenderHealthDot() {
 // G1_2: 진단 패널 (Phase 1 stub — Phase 2 에서 재설치/복원 버튼 본격 추가 예정)
 // ============================================================================
 void MainWindow::RenderDiagnosticPanel() {
-  ImGui::SetNextWindowSize(ImVec2(520, 360), ImGuiCond_FirstUseEver);
+  ImGui::SetNextWindowSize(UIScale::ClampPopupSize(UIScale::V(520, 360)),
+                           ImGuiCond_FirstUseEver);
   if (ImGui::Begin("엔진 진단", &m_diagnosticOpen,
                    ImGuiWindowFlags_NoCollapse)) {
     ImGui::Text("종합 상태");
@@ -2668,10 +2717,11 @@ void MainWindow::RenderPresetPopups() {
   ImGuiIO &io = ImGui::GetIO();
   ImGui::SetNextWindowPos({io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f},
                           ImGuiCond_Always, {0.5f, 0.5f});
-  ImGui::SetNextWindowSize({340, 0}, ImGuiCond_Always);
+  ImGui::SetNextWindowSize(UIScale::ClampPopupSize(UIScale::V(340, 0)),
+                           ImGuiCond_Always);
   ImGui::PushStyleColor(ImGuiCol_WindowBg, Theme::ToU32(Theme::PANEL_COLOR));
   ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 12.0f);
-  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {20.0f, 16.0f});
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, UIScale::V(20, 16));
 
   if (ImGui::BeginPopupModal("##save_preset_popup", nullptr,
                              ImGuiWindowFlags_NoTitleBar |
@@ -2760,10 +2810,11 @@ void MainWindow::RenderPresetPopups() {
 
   ImGui::SetNextWindowPos({io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f},
                           ImGuiCond_Always, {0.5f, 0.5f});
-  ImGui::SetNextWindowSize({300, 0}, ImGuiCond_Always);
+  ImGui::SetNextWindowSize(UIScale::ClampPopupSize(UIScale::V(300, 0)),
+                           ImGuiCond_Always);
   ImGui::PushStyleColor(ImGuiCol_WindowBg, Theme::ToU32(Theme::PANEL_COLOR));
   ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 12.0f);
-  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {20.0f, 16.0f});
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, UIScale::V(20, 16));
 
   if (ImGui::BeginPopupModal("##delete_preset_popup", nullptr,
                              ImGuiWindowFlags_NoTitleBar |
@@ -2819,10 +2870,11 @@ void MainWindow::RenderExitPopup() {
   ImGuiIO &io = ImGui::GetIO();
   ImGui::SetNextWindowPos({io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f},
                           ImGuiCond_Always, {0.5f, 0.5f});
-  ImGui::SetNextWindowSize({380, 0}, ImGuiCond_Always);
+  ImGui::SetNextWindowSize(UIScale::ClampPopupSize(UIScale::V(380, 0)),
+                           ImGuiCond_Always);
   ImGui::PushStyleColor(ImGuiCol_WindowBg, Theme::ToU32(Theme::PANEL_COLOR));
   ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 12.0f);
-  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {20.0f, 16.0f});
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, UIScale::V(20, 16));
 
   if (ImGui::BeginPopupModal("##exit_confirm_popup", nullptr,
                              ImGuiWindowFlags_NoTitleBar |
@@ -2966,8 +3018,16 @@ void MainWindow::DownloadAndExecuteUpdate() {
   HRESULT hr = URLDownloadToFileA(NULL, m_downloadUrl.c_str(),
                                   installerPath.c_str(), 0, NULL);
   if (SUCCEEDED(hr)) {
+    // [Installer race 방어] exit(0) 는 스택 객체 소멸자를 호출하지 않으므로
+    // MainWindow::~MainWindow 의 SilentTaskKill 이 안 돈다. 인스톨러가 시작되기
+    // 전에 컨트롤러를 명시적으로 끄지 않으면 SoundMate_APO.dll 등 잠금이
+    // audiodg/Controller 양쪽에서 걸려 설치 실패할 수 있음.
+    SilentTaskKill("SoundMate_Controller.exe");
+    SilentTaskKill("MainController.exe");
+
     // 백그라운드 설치(Silent) 진행 후 프로그램 자동 시작, 현재 프로세스 강제
-    // 종료
+    // 종료. Inno 측 AppMutex + CloseApplications=force 가 본 프로세스 .exe 의
+    // 잠금 해제를 보장.
     ShellExecuteA(NULL, "open", installerPath.c_str(), "/SILENT /NOCANCEL",
                   NULL, SW_SHOWNORMAL);
     exit(0);
@@ -2985,10 +3045,11 @@ void MainWindow::RenderUpdatePopup() {
   ImGuiIO &io = ImGui::GetIO();
   ImGui::SetNextWindowPos({io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f},
                           ImGuiCond_Always, {0.5f, 0.5f});
-  ImGui::SetNextWindowSize({380, 0}, ImGuiCond_Always);
+  ImGui::SetNextWindowSize(UIScale::ClampPopupSize(UIScale::V(380, 0)),
+                           ImGuiCond_Always);
   ImGui::PushStyleColor(ImGuiCol_WindowBg, Theme::ToU32(Theme::PANEL_COLOR));
   ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 12.0f);
-  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {20.0f, 16.0f});
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, UIScale::V(20, 16));
 
   // 강제 업데이트일 경우 창을 끌 수 없음
   int flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
@@ -3129,10 +3190,11 @@ void MainWindow::RenderDeviceLimitPopup() {
   ImGuiIO &io = ImGui::GetIO();
   ImGui::SetNextWindowPos({io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f},
                           ImGuiCond_Always, {0.5f, 0.5f});
-  ImGui::SetNextWindowSize({440, 0}, ImGuiCond_Always);
+  ImGui::SetNextWindowSize(UIScale::ClampPopupSize(UIScale::V(440, 0)),
+                           ImGuiCond_Always);
   ImGui::PushStyleColor(ImGuiCol_WindowBg, Theme::ToU32(Theme::PANEL_COLOR));
   ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 12.0f);
-  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {20.0f, 16.0f});
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, UIScale::V(20, 16));
 
   int flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
               ImGuiWindowFlags_AlwaysAutoResize;
@@ -3194,10 +3256,11 @@ void MainWindow::RenderUpgradePopup() {
   ImGuiIO &io = ImGui::GetIO();
   ImGui::SetNextWindowPos({io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f},
                           ImGuiCond_Always, {0.5f, 0.5f});
-  ImGui::SetNextWindowSize({420, 0}, ImGuiCond_Always);
+  ImGui::SetNextWindowSize(UIScale::ClampPopupSize(UIScale::V(420, 0)),
+                           ImGuiCond_Always);
   ImGui::PushStyleColor(ImGuiCol_WindowBg, Theme::ToU32(Theme::PANEL_COLOR));
   ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 12.0f);
-  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {20.0f, 16.0f});
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, UIScale::V(20, 16));
 
   int flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
               ImGuiWindowFlags_AlwaysAutoResize;

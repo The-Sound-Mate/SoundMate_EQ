@@ -38,6 +38,8 @@ using namespace std;
 #pragma comment(lib, "Shlwapi.lib")
 #pragma comment(lib, "Advapi32.lib")
 
+#include "migration.h"
+
 // ============================================================================
 // Constants
 // ============================================================================
@@ -54,11 +56,13 @@ static const wchar_t* CONFIG_PATH      = L"C:\\Program Files\\SoundMate Equalize
 static const char*    LOG_PATH         = "C:\\Users\\Public\\SoundMate_Setup.log";
 
 // Child APO backup path (matches DeviceAPOInfo.cpp APP_REGPATH)
-static const wchar_t* CHILD_APO_BASE   = L"SOFTWARE\\SoundMateAPO\\Child APOs";
+// [Migration] non-static — migration.cpp references via extern.
+const wchar_t* CHILD_APO_BASE   = L"SOFTWARE\\SoundMateAPO\\Child APOs";
 
 // Our APO GUIDs (Matched to Equalizer APO for better load success in audiodg.exe)
-static const wchar_t* SOUNDMATE_PRE_GUID  = L"{D58E97E6-3021-4f99-B0F2-E0F42886DC23}";
-static const wchar_t* SOUNDMATE_POST_GUID = L"{133951B8-5B31-48e3-8201-38A9A4A1C90D}";
+// [Migration] non-static — migration.cpp references via extern.
+const wchar_t* SOUNDMATE_PRE_GUID  = L"{D58E97E6-3021-4f99-B0F2-E0F42886DC23}";
+const wchar_t* SOUNDMATE_POST_GUID = L"{133951B8-5B31-48e3-8201-38A9A4A1C90D}";
 
 // Slot scheme for modern Win10/11 (Realtek devices use mode-aware slots 13-15).
 // SFX/EFX legacy slots (5/7) are loaded by audiodg only for FORMAT NEGOTIATION
@@ -99,7 +103,8 @@ static const wchar_t* allowSilentBufValName = L"AllowSilentBufferModification";
 // ============================================================================
 // Logging
 // ============================================================================
-static void Log(const string& msg) {
+// [Migration] non-static — migration.cpp references via extern.
+void Log(const string& msg) {
     ofstream f(LOG_PATH, ios::app);
     if (f.is_open()) {
         time_t t = time(nullptr);
@@ -232,7 +237,8 @@ static wstring DetectKnownCompetitor(const wstring& guidStr) {
     return L"";
 }
 
-static void DeleteRegValue(const wstring& keyPath, const wchar_t* name) {
+// [Migration] non-static — migration.cpp references via extern.
+void DeleteRegValue(const wstring& keyPath, const wchar_t* name) {
     HKEY hKey;
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, keyPath.c_str(), 0,
                       KEY_SET_VALUE | KEY_WOW64_64KEY, &hKey) == ERROR_SUCCESS) {
@@ -244,7 +250,8 @@ static void DeleteRegValue(const wstring& keyPath, const wchar_t* name) {
 // ============================================================================
 // Ownership helpers (identical to EqualizerAPO pattern)
 // ============================================================================
-static bool TakeOwnership(HKEY hRoot, const wchar_t* subKey) {
+// [Migration] non-static — migration.cpp references via extern.
+bool TakeOwnership(HKEY hRoot, const wchar_t* subKey) {
     HANDLE tok;
     if (!OpenProcessToken(GetCurrentProcess(),
                           TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &tok))
@@ -279,7 +286,8 @@ static bool TakeOwnership(HKEY hRoot, const wchar_t* subKey) {
     return true;
 }
 
-static bool MakeWritable(HKEY hRoot, const wchar_t* subKey) {
+// [Migration] non-static — migration.cpp references via extern.
+bool MakeWritable(HKEY hRoot, const wchar_t* subKey) {
     HKEY hKey;
     if (RegOpenKeyExW(hRoot, subKey, 0,
                       READ_CONTROL | WRITE_DAC | KEY_WOW64_64KEY, &hKey) != ERROR_SUCCESS)
@@ -532,7 +540,8 @@ static void WriteSZ(const wstring& keyPath, const wchar_t* name, const wchar_t* 
 }
 
 // Read a REG_SZ (or first string of a REG_MULTI_SZ) value. Empty wstring on miss.
-static wstring ReadSZ(const wstring& keyPath, const wchar_t* name) {
+// [Migration] non-static — migration.cpp references via extern.
+wstring ReadSZ(const wstring& keyPath, const wchar_t* name) {
     HKEY hKey;
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, keyPath.c_str(), 0,
                       KEY_QUERY_VALUE | KEY_WOW64_64KEY, &hKey) != ERROR_SUCCESS)
@@ -693,6 +702,11 @@ int main() {
     Log("--- SoundMate Setup v30.0 ---");
     CoInitialize(NULL);
 
+    // Step 0: 스키마 마이그레이션 — 업그레이드 케이스에서 옛 GUID 잔재 청소.
+    // 신규 설치(HKLM\SOFTWARE\SoundMate 부재) 면 no-op. 비-기본 디바이스의
+    // FxProperties 옛 슬롯은 Child APOs 백업의 OEM 원본 GUID 로 복원된다.
+    RunSchemaMigration();
+
     // Step 1: DisableProtectedAudioDG = 1
     {
         HKEY hKey;
@@ -815,6 +829,9 @@ int main() {
 
     // Step 7: Launch Controller (hidden window)
     ShellExecuteW(NULL, L"open", CTRL_DEST, NULL, NULL, SW_HIDE);
+
+    // Step 8: SchemaVersion 작성 — 다음 설치가 idempotent 분기 가능.
+    WriteSchemaVersion();
 
     CoUninitialize();
     Log("--- Setup complete ---");

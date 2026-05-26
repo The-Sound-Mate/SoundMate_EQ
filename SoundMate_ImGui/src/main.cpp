@@ -26,6 +26,67 @@
 #include "ui/MainWindow.h"
 #include "ui/SettingsWindow.h"
 #include "ui/Theme.h"
+#include "ui/UIScale.h"
+
+#include <chrono>
+#include <cmath>
+
+
+// ─── DPI/리사이즈 SSOT ──────────────────────────────────────────────────────
+// 폰트 4슬롯(100/125/150/200%) 미리 로드 후 WM_DPICHANGED 에서 io.FontDefault
+// 스왑 + ScaleAllSizes 누적 방지를 위해 원본 ImGuiStyle 복사본을 보관한다.
+static ImGuiStyle g_defaultStyle{};
+static bool       g_defaultStyleSaved = false;
+
+struct FontSlot { float scale; ImFont* font; };
+// 슬롯 모두 동일한 OversampleH/V = 1 로 통일 — 100% 슬롯의 가독성 손실은
+// 미미하고, 4슬롯 전체 메모리 절감이 크다. 슬롯 간 글리프 외형 일관성도 확보.
+static FontSlot g_fontSlots[] = {
+    {1.00f, nullptr}, {1.25f, nullptr}, {1.50f, nullptr}, {2.00f, nullptr},
+};
+
+static ImFont* FindClosestFont(float dpiScale) {
+  ImFont* best = nullptr;
+  float bestDelta = 1e9f;
+  for (auto& s : g_fontSlots) {
+    if (!s.font) continue;
+    float d = std::fabs(s.scale - dpiScale);
+    if (d < bestDelta) { bestDelta = d; best = s.font; }
+  }
+  return best;
+}
+
+static float ClosestSlotScale(float dpiScale) {
+  float best = 1.0f, bestDelta = 1e9f;
+  for (auto& s : g_fontSlots) {
+    if (!s.font) continue;
+    float d = std::fabs(s.scale - dpiScale);
+    if (d < bestDelta) { bestDelta = d; best = s.scale; }
+  }
+  return best;
+}
+
+// 누적 스케일링 방지 — 원본 스타일 복사본을 매번 복원한 뒤 ScaleAllSizes 1회.
+static void ApplyDpi(float dpiScale) {
+  if (!g_defaultStyleSaved) return;
+  ImGui::GetStyle() = g_defaultStyle;
+  ImGui::GetStyle().ScaleAllSizes(dpiScale);
+  Theme::Apply();
+
+  if (ImFont* f = FindClosestFont(dpiScale)) {
+    ImGui::GetIO().FontDefault = f;
+    ImGui::GetIO().FontGlobalScale = dpiScale / ClosestSlotScale(dpiScale);
+  }
+
+  UIScale::SetDpi(dpiScale);
+}
+
+// 윈도우 스타일 — 사용자 드래그 리사이즈/최대화 차단(WS_THICKFRAME,
+// WS_MAXIMIZEBOX 제외). 시스템 자동 리사이즈(WM_DPICHANGED 에 의한 권장 RECT
+// 재배치)는 WM_SIZE 핸들러에서 그대로 처리되므로 멀티 모니터 이동 시 UI 스케일
+// 응답은 유지된다.
+static constexpr DWORD kWndStyle   = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
+static constexpr DWORD kWndExStyle = 0;
 
 
 // [PR-2B] 트레이 아이콘 상태 ──────────────────────────────────────────────────
@@ -124,12 +185,34 @@ void CleanupRenderTarget();
 LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 // ─── WinMain ────────────────────────────────────────────────────────────────
+// [Installer] Inno Setup AppMutex 와 매칭되는 named mutex. 인스톨러/업데이트가
+// 파일 추출 전에 이 mutex 를 감지하면 "응용 프로그램 닫기" UI 를 자동 표시 →
+// CloseApplications=force 로 WM_CLOSE 전송 → 정상 종료. 구버전(v0.0.1)은 이
+// mutex 가 없어 인스톨러 측 taskkill 폴백이 받친다.
+static HANDLE g_appMutex = nullptr;
+
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
-  // DPI 인지 활성화 (흐릿함 방지)
-  SetProcessDPIAware();
+  g_appMutex = CreateMutexW(nullptr, FALSE, L"Global\\SoundMate_EQ_AppMutex");
+
+  // [PMv2] Per-Monitor DPI Awareness V2 — 멀티 모니터 이동 / 런타임 DPI 변경
+  // 자동 추종. 구버전 윈도우 폴백 체인: V2 → V1 → SystemAware → DPIAware.
+  using SetCtxFn = BOOL (WINAPI*)(DPI_AWARENESS_CONTEXT);
+  HMODULE hUser = GetModuleHandleW(L"user32.dll");
+  auto pSetCtx = hUser ? (SetCtxFn)GetProcAddress(hUser,
+                                                  "SetProcessDpiAwarenessContext")
+                       : nullptr;
+  if (pSetCtx) {
+    if (!pSetCtx(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)) {
+      pSetCtx(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE);
+    }
+  } else {
+    SetProcessDPIAware();
+  }
+
   HDC hdc = GetDC(nullptr);
   float dpiScale = GetDeviceCaps(hdc, LOGPIXELSX) / 96.0f;
   ReleaseDC(nullptr, hdc);
+  UIScale::SetDpi(dpiScale);
 
   // 창 등록
   WNDCLASSEXW wc = {sizeof(wc),
@@ -146,18 +229,27 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
                     LoadIconW(GetModuleHandle(nullptr), MAKEINTRESOURCEW(101))};
   RegisterClassExW(&wc);
 
-  // DPI에 맞게 창 크기 조정 및 타이틀바/테두리를 감안한 외부 크기 계산 (AdjustWindowRect)
-  int width = (int)(1100 * dpiScale);
-  int height = (int)(750 * dpiScale);
-  RECT rect = { 0, 0, width, height };
-  DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
-  AdjustWindowRect(&rect, style, FALSE);
+  // DPI에 맞게 창 크기 조정 — kWndStyle 단일 소스로 AdjustWindowRect 와
+  // CreateWindow 가 어긋나지 않게 한다. 가능하면 PMv2 호환 함수 사용.
+  int clientW = (int)(1100 * dpiScale);
+  int clientH = (int)(750 * dpiScale);
+  RECT rect = { 0, 0, clientW, clientH };
+  using AdjustForDpiFn = BOOL (WINAPI*)(LPRECT, DWORD, BOOL, DWORD, UINT);
+  auto pAdjustForDpi = hUser ? (AdjustForDpiFn)GetProcAddress(
+                                   hUser, "AdjustWindowRectExForDpi")
+                             : nullptr;
+  UINT dpiU = (UINT)std::lround(dpiScale * 96.0f);
+  if (pAdjustForDpi) {
+    pAdjustForDpi(&rect, kWndStyle, FALSE, kWndExStyle, dpiU);
+  } else {
+    AdjustWindowRectEx(&rect, kWndStyle, FALSE, kWndExStyle);
+  }
   int winW = rect.right - rect.left;
   int winH = rect.bottom - rect.top;
 
-  g_hWnd = CreateWindowW(
-      wc.lpszClassName, L"SoundMate Equalizer",
-      style, 100, 100, winW,
+  g_hWnd = CreateWindowExW(
+      kWndExStyle, wc.lpszClassName, L"SoundMate Equalizer",
+      kWndStyle, 100, 100, winW,
       winH, nullptr, nullptr, wc.hInstance, nullptr);
 
   if (!CreateDeviceD3D(g_hWnd)) {
@@ -198,17 +290,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
       0xFF00, 0xFFEF, // Halfwidth/Fullwidth Forms
       0,
   };
-  ImFontConfig font_config;
-  font_config.OversampleH = 2;
-  font_config.OversampleV = 1;
-  // [가독성] 16 → 18pt 로 상향. 한글 가독성 향상.
-  io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\malgun.ttf",
-                               18.0f * dpiScale, &font_config,
-                               koreanFullRanges);
-
-  // [FIX] 맑은 고딕에 없는 기호(⏱♪▶●⚡ 등)를 Segoe UI Symbol 에서 병합.
-  // MergeMode=true 이면 직전 AddFont 결과에 글리프만 추가하므로
-  // 한글/영문은 맑은 고딕, 기호만 Segoe UI Symbol 로 렌더된다.
+  // [멀티 DPI 슬롯] 100/125/150/200% 4종 사전 빌드. WM_DPICHANGED 시 가장 가까운
+  // 슬롯으로 FontDefault 스왑(런타임 atlas 재빌드는 비싸므로). OversampleH/V 는
+  // 4슬롯 통일(1/1) — 100% 슬롯의 가독성 손실 미미, 외형 일관성 확보.
   static const ImWchar symbolRanges[] = {
       0x2000, 0x206F, // General Punctuation (—, …)
       0x2300, 0x23FF, // Miscellaneous Technical (⏱ ⏰)
@@ -217,20 +301,28 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
       0x2700, 0x27BF, // Dingbats (✨)
       0,
   };
-  ImFontConfig symbolCfg;
-  symbolCfg.MergeMode = true;
-  symbolCfg.OversampleH = 1;
-  symbolCfg.OversampleV = 1;
-  io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\seguisym.ttf",
-                               18.0f * dpiScale, &symbolCfg, symbolRanges);
-  // io.Fonts->Build(); // [FIX] Modern backends handle this automatically;
-  // calling it manually causes assertion failure.
+  for (auto& slot : g_fontSlots) {
+    ImFontConfig font_config;
+    font_config.OversampleH = 1;
+    font_config.OversampleV = 1;
+    slot.font = io.Fonts->AddFontFromFileTTF(
+        "C:\\Windows\\Fonts\\malgun.ttf", 18.0f * slot.scale, &font_config,
+        koreanFullRanges);
 
-  // ImGui 스타일 스케일링
-  ImGui::GetStyle().ScaleAllSizes(dpiScale);
+    // 기호 글리프 병합 — 한글/영문은 맑은 고딕, 기호만 Segoe UI Symbol.
+    ImFontConfig symbolCfg;
+    symbolCfg.MergeMode  = true;
+    symbolCfg.OversampleH = 1;
+    symbolCfg.OversampleV = 1;
+    io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\seguisym.ttf",
+                                 18.0f * slot.scale, &symbolCfg, symbolRanges);
+  }
 
-  // 테마 적용 (Python의 Color Palette 동일)
-  Theme::Apply();
+  // ScaleAllSizes 누적 방지를 위해 깨끗한 원본을 보관 — ApplyDpi 에서 복원.
+  g_defaultStyle = ImGui::GetStyle();
+  g_defaultStyleSaved = true;
+
+  ApplyDpi(dpiScale);
 
   ImGui_ImplWin32_Init(g_hWnd);
   ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
@@ -451,11 +543,16 @@ cleanup:
   CleanupDeviceD3D();
   DestroyWindow(g_hWnd);
   UnregisterClassW(wc.lpszClassName, wc.hInstance);
+  if (g_appMutex) { CloseHandle(g_appMutex); g_appMutex = nullptr; }
   return 0;
 }
 
 // ─── DirectX 초기화 ─────────────────────────────────────────────────────────
 bool CreateDeviceD3D(HWND hWnd) {
+  // [Resize] FLIP_DISCARD + 2버퍼 — 클래식 BitBlt 대비 드래그 리사이즈 시
+  // 깜빡임이 크게 줄어든다(DWM 합성 경로). DXGI_SCALING_STRETCH 로 백버퍼가
+  // 늘어난 창에 자동 스트레치되어 잘림 방지(소프트 블러는 EXITSIZEMOVE 에서
+  // 즉시 해소).
   DXGI_SWAP_CHAIN_DESC sd = {};
   sd.BufferCount = 2;
   sd.BufferDesc.Width = sd.BufferDesc.Height = 0;
@@ -466,7 +563,7 @@ bool CreateDeviceD3D(HWND hWnd) {
   sd.OutputWindow = hWnd;
   sd.SampleDesc = {1, 0};
   sd.Windowed = TRUE;
-  sd.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+  sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
 
   D3D_FEATURE_LEVEL featureLevel;
   const D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_0,
@@ -522,16 +619,56 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM,
 LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
   if (ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam))
     return true;
+
   switch (msg) {
 
-  case WM_SIZE:
-    if (g_pd3dDevice && wParam != SIZE_MINIMIZED) {
-      CleanupRenderTarget();
-      g_pSwapChain->ResizeBuffers(0, LOWORD(lParam), HIWORD(lParam),
-                                  DXGI_FORMAT_UNKNOWN, 0);
-      CreateRenderTarget();
-    }
+  // 시스템 자동 리사이즈(WM_DPICHANGED 의 권장 RECT, 최소화→복원 등) 처리.
+  // 사용자 드래그 리사이즈는 WS_THICKFRAME 미사용으로 차단되므로 스로틀링
+  // 로직은 필요 없다.
+  case WM_SIZE: {
+    if (!g_pd3dDevice || wParam == SIZE_MINIMIZED) return 0;
+    CleanupRenderTarget();
+    g_pSwapChain->ResizeBuffers(0, LOWORD(lParam), HIWORD(lParam),
+                                DXGI_FORMAT_UNKNOWN, 0);
+    CreateRenderTarget();
     return 0;
+  }
+
+  // [PMv2] 모니터 이동 / 시스템 DPI 변경 — 폰트 슬롯 스왑 + Style 재스케일 +
+  // 권장 RECT 로 창 자동 재배치.
+  case WM_DPICHANGED: {
+    float newDpi = HIWORD(wParam) / 96.0f;
+    ApplyDpi(newDpi);
+    RECT* suggested = (RECT*)lParam;
+    SetWindowPos(hWnd, nullptr,
+                 suggested->left, suggested->top,
+                 suggested->right  - suggested->left,
+                 suggested->bottom - suggested->top,
+                 SWP_NOZORDER | SWP_NOACTIVATE);
+    return 0;
+  }
+
+  // [Resize] 최소 트랙 크기 — 1024x640 클라이언트 + NC 영역 + 모니터 DPI 보정.
+  case WM_GETMINMAXINFO: {
+    HMODULE hUser = GetModuleHandleW(L"user32.dll");
+    using GetDpiForWindowFn = UINT (WINAPI*)(HWND);
+    using AdjustForDpiFn    = BOOL (WINAPI*)(LPRECT, DWORD, BOOL, DWORD, UINT);
+    auto pGetDpi  = hUser ? (GetDpiForWindowFn)GetProcAddress(
+                                hUser, "GetDpiForWindow") : nullptr;
+    auto pAdjust  = hUser ? (AdjustForDpiFn)GetProcAddress(
+                                hUser, "AdjustWindowRectExForDpi") : nullptr;
+    UINT dpi = pGetDpi ? pGetDpi(hWnd) : 96;
+    int  clientW = MulDiv(1024, dpi, 96);
+    int  clientH = MulDiv(640,  dpi, 96);
+    RECT r{0, 0, clientW, clientH};
+    if (pAdjust) pAdjust(&r, kWndStyle, FALSE, kWndExStyle, dpi);
+    else         AdjustWindowRectEx(&r, kWndStyle, FALSE, kWndExStyle);
+    auto* mm = reinterpret_cast<MINMAXINFO*>(lParam);
+    mm->ptMinTrackSize.x = r.right  - r.left;
+    mm->ptMinTrackSize.y = r.bottom - r.top;
+    return 0;
+  }
+
   case WM_SYSCOMMAND:
     if ((wParam & 0xfff0) == SC_KEYMENU)
       return 0;

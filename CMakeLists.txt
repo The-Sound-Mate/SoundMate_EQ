@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(SoundMate_EQ VERSION 0.0.1 LANGUAGES C CXX RC)
+project(SoundMate_EQ VERSION 0.0.2 LANGUAGES C CXX RC)
 
 
 set(CMAKE_CXX_STANDARD 17)
@@ -105,7 +105,7 @@ set_target_properties(SoundMate_APO PROPERTIES
 # ---------------------------------------------------------------------------
 # 1. SoundMate_setup — installer (creates dir, copies DLL, injects registry)
 # ---------------------------------------------------------------------------
-add_executable(SoundMate_setup src/main.cpp ${SHARED_APO_SOURCES})
+add_executable(SoundMate_setup src/main.cpp src/migration.cpp ${SHARED_APO_SOURCES})
 target_include_directories(SoundMate_setup PRIVATE ${SHARED_INCLUDE_DIRS})
 target_link_libraries(SoundMate_setup PRIVATE ${COMMON_LIBS})
 

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(SoundMate_EQ VERSION 0.0.1 LANGUAGES CXX RC)
+project(SoundMate_EQ VERSION 0.0.2 LANGUAGES CXX RC)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -51,6 +51,7 @@ set(APP_SOURCES
     src/ui/SurveyWindow.cpp
     src/ui/SurveyWindow.h
     src/ui/Theme.h
+    src/ui/UIScale.h
     src/core/EQController.cpp
     src/core/EQController.h
     src/core/MediaMonitor.cpp

@@ -1,524 +1,242 @@
-# SoundMate EQ
+# SoundMate EQ — 전체 아키텍처 상세 설계서 및 기술 참조서
 
-Windows 11 시스템 전역 오디오 EQ. YouTube · Spotify · 게임 · 모든 앱의 소리에
-실시간으로 EQ가 적용됩니다.
-
-처음 보시는 분은 [3분 Quick Start](#-3분-quick-start) 부터 보시면 됩니다.
-엔진 내부 동작은 [ENGINE_README.md](ENGINE_README.md) 참고.
+**SoundMate EQ** 프로젝트의 전체 아키텍처, 데이터 흐름, DSP 파이프라인, 배포 메커니즘을 상세히 다루는 기술 참조서입니다. Windows 11 시스템 전역 오디오 이퀄라이저를 구성하는 모든 모듈의 코드 로직을 심층 분석하고 시각화하여 기록합니다.
 
 ---
 
-## 🎯 한 줄 요약
+## 📐 시스템 아키텍처 개요
 
-- 셋업만 하면 시스템 오디오는 **그대로 통과** (음량 변화·펌핑 없음)
-- GUI 슬라이더를 만진 순간부터만 EQ가 개입
-- 31밴드 biquad EQ, 슬라이더 조작 시 zipper noise 없는 계수 lerp
-- 디지털 클리핑은 자동 가드 (-0.1 dBFS hard ceiling)
+SoundMate EQ는 실시간 오디오 성능 보장, Windows PPL(Protected Process Light) 보안 호환성, 그리고 직관적이고 미려한 UI 환경을 유기적으로 연결하기 위해 고도로 분리된 모듈형 아키텍처로 설계되었습니다.
 
----
+```mermaid
+flowchart TD
+    subgraph UI ["사용자 인터페이스 (SoundMate_EQ.exe)"]
+        GUI[ImGui + DX11 GUI]
+        MM[Media Monitor - SMTC 기반 미디어 트래커]
+        AIC[AI Client - Supabase Edge Functions 프록시]
+    end
 
-## 🚦 현재 동작 정책 (중요)
+    subgraph Daemon ["실시간 동기화 데몬 (SoundMate_Controller.exe)"]
+        FCN[FindFirstChangeNotificationW 이벤트 핸들러]
+        Parser[config.txt 파서 및 안전성 검증기]
+    end
 
-본 빌드는 다음 정책으로 컴파일돼 있습니다 — 셋업 직후 "셋업 전 음량과 동일" 보장:
+    subgraph System ["Windows 오디오 스택 (audiodg.exe)"]
+        APO[SoundMate_APO.dll - COM 객체]
+        DSP[FilterEngine - 31밴드 Biquad IIR 캐스케이드]
+    end
 
-| 모듈 | 기본 상태 | 의미 |
-|---|---|---|
-| **LoudnessNormalizer (AGC)** | **OFF** | 자동 음량 조절 비활성. 입력 신호 강약 그대로 유지 |
-| **ISP Limiter (soft knee)** | **OFF** | -6 dBFS 부근의 상시 soft 컴프 제거 |
-| **Hard Ceiling Guard** | ON (-0.1 dBFS) | EQ 과부스트로 0 dBFS 넘으면 디지털 클립만 차단 |
-| **EQ Chain** | 슬라이더 따라 | 활성 밴드 0개면 chain 통째로 우회 |
-| **DC Blocker** | EQ 활성 시에만 | 5 Hz HPF, 청취 불가, IIR 안전장치 |
-| **NaN Guard** | 항상 | 필터 상태 NaN 감염 시 한 프레임 mute 후 자동 복구 |
+    File[(config.txt)]
+    SHM[Global\SoundMate_APO_SHM - 공유 메모리]
 
-이 정책은 [engine/SoundMate_APO/include/FilterEngine.h](engine/SoundMate_APO/include/FilterEngine.h)
-상단의 두 컴파일 스위치로 결정됩니다:
-
-```cpp
-#define SM_NORMALIZER_DEFAULT_ENABLED 0   // 0 = OFF (현재), 1 = ON (이전 동작 복원)
-#define SM_LIMITER_HARD_ONLY          1   // 1 = hard ceiling만, 0 = 기존 soft+hard
-```
-
-→ **정규화기를 다시 켜고 싶을 때**: 0 → 1 로 바꾸고 재빌드. 그 외 코드/UI/공유메모리 변경 불필요.
-
----
-
-## ⚡ 3분 Quick Start
-
-처음 사용자가 빌드된 산출물을 받아 동작시키는 절차입니다.
-
-### 1) 관리자 권한 cmd / PowerShell 켜기
-시작 메뉴 → "cmd" 우클릭 → "관리자 권한으로 실행".
-
-### 2) (선택) 기존 SoundMate 잔재 제거
-이전 버전이 깔려 있었거나 처음이라도 안전을 위해:
-```cmd
-SoundMate_reset.exe
-```
-오디오 서비스가 자동 재시작됩니다.
-
-### 3) 설치
-```cmd
-SoundMate_setup.exe
-```
-`C:\Program Files\SoundMate Equalizer\` 에 DLL이 복사되고 기본 오디오 장치에 SoundMate가 주입됩니다.
-
-### 4) GUI 실행
-```cmd
-SoundMate_EQ.exe
-```
-이 시점에서 음원을 재생해보세요. **셋업 전과 음량/음색이 동일**해야 정상입니다.
-
-### 5) EQ 조작
-GUI에서 슬라이더를 움직이면 그 순간부터 해당 대역만 boost/cut. 슬라이더를 0 dB로 되돌리면 다시 완전 패스스루.
-
-### 6) 문제가 생기면
-```cmd
-SoundMate_reset.exe
-```
-하나로 모든 변경이 원복됩니다. 멱등(여러 번 실행해도 안전).
-
----
-
-## 📦 실행 파일 4종 — 각자의 역할
-
-| EXE | 역할 | 실행 시점 |
-|---|---|---|
-| **SoundMate_setup.exe** | 설치기 — DLL 복사 + 레지스트리 주입 | 처음 1회, 또는 기기 변경 시 |
-| **SoundMate_Controller.exe** | config.txt 감시 → 공유메모리로 EQ 푸시 | 부팅 시 자동 + GUI 가 자동 기동 |
-| **SoundMate_EQ.exe** | GUI — 사용자가 보는 메인 화면 | 사용자가 직접 실행 |
-| **SoundMate_reset.exe** | 복원기 — 모든 변경을 원상복구 | 문제 발생 시 또는 제거 시 |
-
-이 외에 **SoundMate_APO.dll** 이 있지만 이건 직접 실행하는 파일이 아니라
-Windows 의 `audiodg.exe` 가 자동으로 로드하는 라이브러리입니다.
-
----
-
-## 🚀 표준 실행 순서
-
-### 첫 설치 (관리자 권한 필요)
-
-```
-1. SoundMate_setup.exe   ← DLL 을 Program Files 에 복사하고
-                            기본 오디오 장치의 레지스트리에 SoundMate 주입
-                            (Realtek 원본은 자동 백업됨)
-
-2. SoundMate_Controller.exe  ← 백그라운드 상주 시작
-                                config.txt 변경을 감시
-
-3. SoundMate_EQ.exe       ← GUI 실행
-                             내부에서 자동으로 Controller 가 살아있는지 확인
-```
-
-### 일상 사용
-
-```
-SoundMate_EQ.exe 만 실행하면 됩니다.
-Controller 가 안 떠 있으면 GUI 가 자동으로 띄웁니다.
-```
-
-### 기기를 바꿨을 때 (스피커 → 이어폰 등)
-
-```
-GUI 안의 [자동 설정] 버튼 클릭
-  → SoundMate_setup.exe 가 새 기본 장치에 다시 주입
-```
-
-### 문제가 생겼을 때 / 제거하고 싶을 때
-
-```
-SoundMate_reset.exe  ← 모든 SoundMate 흔적 제거,
-                        Realtek 원본 복원,
-                        오디오 서비스 재시작
+    GUI -- 1. 슬라이더 조작 시 파일 작성 --> File
+    FCN -- 2. 파일 변경 실시간 감시 --> File
+    Parser -- 3. 범위 검증 및 원자적 공유 메모리 쓰기 --> SHM
+    APO -- 4. 공유 메모리 폴링 및 필터 계수 Lerp 보간 --> DSP
+    MM -- 재생 미디어 메타데이터 추출 --> GUI
+    AIC -- 추천 EQ 프로필 적용 --> GUI
 ```
 
 ---
 
-## 🎧 오디오 엔진 작동 방식 (개념 설명)
+## 🎼 1. 오디오 처리 시스템: `SoundMate_APO.dll`
 
-### 음원이 출력될 때까지의 흐름
+오디오 처리를 담당하는 핵심 모듈로, Windows의 보호된 시스템 프로세스인 `audiodg.exe`에 COM(Component Object Model) 클래스 라이브러리로 직접 로드되어 동작합니다.
 
-```
-앱(YouTube, Spotify, 게임) → Windows 오디오 스택 → audiodg.exe
-                                                       │
-                                                       ▼
-                                            SoundMate_APO.dll
-                                            (오디오 콜백마다 호출)
-                                                       │
-                                  ┌────────────────────┴────────────────────┐
-                                  │  1. 공유메모리에서 새 EQ 설정 폴링        │
-                                  │  2. EQ 활성? (밴드 ≥1 또는 마스터≠0dB)   │
-                                  │      Yes → 31밴드 Biquad + DC Blocker    │
-                                  │      No  → 완전 통과                     │
-                                  │  3. LoudnessNormalizer (현재 OFF)        │
-                                  │  4. Hard Ceiling Guard (-0.1 dBFS)       │
-                                  │  5. NaN 검사 → 감염 시 mute + 자동복구   │
-                                  └─────────────────────┬───────────────────┘
-                                                        ▼
-                                                  DAC / 스피커
-```
+### 1.1 COM 인프라 및 초기화 (`DllMain.cpp`, `ClassFactory.cpp`, `SoundMateAPO.cpp`)
+- **`DllMain.cpp`**: COM DLL 등록 및 로드를 위한 4대 표준 진입점(`DllGetClassObject`, `DllCanUnloadNow`, `DllRegisterServer`, `DllUnregisterServer`)을 구현 및 노출합니다.
+- **`ClassFactory.cpp`**: `IClassFactory` 인터페이스를 통해 `SoundMateAPO` COM 클래스 객체의 동적 인스턴스화를 지원합니다.
+- **`SoundMateAPO.cpp` / `SoundMateAPO.h`**:
+  - `IAudioProcessingObject`, `IAudioProcessingObjectRT`, `IAudioSystemEffects` 등 핵심 APO 인터페이스를 구현합니다.
+  - **`Initialize`**: 디바이스 속성 스토어 파싱 및 기본 이퀄라이저 상태 등의 디바이스 특화 초기화 설정을 완료합니다.
+  - **`APOProcess`**: `audiodg.exe`가 매 오디오 버퍼 슬라이스(48kHz 기준 일반적으로 512 또는 1024 샘플, 약 10ms 단위)마다 호출하는 실시간 최고 우선순위 콜백 함수입니다.
 
-### GUI에서 슬라이더를 움직이면
+### 1.2 DSP 신호 처리 파이프라인: `FilterEngine.h`
+오디오 신호 처리는 `audiodg.exe` 내부의 실시간 오디오 스레드 환경에서 동작하며, 다채널 부동 소수점(float) PCM 원본 오디오 데이터를 받아 신호를 변형합니다.
 
 ```
-[GUI: SoundMate_EQ.exe]
-  슬라이더 변경
-       │
-       │ config.txt 작성
-       ▼
-[Controller: SoundMate_Controller.exe]
-  FindFirstChangeNotificationW (폴링 아님)
-  → 파싱 + 검증 (freq 20~20kHz, gain ±24dB, Q 0.1~10, NaN 차단)
-  → 공유메모리 Global\SoundMate_APO_SHM 에 기록 (atomic)
-       │
-       ▼
-[APO: audiodg 안의 SoundMate_APO.dll]
-  다음 오디오 콜백 (~10ms 안)
-  → 필터 계수 갱신 (z1/z2 보존 = 클릭/팝 없음)
-  → 1024 샘플 (~21ms) 동안 lerp으로 부드럽게 전환
+       [Raw Audio Input Buffer (원본 오디오 입력)]
+                            │
+                            ▼
+         [Read Shared Memory (공유 메모리 읽기)] ──► 마스터 볼륨 및 목표 필터 계수 실시간 반영
+                            │
+                            ▼
+         [Is EQ Active? (EQ 활성화 상태 검사)]
+         ├── Yes ──► [31-Band Biquad Cascade] ──► 지퍼 노이즈 제거를 위한 선형 보간 (lerp)
+         │                                       필터 상태 변수 (z1, z2) 유지 보존
+         └── No  ───► [Bypass Direct Path]
+                            │
+                            ▼
+          [DC Blocker Filter (DC 차단 필터)]   ──► 5 Hz IIR 하이패스 필터 적용
+                            │
+                            ▼
+      [Loudness Normalizer (정규화기 - 현재 OFF)]
+                            │
+                            ▼
+      [Hard Ceiling Guard (클리핑 방지 -0.1dB)] ──► 디지털 디스토션 제한 (min/max 클램핑)
+                            │
+                            ▼
+           [NaN Guard (수치 오류 보호)]        ──► 결함 발견 시 Mute 및 엔진 내부 상태 재초기화
+                            │
+                            ▼
+      [Processed Audio Output Buffer (출력 오디오)]
 ```
 
-**총 지연**: 슬라이더 → 실제 소리 변화까지 약 **20~30ms**. 사용자 인지 불가.
+#### A. 계수 선형 보간 (지퍼 노이즈 방지)
+사용자가 EQ 슬라이더를 부드럽게 드래그할 때 "틱틱" 거리는 전기적 노이즈(Zipper Noise)를 제거하기 위해, 타겟 필터 계수를 **1024 샘플**(48kHz 기준 약 21ms)에 걸쳐 미세하게 선형 보간(Linear Interpolation)합니다:
+$$\alpha_{current} = \alpha_{old} + (\alpha_{target} - \alpha_{old}) \times \frac{step}{1024}$$
+특히 필터 내부의 상태 변수($z_1$, $z_2$)를 보존하며 보간을 수행하여 신호의 물리적인 단절을 완벽하게 예방합니다.
 
-### 왜 정규화기/리미터를 끄나?
+#### B. DC 블로커 (DC Blocker)
+초저역 통과 주파수 변동이나 회로 노이즈로 유입되는 하드웨어 DC 오프셋을 차단하기 위해 **5Hz** 차단 주파수를 지닌 IIR 하이패스 필터를 기본 구동합니다:
+$$y[n] = x[n] - x[n-1] + R \times y[n-1] \quad (R \approx 0.9993)$$
 
-정규화기 ON 상태에서는:
-- 입력 신호가 -16 dBFS RMS보다 조용하면 자동으로 **최대 +12 dB까지 boost** → "전반적으로 소리가 커진 느낌"
-- 비대칭 ramp (down 250 ms / up 500 ms) → 큰 신호↔조용한 신호 전환에서 **펌핑 인지**
-- ISP 리미터 soft knee가 -6 dBFS부터 시작 → 평상시에도 옅은 컴프감
-
-→ "셋업 전과 동일한 패스스루" 를 보장하려면 둘 다 OFF, 디지털 클립만 막는 hard ceiling만 남김.
-자세한 분석은 [engine/SoundMate_APO/include/FilterEngine.h](engine/SoundMate_APO/include/FilterEngine.h)
-의 LoudnessNormalizer / applyLimiter 주석 참조.
+#### C. NaN 가드 (NaN Guard)
+수치 해석적 예외 차단 루틴입니다. 무한대(Infinity)나 정의되지 않은 수치 값(NaN)이 계산 회로에서 감염 및 전파되면, 해당 프레임을 즉각 무음(Mute) 처리하고 캐스케이드 상태 히스토리($z_1, z_2$)를 $0$으로 즉시 강제 플러싱하여 복구 불가능한 무음 상태나 시스템 크래시를 차단합니다.
 
 ---
 
-## 🔧 각 EXE 가 정확히 무엇을 하는지
+## 📳 2. 실시간 동기화 데몬: `SoundMate_Controller.exe`
 
-### 1️⃣ SoundMate_setup.exe — 설치기
-- `C:\Program Files\SoundMate Equalizer\` 폴더 생성
-- `SoundMate_APO.dll` + CRT 런타임 DLL 복사
-- 기본 오디오 출력 장치 자동 감지 (`MMDeviceEnumerator`)
-- 기존 Realtek APO 의 CLSID 를 **백업**한 뒤 우리 GUID 로 덮어쓰기
-  - FxProperties 슬롯 5, 7, 13, 15 동시 설치
-- `DllRegisterServer` 호출로 audioeng.dll 에 APO 등록
-- 다른 EQ 프로그램(EqualizerAPO, FxSound 등) 탐지 시 경고 출력
-- 관리자 권한 필요
+사용자용 GUI 프로그램과 시스템 APO 간의 데이터 통신을 책임지며, 파일 시스템의 데이터 변화를 실시간으로 받아 안전하게 메모리 공간에 파싱합니다.
 
-### 2️⃣ SoundMate_Controller.exe — 실시간 동기화 데몬
-- `C:\Program Files\SoundMate Equalizer\config.txt` 감시
-  (`FindFirstChangeNotificationW`, 폴링 아님)
-- 변경 감지 → `Preamp:` / `Filter:` 라인 파싱
-- 값 범위 검증 (freq 20~20kHz, gain ±24dB, Q 0.1~10, NaN 차단)
-- 공유 메모리 `Global\SoundMate_APO_SHM` 에 기록
-- APO 가 다음 오디오 콜백(~10ms) 안에 받아서 EQ 적용
-- 관리자 권한 필요 (공유 메모리 SDDL 때문)
+### 2.1 파일 변경 감지 루틴 (`MainController.cpp`)
+- 하드디스크 리소스를 과도하게 쓰는 주기적인 타이머 폴링 대신, Win32 API의 `FindFirstChangeNotificationW` 커널 이벤트를 대기하는 스레드를 구동합니다.
+- `config.txt`가 포함된 디렉토리의 파일 쓰기가 마감되는 즉시 동기화 이벤트를 수신하여 작업을 개시합니다.
 
-### 3️⃣ SoundMate_EQ.exe — GUI (메인 화면)
-- 로그인 (OAuth)
-- 곡 자동 감지 (`MediaMonitor` — SMTC API)
-- iTunes API 로 장르 조회
-- AI 서버에 곡 정보 전송 → 31밴드 EQ 추천 받기
-- 사용자 슬라이더 조작 → `config.txt` 작성
-- `SoundMate_Controller.exe` 가 떠 있지 않으면 자동 spawn
-- [자동 설정] 버튼: 새 장치에 SoundMate_setup.exe 실행
-- [복원] 버튼: SoundMate_reset.exe 실행
+### 2.2 엄격한 파싱 및 안전성 검증
+- **정규표현식 파싱**: 마스터 프리앰프 값(`Preamp: <value> dB`)과 각 EQ 밴드 설정(`Filter: <band_index> <frequency> <gain> <Q_factor>`)을 정합성 있게 추출합니다.
+- **입력값 안전 가드**: 입력 값의 오버플로우나 오작동을 원천 봉쇄하기 위해 값 범위를 엄격하게 제한합니다:
+  - **주파수 (Frequency)**: $20\text{ Hz} \sim 20,000\text{ Hz}$ 범위로 한계 제한.
+  - **게인 (Gain)**: $-24.0\text{ dB} \sim +24.0\text{ dB}$ 범위로 클램핑.
+  - **Q-팩터 (Q-Factor)**: $0.1 \sim 10.0$ 주위로 필터 대역폭 통제.
+  - **수치 안전성 검사**: 파싱된 모든 부동소수점에 대해 `isnan()` 및 `isinf()` 체크를 적용하여 안정성 확보.
 
-### 4️⃣ SoundMate_reset.exe — 비상 복원기
-- `audiodg.exe` 강제 종료
-- GUI / Controller 프로세스 종료
-- 모든 렌더 장치 순회:
-  - 백업해뒀던 Realtek 원본 CLSID 를 슬롯 5/7/13/15 에 복원
-  - SoundMate GUID 제거
-- `HKLM\SOFTWARE\SoundMateAPO` 키 삭제
-- `Program Files` 와 `System32` 양쪽에서 DLL 삭제
-- `DisableProtectedAudioDG` 정리
-- `audiosrv` 재시작
-- 멱등(idempotent): 여러 번 실행해도 안전
+### 2.3 공유 메모리 인터페이스 (`SoundMate_Shared.h`)
+안전하게 필터링된 구조체 값은 Win32 공유 메모리 영역인 **`Global\SoundMate_APO_SHM`**에 원자적으로 작성됩니다.
+- 오디오 서비스와 유저 애플리케이션 간 권한 장벽을 해소하기 위해, **명시적인 보안 기술자(SDDL)**를 공유 메모리 생성 단계에 주입하여 Interactive User(일반 계정 실행 GUI)도 관리자 권한 승격 없이 메모리 주소를 지속적으로 수정할 수 있도록 허용합니다.
 
 ---
 
-## 📁 파일이 어디에 있는지
+## 🛡️ 3. 설치 및 레지스트리 복원 시스템: `SoundMate_setup.exe` & `SoundMate_reset.exe`
 
-```
-[설치 후]
-C:\Program Files\SoundMate Equalizer\
-    ├─ SoundMate_APO.dll          ← audiodg 가 로드
-    ├─ SoundMate_Controller.exe   ← 상주
-    ├─ SoundMate_setup.exe        ← 재설치용
-    ├─ SoundMate_reset.exe        ← 복원용
-    ├─ msvcp140.dll / vcruntime140.dll / ...  (CRT 런타임)
-    └─ config\
-       ├─ config.txt              ← Controller 가 감시
-       └─ ai_eq_config.txt        ← GUI 가 쓰는 31밴드 EQ
+오디오 드라이버와 윈도우 오디오 엔진과의 연동을 주입하고 복원하는 로직을 완전히 제어합니다.
 
-[GUI 는 어디든 가능]
-어디서든 SoundMate_EQ.exe 실행 가능
-```
+### 3.1 셋업 유틸리티 (`src/main.cpp`, `src/migration.cpp`)
+- **디바이스 상태 스캔**: 윈도우 멀티미디어 디바이스 API(`IMMDeviceEnumerator`)를 구동해 사용 중인 활성 재생 장치(스피커, 헤드폰 등)를 실시간으로 탐색합니다.
+- **APO 레지스트리 인젝션**: 탐색된 활성 렌더 장치 주소 하위의 레지스트리 경로(`FxProperties`)를 타겟팅합니다:
+  - 기존에 활성화되어 존재하던 원본 APO 데이터 슬롯(`{Slot5}`, `{Slot7}`, `{Slot13}`, `{Slot15}`)을 백업 메모리에 자동 카피합니다.
+  - 우리 고유 CLSID인 `{1D250E82-...}` 클래스 식별자를 해당 슬롯에 정확하게 교체 주입합니다.
+- **마이그레이션 및 상태 천이 (`src/migration.cpp`)**: 구버전과 신버전 간 레지스트리 구조 및 사용자 옵션 데이터를 소실 없이 스키마 기반 데이터베이스 트랜잭션처럼 정합성 있게 천이시킵니다.
+- **시스템 서비스 제어**: Service Control Manager (SCM) API를 구동하여 윈도우 시스템 오디오 데몬인 `audiosrv` 및 `AudioEndpointBuilder` 서비스를 완전히 중단시킨 후 재구동함으로써 오디오 엔진인 `audiodg.exe`가 새로 설치된 바이너리를 강제로 리로드하도록 강제합니다.
+
+### 3.2 리셋 유틸리티 (`SoundMate_Reset_Total.cpp`)
+- **프로세스 정상 종료**: 백그라운드 상주 데몬(`Controller.exe`) 및 사용자 `GUI.exe` 프로세스를 깔끔하게 정돈하고 종료합니다.
+- **오디오 스택 레지스트리 원복**: 백업 폴더 영역에 보존해 두었던 장치별 원본 APO 레지스트리 데이터를 원래 슬롯으로 복귀시키고 SoundMate 등록 레코드를 일소합니다.
+- **시스템 찌꺼기 청소**: `C:\Program Files\SoundMate Equalizer\` 및 공용 폴더에 할당된 바이너리, 로그 데이터, 캐시 등 전 영역의 파일을 말끔히 삭제합니다.
 
 ---
 
-## 🛠 빌드 방법 (개발자용)
+## 🎨 4. Direct3D ImGui UI 애플리케이션: `SoundMate_EQ.exe`
 
-### 사전 준비
+사용자가 마주하는 직관적이고 고성능의 31밴드 EQ 콘솔로, DX11 하드웨어 가속 기반의 Dear ImGui 렌더링 프레임워크로 구동됩니다.
 
-- **Visual Studio 2026** (또는 호환 MSVC) + "C++ 데스크톱 개발" 워크로드
-  - 본 프로젝트는 VS18 Community 환경에서 검증됨
-- **Windows SDK** 10.0.22000 이상 (audioeng.lib 포함)
-- **CMake 3.20** 이상 (Visual Studio 설치 시 함께 들어옴)
-- **Git** (`git clone` 용)
-
-### 소스 받기
-
-```cmd
-git clone https://github.com/The-Sound-Mate/SoundMate_EQ.git
-cd SoundMate_EQ
-git checkout dev/sm
+```
+                   [SoundMate_EQ.exe 진입점]
+                               │
+                               ▼
+        [DirectX 11 장치 초기화 및 윈도우 컨텍스트 생성]
+                               │
+                               ▼
+        [Controller.exe 프로세스 상태 감지 및 부재 시 자동 기동]
+                               │
+                               ▼
+               ┌───────────────┴───────────────┐
+               ▼                               ▼
+     [GUI 메인 렌더링 루프 스레드]        [백그라운드 디바이스 모니터 스레드]
+     - 31밴드 게인 슬라이더 렌더링        - SMTC 기반 재생 정보 캡처 (MediaMonitor)
+     - 이퀄라이저 응답 곡선 실시간 묘화   - 엔진 상태 주기 진단 (HealthMonitor)
+     - 사용자 연동 로그인 & 설문 처리     - iTunes API 비동기 장르 해석기
+               │                               │
+               └───────────────┬───────────────┘
+                               ▼
+             [사용자의 조작 또는 AI 프리셋 주입 완료]
+                               │
+                               ▼
+           [config/config.txt 파일 시스템 쓰기 개시]
 ```
 
-### 빌드 스크립트 2종
+### 4.1 SMTC 트래킹 및 음원 장르 분석 (`core/MediaMonitor.cpp`, `core/GenreManager.cpp`)
+- **윈도우 미디어 API 바인딩**: WinRT `SystemMediaTransportControls`에 이벤트 구독기를 등록하여 Chrome, Spotify 등 전역 프로세스에서 흘러나오는 노래명과 가수명 메타데이터를 정합성 있게 탈취합니다.
+- **비동기 장르 해석**: 추출된 메타데이터를 바탕으로 iTunes Search API에 검색을 요청하여 음원의 메인 장르 정보를 안전하게 확인합니다.
 
-| 스크립트 | 용도 | CRT |
-|---|---|---|
-| `build_release.bat` | **배포용 빌드** — APO DLL 이 audiodg 에 실제로 로드됨 | `/MD` 다이내믹 Release |
-| `build_debug.bat` | EXE 측 디버깅용 — APO DLL 은 **audiodg 가 거부함** | `/MDd` 다이내믹 Debug |
+### 4.2 AI 이퀄라이저 프록시 연동 (`core/AIClient.cpp`)
+- Supabase Edge Functions 서버 환경과 API 연동을 취하여, 사용자가 앱 가입 초기 단계에 지정한 청각적 취향 데이터와 현재 실시간 감지된 미디어의 장르 정보를 취합해 최적의 추천 31밴드 Target Curve 데이터셋을 비동기 수신합니다.
+- 수신 즉시 GUI 슬라이더 좌표를 부드럽게 타겟 곡선으로 강제 모핑 및 업데이트하여 `config.txt`로 내보냅니다.
 
-> ⚠️ **반드시 Release 로 빌드**해야 audiodg.exe (PPL 보호 프로세스) 가 SoundMate_APO.dll 을 로드합니다.
-> Debug CRT 의 `VCRUNTIME140D.dll` 은 audiodg 의 코드 무결성 검사에서 거부됩니다.
+### 4.3 엔진 건전성 실시간 진단 (`core/EngineHealthMonitor.cpp`)
+- **1.5초 주기 지속 모니터링**:
+  - `SoundMate_Controller.exe` 프로세스가 작동 정지 중인지 파악.
+  - 전역 공유 메모리 핸들이 탈취 가능한 상태인지 감시.
+  - 오디오 드라이버에 정상 신호 데이터 전파가 끊겼는지 감지.
+  - 문제 발견 시 GUI 헤더 영역에 경고창(Warning Notice)을 동적으로 즉시 주입 및 시각화합니다.
 
-### 한 줄 실행
+---
 
-프로젝트 루트(`c:\SoundMate_EQ`)에서:
+## 📦 5. 설치 패키지 인스톨러 스크립트: `SoundMate_Setup.iss`
 
-```cmd
-:: Release 빌드 (배포용)
-build_release.bat
+Inno Setup을 기반으로 하여 분산 컴파일된 바이너리를 단일 설치 번들 패키지 파일(`SoundMate_Setup_v0.0.2.exe`)로 묶어냅니다.
+
+### 5.1 샌드박스 스테이징(Sandbox Staging) 수명 주기
+`audiodg.exe`가 기존 재생 스택 상에서 구버전 드라이버 DLL 파일을 물리적으로 강하게 붙들고 잠금 상태를 유지하는 한계점을 극복하기 위해, 설치 시 스테이징 기법을 구동합니다:
+
+```
+[설치 프로세스 시작]
+        │
+        ▼
+[Files 복사 섹션] ──► 임시 샌드박스 폴더인 {app}\_tmp_install\ 디렉토리로 파일 1차 배치
+        │             (새 주소이므로 audiodg가 락을 걸 수 없어 복사가 100% 무조건 성공함)
+        ▼
+[ssPostInstall 설치 후반부 이벤트]
+        │
+        ├──► 기존 드라이버 업그레이드 설치 케이스인가?
+        │       ├── Yes ──► 원자적 ReplaceFileW() API 가동
+        │       │             ├── 복사 성공 ──► 완료 (재부팅 불필요)
+        │       │             └── 복사 실패 ──► MoveFileExW(DELAY_UNTIL_REBOOT)에 예약 등록 후 재부팅 알림 설정
+        │       └── No  ───► 즉각적인 파일 이동 (RenameFile) 수행
+        ▼
+[최종 정리 작업] ──► _tmp_install 디렉토리를 완전 삭제하여 스틸 파일 충돌 원천 제거
 ```
 
-스크립트가 하는 일:
-1. `vcvarsall.bat x64` 호출 — VS 빌드 환경 활성화
-2. `build\` 폴더 통째로 삭제 후 새로 생성 (CRT 상태 깨끗하게)
-3. CMake configure (`NMake Makefiles`, Release)
-4. 전체 타깃 컴파일
+### 5.2 완전 격리 롤백 메커니즘
+설치 과정에서 유저 이탈이나 시스템 파행으로 에러가 날 시, 설치 후반부 청소 루프인 `DeinitializeSetup`에서 스테이징 전용 폴더인 `_tmp_install` 자체를 물리적으로 지워냅니다. 이렇게 소스 원본 파일이 영구 결손될 시, Windows 커널 스택에 등재되어 있던 `MoveFileExW`의 재부팅 지연 실행 대기 명령은 커널 메모리 단에서 `STATUS_OBJECT_NAME_NOT_FOUND` 예외로 처리되며 시스템에 단 하나의 오염 흔적도 남기지 않고 파기(롤백)됩니다.
 
-산출물은 `build\` 폴더에 생성됩니다.
+---
 
-### 수동 빌드 (스크립트 없이)
+## 🛠️ 컴파일 및 개발 실행 가이드
 
-```cmd
-:: 1) Visual Studio 개발 환경 활성화
-call "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvarsall.bat" x64
+### 환경 및 준비 요건
+- **Visual Studio 2022/2025** (C++ 데스크톱 개발 컴파일 도구 도구셋 설치 필수)
+- **Windows 10/11 SDK (10.0.22000 이상)**
+- **CMake (3.20 이상)**
 
-:: 2) CMake 구성 (Release)
+### 원스톱 빌드 파이프라인 주행
+터미널을 열고 아래 지시어를 순서대로 실행하면 전체 바이너리 컴파일부터 최종 인스톨러 생성까지 일괄적으로 처리할 수 있습니다:
+
+```powershell
+# 1. NMake 빌드 환경 구성 (릴리즈 배포용 정의)
 cmake -S . -B build -G "NMake Makefiles" -DCMAKE_BUILD_TYPE=Release
 
-:: 3) 컴파일 (전체 타깃)
+# 2. C++ 핵심 모듈 컴파일 진행 (DLL 및 전체 EXE 실행파일군)
 cmake --build build
 
-:: 또는 한 타깃만 빌드
-cmake --build build --target SoundMate_APO
+# 3. 인스톨러 번들 패키징 실행
+cmake --build build --target Installer
 ```
 
-### 빌드 산출물
-
-```
-build/
-  SoundMate_APO.dll           ← audiodg 가 로드
-  SoundMate_Controller.exe    ← config.txt 감시 데몬
-  SoundMate_setup.exe         ← 설치기
-  SoundMate_reset.exe         ← 복원기
-  SoundMate_EQ.exe            ← GUI
-  libcurl-x64.dll             ← GUI 가 사용 (자동 복사됨)
-```
-
-> Visual Studio CMake generator(`Visual Studio 18 2026`)를 쓰면 `build\Release\` 하위에 들어갑니다.
-> 본 프로젝트 표준은 NMake Makefiles이므로 위 경로 그대로.
-
-### 빌드 후 점검
-
-```powershell
-:: DLL 의존성 검사 — audioeng.dll import + non-debug CRT 확인
-.\verify_deps.ps1
-```
-
-이 스크립트가 OK면 audiodg가 DLL을 받아들일 준비 완료.
-
-### 자주 발생하는 빌드 에러
-
-| 에러 | 해결 |
-|---|---|
-| `vcvarsall.bat not found` | Visual Studio 설치 경로 확인. `build_release.bat`의 경로 라인 수정 필요할 수 있음 |
-| `audioeng.lib not found` | Windows SDK 가 오래됨 — 10.0.22000 이상 필요 |
-| `cl.exe not found` | vcvarsall이 안 먹은 상태에서 cmake 실행. cmd 새로 열고 다시 시도 |
-| `Generator mismatch` | 옛 `build\` 폴더가 다른 generator로 만들어진 상태 — `build_release.bat`이 자동 정리 |
-| `regsvr32` 등록 실패 | 빌드 에러 아님 — setup.exe 가 LoadLibrary 로 직접 등록함 (정상) |
-| Debug 빌드 후 APO 안 로드 | 위 경고대로 **반드시 Release 빌드** 사용 |
-| CRT 라이브러리 충돌 (`/MT` vs `/MD`) | `build` 폴더 통째로 삭제 후 재빌드 (`build_release.bat`이 자동 처리) |
-
-### 컴파일 스위치로 정규화기 다시 켜기
-
-[engine/SoundMate_APO/include/FilterEngine.h](engine/SoundMate_APO/include/FilterEngine.h) 상단:
-
-```cpp
-#define SM_NORMALIZER_DEFAULT_ENABLED 0   // ← 0을 1로 바꾸면 정규화기 ON
-#define SM_LIMITER_HARD_ONLY          1   // ← 0으로 바꾸면 기존 soft+hard 리미터
-```
-
-이 후 재빌드(`build_release.bat`)하면 즉시 이전 동작 복원. 셋업/공유메모리/GUI 변경 불필요.
-
-### 빌드 후 배포 (DLL 갱신)
-
-audiodg는 한 번 로드한 DLL을 캐시합니다. 새 DLL을 복사한 뒤 반드시 재로딩:
-
-```cmd
-:: 옵션 A — 사운드 장치 disable → enable (장치 관리자에서)
-:: 옵션 B — 오디오 서비스 재시작
-net stop audiosrv && net start audiosrv
-
-:: 옵션 C — SoundMate_reset.exe 가 audiodg를 강제 종료한 후 audiosrv 재시작
-SoundMate_reset.exe
-```
-
-### 빌드 후 검증 3종 세트
-
-| 검증 | 방법 | 통과 기준 |
-|---|---|---|
-| **로그 무생성 확인** | 셋업 후 음원 재생 → `C:\Users\Public\SoundMateAPO_Norm.log` 존재 여부 | **파일 자체가 안 생기면** 통과 (정규화기 매크로 OFF로 컴파일 배제) |
-| **청감 패스스루** | EQ flat 상태로 음원 재생, 셋업 전과 비교 | 음량·펌핑감 차이 없음 |
-| **EQ 동작** | 한 밴드 +6 dB 조절 후 재생 | 해당 대역만 boost, 다른 컴프 흔적 없음 |
-| **클립 보호** | 한 밴드 +15 dB로 풀스케일 사인톤 입력 | 출력에 ceiling 잘림 발생, **틱·지글 노이즈 없음** |
-| **Null Test (선택)** | 같은 WAV를 SoundMate ON/OFF로 캡처 → DAW polarity 반전 합산 | 합산 RMS < **-90 dBFS** = bit-perfect 동등 |
+최종 빌드된 배포판 설치기 패키지는 아래 주소에 자동으로 안착합니다:
+`C:\SoundMate_EQ\installer_output\SoundMate_Setup_v0.0.2.exe`
 
 ---
 
-## 🪵 로그 위치 (트러블슈팅 시 확인)
-
-| 로그 파일 | 위치 | 용도 |
-|---|---|---|
-| **APO 일반 로그** | `C:\Users\Public\SoundMateAPO.log` | DLL 로딩, 인터페이스 협상, 디바이스 초기화 추적 |
-| **정규화 진단 로그** | `C:\Users\Public\SoundMateAPO_Norm.log` | **현재 정책에서는 생성되지 않음** (정규화기 OFF로 컴파일 배제) |
-| **설치 로그** | `C:\SoundMate_App\setup_log.txt` | setup 실행 시 어떤 디바이스에 주입됐는지 등 |
-
-### APO 일반 로그 실시간 보기
-
-PowerShell:
-```powershell
-Get-Content C:\Users\Public\SoundMateAPO.log -Wait -Tail 20
-```
-
-CMD:
-```cmd
-notepad C:\Users\Public\SoundMateAPO.log
-```
-
-### 정규화 로그가 다시 보고 싶다면
-
-위 "컴파일 스위치로 정규화기 다시 켜기" 섹션의 매크로를 `1`로 바꿔 재빌드하면 매초 한 줄씩 기록됩니다:
-
-```
-[14:23:01] rms= -22.1dB peak= -18.4dB gain= +5.8dB inPeak=  -2.1dB BOOST
-[14:23:02] rms= -15.3dB peak= -12.0dB gain= +0.7dB inPeak=  -0.9dB FLAT
-[14:23:03] rms= -33.5dB peak= -28.7dB gain=+12.0dB inPeak= -15.4dB BOOST
-```
-
-- `rms`: 출력 신호 RMS (정규화 적용 후)
-- `peak`: 지난 1초간 최대 RMS
-- `gain`: 정규화기가 적용 중인 게인 (+ 면 증폭, − 면 감쇠)
-- `inPeak`: 입력 측 최대 절댓값 (헤드룸 확인용)
-- `BOOST/CUT/FLAT`: 현재 정규화기 동작 상태
-
----
-
-## ⚠️ 트러블슈팅
-
-| 증상 | 원인 추정 / 조치 |
-|---|---|
-| 소리 자체가 안 남 | `SoundMate_reset.exe` 실행 → 재부팅 → 재설치 |
-| 소리는 나는데 EQ 효과 없음 | `SoundMate_Controller.exe` 살아있는지 작업관리자에서 확인 |
-| 다른 EQ 프로그램과 동시 사용 | setup 실행 시 경고 출력됨 — 둘 다 직렬 적용됨 |
-| audiodg 가 계속 재시작됨 | `reset_registry.ps1` 실행 후 재설치 |
-| 셋업 후 음량이 너무 작음 | 정규화기 OFF가 의도된 정책. 그래도 부족하면 마스터 게인 조정 또는 매크로 ON 검토 |
-| EQ +15 dB 정도에서 거친 소리 | hard ceiling 작동 중 — 슬라이더 내리거나 마스터 게인 -3 dB |
-| Status에 빨간 "⚠ Controller Not Running" | UAC 거절 등으로 SoundMate_Controller가 안 떠있음. 관리자 권한으로 `SoundMate_Controller.exe` 수동 실행 또는 GUI 재시작 후 UAC 허용 |
-| EQ 토글 OFF했는데 효과 남아있음 | 본 PR 이전 버그. 현재는 토글 OFF 시 `config.txt`에서 `Filter:` 라인이 자동으로 비워져 진정한 패스스루로 전환 |
-| 처음 듣는 곡인데 EQ가 자동 안 걸림 | 본 PR로 복구됨. 그래도 안 되면 Status 표시 확인 — "AI Analyzing..." → "AI Analysis Complete!"가 떠야 정상 |
-| Windows 업데이트 후 안 됨 | 새 Windows 버전이 모던 인터페이스 IID 새로 요구할 수 있음 — [ENGINE_README.md §3.1](ENGINE_README.md) 참조 |
-
-### 깨끗하게 다시 시작
-
-전부 꼬였을 때의 표준 절차:
-
-```cmd
-:: 1) 모든 SoundMate 흔적 제거 + Realtek 원본 복원
-SoundMate_reset.exe
-
-:: 2) (선택) 레지스트리 추가 정리
-powershell -ExecutionPolicy Bypass -File reset_registry.ps1
-
-:: 3) 재부팅 (오디오 스택 완전 재초기화)
-shutdown /r /t 0
-
-:: 부팅 후 다시 설치
-SoundMate_setup.exe
-SoundMate_Controller.exe
-SoundMate_EQ.exe
-```
-
----
-
-## ❓ FAQ
-
-### Q. SoundMate를 끄려면?
-**A.** GUI 종료만으로는 안 끄집니다. APO는 audiodg에 로드된 상태로 남습니다.
-- **완전 끄기**: `SoundMate_reset.exe` 실행 → Realtek 원본 복원
-- **임시 끄기**: GUI의 **EQ 토글을 OFF** — `config.txt`에서 `Filter:` 라인이 비워져 진정한 패스스루 (Controller의 `ResetBands()`가 SHM `bandCount=0`으로 초기화 → APO `eqActive=false` → EQ chain 통째 우회)
-- 모든 슬라이더를 0 dB로 두는 것도 동일 효과지만, 명시적 토글이 더 깔끔
-
-### Q. `.env` 파일이 필요한가요?
-**A.** **아니오, 필요 없습니다.** Gemini API 키는 Supabase Edge Function이 서버측 Secret으로 보관하며, 클라이언트는 Proxy URL만 호출합니다. GUI는 API 키 자체를 모릅니다 (보안상 정공법).
-
-### Q. 사용 중인 PC에서 다른 EQ(EqualizerAPO 등)와 같이 써도 되나?
-**A.** 가능하지만 두 EQ가 직렬로 적용됩니다. 슬롯 충돌이 날 수 있으니 가급적 한 번에 하나만 권장.
-
-### Q. 마이크 / 입력 장치에도 EQ가 걸리나?
-**A.** 현재 정책은 Render(출력)만. Capture(마이크) FxProperties에 잔여 prop이 보일 수 있는데 그건 EqualizerAPO 흔적이지 SoundMate는 아님.
-
-### Q. 정규화기를 다시 켜고 싶다.
-**A.** 위 "컴파일 스위치로 정규화기 다시 켜기" 섹션 참고. 재빌드 1회면 끝.
-
-### Q. 사양 요구치?
-**A.** Windows 11 (빌드 26200+ 검증), x64, 메모리·CPU 영향 미미. 31밴드 × 2채널 풀 동작 시에도 1코어의 1% 미만.
-
-### Q. 손실 음원 재생 시 ISP(inter-sample peak) 클리핑 우려는?
-**A.** 현재 ceiling 0.989(-0.1 dBFS)로 ISP 헤드룸 약간만 확보. 평상시 잘 마스터링된 음원에선 ceiling 미접촉. 더 보수적으로 가려면 매크로로 0.9661(-0.3 dBFS) 복원 가능.
-
-### Q. config.txt를 직접 편집해도 되나?
-**A.** OK. Controller가 파일 변경을 감시해서 즉시 반영합니다. 포맷:
-```
-Preamp: -3.0 dB
-Filter: 1 100.0 +3.5 1.41
-Filter: 2 1000.0 -2.0 0.707
-```
-
-### Q. 64비트 전용?
-**A.** 예. audiodg가 64-bit이므로 APO도 64-bit이어야 함. 빌드도 x64 고정.
-
----
-
-## 📚 더 자세한 문서
-
-- [ENGINE_README.md](ENGINE_README.md) — APO 내부 동작, 레지스트리 슬롯, COM 인터페이스 협상, GPL 경계
-- [engine/SoundMate_APO/include/FilterEngine.h](engine/SoundMate_APO/include/FilterEngine.h) — DSP 본체 (주석 포함)
-- [engine/SoundMate_APO/include/SoundMate_Shared.h](engine/SoundMate_APO/include/SoundMate_Shared.h) — 공유메모리 프로토콜
-- [CMakeLists.txt](CMakeLists.txt) — 빌드 타깃 정의
-
----
-
-## 🤝 기여
-
-- 본 빌드의 정규화기/리미터 정책은 컴파일 스위치 기반. 변경 시 [engine/SoundMate_APO/include/FilterEngine.h](engine/SoundMate_APO/include/FilterEngine.h) 상단 매크로 수정 + 재빌드.
-- GUI / Controller / 공유메모리 구조는 변경 시 ABI 호환성 점검 필수 ([SoundMate_Shared.h](engine/SoundMate_APO/include/SoundMate_Shared.h) 의 `SOUNDMATE_VERSION`).
-- GPL 경계: GUI(`SoundMate_EQ.exe`)는 Equalizer-APO 포크 헬퍼와 링크되지 않습니다. 통신은 오직 `config.txt` + 공유메모리.
-
----
-
-© 2026 SoundMate Team
+© 2026 SoundMate Team. All rights reserved.

@@ -1,5 +1,6 @@
 #include "SurveyWindow.h"
 #include "Theme.h"
+#include "UIScale.h"
 #include "../core/SurveyMapping.h"
 
 // [C-3] 콤마 연결 라벨/ID 문자열을 5개 인덱스로 파싱.
@@ -48,7 +49,7 @@ void SurveyWindow::Render() {
     if (!m_open) return;
 
     ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize({600, 450}, ImGuiCond_Appearing);
+    ImGui::SetNextWindowSize(UIScale::ClampPopupSize(UIScale::V(600, 450)), ImGuiCond_Appearing);
     
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 12.0f);
     ImGui::PushStyleColor(ImGuiCol_WindowBg, Theme::ToU32(Theme::PANEL_COLOR));
