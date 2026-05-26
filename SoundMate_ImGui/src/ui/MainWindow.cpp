@@ -1223,11 +1223,19 @@ void MainWindow::Render() {
   ImGui::Spacing();
 
   // [Phase 3] 매직넘버(-180) 제거 — TopBar 의 실측 끝 Y 와 하단 예약 높이로
-  // 본문 영역을 산출. 하단 예약은 BottomBar(54) + StatusBar(24) + 여백 두 줄.
-  const float bodyStartY    = ImGui::GetCursorPosY();
-  const float kBottomReserveH = UIScale::Px(54.0f + 24.0f + 16.0f);
-  const float bodyH         = std::max(UIScale::Px(120.0f),
-                                       io.DisplaySize.y - bodyStartY - kBottomReserveH);
+  // 본문 영역을 산출. reserve 식 의미 분해:
+  //   BottomBar child(54 scaled) + StatusBar TextLineHeight (폰트/DPI 자동 추종)
+  //   + WindowPadding 바닥 + ItemSpacing × 3 (Spacing()×2 + EndChild auto)
+  //   + safety 8px (폰트 베이스라인 / ItemSpacing 기본값 변동 흡수)
+  const float bodyStartY = ImGui::GetCursorPosY();
+  const ImGuiStyle& style = ImGui::GetStyle();
+  const float kBottomReserveH = UIScale::Px(54.0f)
+                              + ImGui::GetTextLineHeight()
+                              + style.WindowPadding.y
+                              + style.ItemSpacing.y * 3.0f
+                              + UIScale::Px(8.0f);
+  const float bodyH = std::max(UIScale::Px(120.0f),
+                               io.DisplaySize.y - bodyStartY - kBottomReserveH);
 
   // [Phase 3] leftW 비례화 — 22% 범위에서 240~320px(스케일 적용) 사이로 클램프.
   const float leftW = std::clamp(io.DisplaySize.x * 0.22f,
@@ -1315,7 +1323,7 @@ void MainWindow::RenderTopBar() {
       presetLabel = m_userPresets[m_selectedPresetIdx].name;
 
     // 프리셋 콤보박스의 가로 너비를 널찍하게 늘려 비어 보이지 않게 합니다.
-    float comboW = twoLines ? 160.0f : 200.0f;
+    float comboW = UIScale::Px(twoLines ? 160.0f : 200.0f);
     ImGui::SetNextItemWidth(comboW);
     if (ImGui::BeginCombo("##preset", presetLabel.c_str())) {
       bool autoSel = !m_presetModeActive;
@@ -1339,7 +1347,7 @@ void MainWindow::RenderTopBar() {
       ImGui::EndCombo();
     }
 
-    ImGui::SameLine(0, 8); // 간격 넓힘 (원래 4)
+    ImGui::SameLine(0, UIScale::Px(8)); // 간격 넓힘 (원래 4)
     ImGui::PushStyleColor(ImGuiCol_Button, m_presetModeActive
                                                ? IM_COL32(60, 180, 80, 255)
                                                : IM_COL32(60, 60, 120, 255));
@@ -1359,7 +1367,7 @@ void MainWindow::RenderTopBar() {
     }
     ImGui::PopStyleColor(2);
 
-    ImGui::SameLine(0, 8); // 간격 넓힘 (원래 4)
+    ImGui::SameLine(0, UIScale::Px(8)); // 간격 넓힘 (원래 4)
     bool canDelete = m_presetModeActive && m_selectedPresetIdx >= 0;
     ImGui::PushStyleColor(ImGuiCol_Button, canDelete
                                                ? IM_COL32(180, 40, 40, 255)
@@ -1375,22 +1383,22 @@ void MainWindow::RenderTopBar() {
   if (twoLines) {
     ImGui::Spacing();
   } else {
-    ImGui::SameLine(0, 20); // 그룹 간 여백을 널찍하게 20px로 지정
+    ImGui::SameLine(0, UIScale::Px(20)); // 그룹 간 여백을 널찍하게 20px로 지정
   }
 
   // ── [우측 영역] 기기, 설정, 전원, 헬스점 ──
   // 가로 너비를 크게 설정하여 상단바를 고급스럽게 꽉 채웁니다.
-  float settingsW = twoLines ? 90.0f : 110.0f;  // 원래 70.0f / 80.0f 에서 상향
-  float powerW = twoLines ? 100.0f : 130.0f;    // 원래 80.0f / 100.0f 에서 상향
-  float healthW = SoundMate::Features::kG1_1_HealthIndicator ? 24.0f : 0.0f;
-  float spacing = 16.0f;                        // 원래 8.0f 패딩에서 16.0f로 2배 증가
-  
+  float settingsW = UIScale::Px(twoLines ? 90.0f : 110.0f);  // 원래 70.0f / 80.0f 에서 상향
+  float powerW    = UIScale::Px(twoLines ? 100.0f : 130.0f); // 원래 80.0f / 100.0f 에서 상향
+  float healthW   = SoundMate::Features::kG1_1_HealthIndicator ? UIScale::Px(24.0f) : 0.0f;
+  float spacing   = UIScale::Px(16.0f);                       // 원래 8.0f 패딩에서 16.0f로 2배 증가
+
   // 우측 버튼들의 총 너비 합산 (X버튼 제거됨)
   float rightButtonsW = settingsW + spacing + powerW + (healthW > 0 ? (spacing + healthW) : 0.0f);
-  
+
   // 기기 표시 라벨 가용 너비 계산
   float devW = ImGui::GetContentRegionAvail().x - rightButtonsW - spacing;
-  devW = std::max(devW, 200.0f); // 최소 너비를 100.0f -> 200.0f로 상향하여 긴 장치명도 넉넉히 수용
+  devW = std::max(devW, UIScale::Px(200.0f)); // 최소 너비를 100.0f -> 200.0f로 상향하여 긴 장치명도 넉넉히 수용
 
   {
     std::string name;
@@ -1404,7 +1412,7 @@ void MainWindow::RenderTopBar() {
     ImGui::AlignTextToFramePadding();
     ImGui::TextColored(Theme::TEXT_WHITE, "%s", name.c_str());
     if (!apoOk) {
-      ImGui::SameLine(0, 6);
+      ImGui::SameLine(0, UIScale::Px(6));
       ImGui::TextColored(Theme::COLOR_RED, u8"- 장치설정 요함");
     }
     ImGui::EndChild();
@@ -1413,13 +1421,13 @@ void MainWindow::RenderTopBar() {
   ImGui::SameLine(0, spacing);
 
   // 우측 마진을 자연스럽게 맞추기 위한 커서 강제 배치
-  float targetX = ImGui::GetWindowWidth() - rightButtonsW - 20.0f;
+  float targetX = ImGui::GetWindowWidth() - rightButtonsW - UIScale::Px(20.0f);
   if (ImGui::GetCursorPosX() < targetX) {
       ImGui::SetCursorPosX(targetX);
   }
 
   // Settings 버튼
-  if (ImGui::Button("Settings", {settingsW, 0})) {
+  if (ImGui::Button("Settings", ImVec2(settingsW, 0))) {
     std::vector<std::string> names;
     {
       std::lock_guard<std::mutex> lk(m_devicesMutex);
@@ -1506,7 +1514,7 @@ void MainWindow::RenderTopBar() {
     ImGui::PushStyleColor(ImGuiCol_Button, Theme::ToU32(Theme::BTN_SECONDARY));
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Theme::ToU32(Theme::ACCENT_COLOR));
   }
-  if (ImGui::Button(m_isEqEnabled ? "POWER ON" : "POWER OFF", {powerW, 0})) {
+  if (ImGui::Button(m_isEqEnabled ? "POWER ON" : "POWER OFF", ImVec2(powerW, 0))) {
     m_isEqEnabled = !m_isEqEnabled;
     if (!m_isEqEnabled) {
       std::string dev = GetSelectedDeviceGuid();
@@ -1529,20 +1537,24 @@ void MainWindow::RenderVisualizer() {
   ImDrawList *dl = ImGui::GetWindowDrawList();
   ImVec2 pos = ImGui::GetCursorScreenPos();
   float w = ImGui::GetContentRegionAvail().x;
-  float h = 80.0f;
+  float h = UIScale::Px(80.0f);
 
   // 배경
-  Theme::DrawPanel(dl, pos, {pos.x + w, pos.y + h}, 10);
+  Theme::DrawPanel(dl, pos, {pos.x + w, pos.y + h}, UIScale::Px(10));
 
-  float barW = (w - 20) / VIS_BARS;
+  const float kSidePad = UIScale::Px(10.0f);
+  const float kBarGap  = UIScale::Px(2.0f);
+  const float kBaselineOffset = UIScale::Px(8.0f);
+  float barW = (w - kSidePad * 2) / VIS_BARS;
   for (int i = 0; i < VIS_BARS; i++) {
     float t = (float)i / VIS_BARS;
     ImVec4 col = Theme::GetGradientColor(t);
-    float barH = m_visBars[i] * (h - 16);
-    float x = pos.x + 10 + i * barW;
-    float y0 = pos.y + h - 8 - barH;
-    float y1 = pos.y + h - 8;
-    dl->AddRectFilled({x, y0}, {x + barW - 2, y1}, Theme::ToU32(col), 2);
+    float barH = m_visBars[i] * (h - UIScale::Px(16));
+    float x = pos.x + kSidePad + i * barW;
+    float y0 = pos.y + h - kBaselineOffset - barH;
+    float y1 = pos.y + h - kBaselineOffset;
+    dl->AddRectFilled({x, y0}, {x + barW - kBarGap, y1}, Theme::ToU32(col),
+                       UIScale::Px(2));
   }
   ImGui::Dummy({w, h});
 }
@@ -1569,7 +1581,7 @@ void MainWindow::RenderLeftPanel() {
   ImVec2 cpos = ImGui::GetCursorScreenPos();
   Theme::DrawPanel(dl, cpos, {cpos.x + panelW, cpos.y + panelH});
 
-  const float kPad = 16.0f;
+  const float kPad = UIScale::Px(16.0f);
   float curY = cpos.y + kPad;
 
   // ── 1) 앨범 아트워크 — 패널 너비에 맞춰 정사각형, 라운드 코너 ──
@@ -1593,7 +1605,7 @@ void MainWindow::RenderLeftPanel() {
   // 정사각형 배경 (비정사각형 썸네일의 여백을 패널 색으로 채움)
   ImU32 panelBg = Theme::ToU32(Theme::PANEL_COLOR);
   dl->AddRectFilled({artX, curY}, {artX + kArtSize, curY + kArtSize}, panelBg,
-                    10.0f);
+                    UIScale::Px(10.0f));
 
   if (srv && aw > 0 && ah > 0) {
     float scale = kArtSize / (float)std::max(aw, ah);
@@ -1612,13 +1624,13 @@ void MainWindow::RenderLeftPanel() {
   // srv == nullptr 일 때: EnsurePlaceholderLoaded()에 의해 placeholder가
   // 로드되면 다음 프레임부터 자동으로 표시됨. 로드 전까지는 panelBg 배경만
   // 보임.
-  curY += kArtSize + 12.0f;
+  curY += kArtSize + UIScale::Px(12.0f);
 
   // ── 2) 곡 제목 (Bold) ──
   ImGui::SetCursorScreenPos({cpos.x + kPad, curY});
   if (m_rawTitle.empty() && m_currentTitle.empty()) {
     ImGui::TextColored(Theme::TEXT_GRAY, "Waiting for music...");
-    curY += ImGui::GetTextLineHeight() + 4.0f;
+    curY += ImGui::GetTextLineHeight() + UIScale::Px(4.0f);
   } else {
     // 제목 — 패널 너비에 맞게 줄바꿈
     ImGui::PushTextWrapPos(cpos.x + panelW - kPad);
@@ -1626,14 +1638,14 @@ void MainWindow::RenderLeftPanel() {
                        m_rawTitle.empty() ? m_currentTitle.c_str()
                                           : m_rawTitle.c_str());
     ImGui::PopTextWrapPos();
-    curY += ImGui::GetItemRectSize().y + 2.0f;
+    curY += ImGui::GetItemRectSize().y + UIScale::Px(2.0f);
 
     // ── 3) 아티스트 ──
     ImGui::SetCursorScreenPos({cpos.x + kPad, curY});
     ImGui::TextColored(Theme::TEXT_GRAY, "%s",
                        m_rawArtist.empty() ? m_currentArtist.c_str()
                                            : m_rawArtist.c_str());
-    curY += ImGui::GetTextLineHeight() + 8.0f;
+    curY += ImGui::GetTextLineHeight() + UIScale::Px(8.0f);
 
     // ── 4) 상태 로그 뱃지 ──
     ImGui::SetCursorScreenPos({cpos.x + kPad, curY});
@@ -1642,15 +1654,15 @@ void MainWindow::RenderLeftPanel() {
       ImVec2 badgePos = {cpos.x + kPad, curY};
       const char *badgeText = u8"⚡ AI Analyzing...";
       ImVec2 badgeSize = ImGui::CalcTextSize(badgeText);
-      float badgePadX = 10.0f, badgePadY = 4.0f;
+      float badgePadX = UIScale::Px(10.0f), badgePadY = UIScale::Px(4.0f);
       dl->AddRectFilled(badgePos,
                         {badgePos.x + badgeSize.x + badgePadX * 2,
                          badgePos.y + badgeSize.y + badgePadY * 2},
-                        IM_COL32(90, 50, 180, 200), 6.0f);
+                        IM_COL32(90, 50, 180, 200), UIScale::Px(6.0f));
       ImGui::SetCursorScreenPos(
           {badgePos.x + badgePadX, badgePos.y + badgePadY});
       ImGui::TextColored(Theme::TEXT_WHITE, "%s", badgeText);
-      curY += badgeSize.y + badgePadY * 2 + 10.0f;
+      curY += badgeSize.y + badgePadY * 2 + UIScale::Px(10.0f);
     } else if (!m_statusText.empty()) {
       // 마지막 상태 — 작은 뱃지
       const char *badgeText = m_statusText.c_str();
@@ -1659,24 +1671,24 @@ void MainWindow::RenderLeftPanel() {
       if (shortStatus.length() > 30)
         shortStatus = shortStatus.substr(0, 27) + "...";
       ImVec2 badgeSize = ImGui::CalcTextSize(shortStatus.c_str());
-      float badgePadX = 8.0f, badgePadY = 3.0f;
+      float badgePadX = UIScale::Px(8.0f), badgePadY = UIScale::Px(3.0f);
       ImVec2 badgePos = {cpos.x + kPad, curY};
       dl->AddRectFilled(badgePos,
                         {badgePos.x + badgeSize.x + badgePadX * 2,
                          badgePos.y + badgeSize.y + badgePadY * 2},
-                        IM_COL32(30, 120, 80, 200), 6.0f);
+                        IM_COL32(30, 120, 80, 200), UIScale::Px(6.0f));
       ImGui::SetCursorScreenPos(
           {badgePos.x + badgePadX, badgePos.y + badgePadY});
       ImGui::TextColored(Theme::COLOR_GREEN, "%s", shortStatus.c_str());
-      curY += badgeSize.y + badgePadY * 2 + 10.0f;
+      curY += badgeSize.y + badgePadY * 2 + UIScale::Px(10.0f);
     }
   }
 
   // ── 5) 구분선 ──
-  curY += 4.0f;
+  curY += UIScale::Px(4.0f);
   dl->AddLine({cpos.x + kPad, curY}, {cpos.x + panelW - kPad, curY},
-              IM_COL32(80, 80, 100, 150), 1.0f);
-  curY += 12.0f;
+              IM_COL32(80, 80, 100, 150), UIScale::Px(1.0f));
+  curY += UIScale::Px(12.0f);
 
   // ── 6) 메타데이터 행들 (아이콘 라벨 + 값) ──
   auto DrawMetaRow = [&](const char *icon, const char *label,
@@ -1684,10 +1696,10 @@ void MainWindow::RenderLeftPanel() {
     ImGui::SetCursorScreenPos({cpos.x + kPad, curY});
     ImGui::TextColored(Theme::TEXT_GRAY, "%s  %s", icon, label);
     // 값을 우측 정렬 (적정 위치)
-    float labelEnd = cpos.x + kPad + 100.0f;
+    float labelEnd = cpos.x + kPad + UIScale::Px(100.0f);
     ImGui::SetCursorScreenPos({labelEnd, curY});
     ImGui::TextColored(Theme::TEXT_WHITE, "%s", value);
-    curY += ImGui::GetTextLineHeight() + 6.0f;
+    curY += ImGui::GetTextLineHeight() + UIScale::Px(6.0f);
   };
 
   // Duration
@@ -2102,7 +2114,7 @@ void MainWindow::RenderEQPanel() {
 // ── 하단 바 ──────────────────────────────────────────────────────────────────
 void MainWindow::RenderBottomBar() {
   ImGui::PushStyleColor(ImGuiCol_ChildBg, Theme::ToU32(Theme::PANEL_COLOR));
-  ImGui::BeginChild("##bottom", {0, 54}, false);
+  ImGui::BeginChild("##bottom", UIScale::V(0, 54), false);
 
   // [Phase 3] Free 플랜은 프롬프트 입력 자체를 비활성. 안내 + 구독 버튼만 노출.
   const bool aiEligible = g_recordManager.IsAIEligible();
@@ -2111,7 +2123,7 @@ void MainWindow::RenderBottomBar() {
   const bool noSongInfo = m_currentGenre.empty();
 
   if (aiEligible && noSongInfo) {
-    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 330);
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - UIScale::Px(330));
     ImGui::PushStyleColor(ImGuiCol_FrameBg, IM_COL32(35, 35, 45, 255));
     ImGui::PushStyleColor(ImGuiCol_Text, Theme::ToU32(Theme::TEXT_GRAY));
     ImGui::BeginDisabled(true);
@@ -2122,16 +2134,16 @@ void MainWindow::RenderBottomBar() {
                      ImGuiInputTextFlags_ReadOnly);
     ImGui::EndDisabled();
     ImGui::PopStyleColor(2);
-    ImGui::SameLine(0, 8);
+    ImGui::SameLine(0, UIScale::Px(8));
 
     // 비활성 입력 버튼 (자리 유지)
     ImGui::BeginDisabled(true);
-    ImGui::Button("입력", {80, 0});
+    ImGui::Button("입력", UIScale::V(80, 0));
     ImGui::EndDisabled();
-    ImGui::SameLine(0, 8);
+    ImGui::SameLine(0, UIScale::Px(8));
   } else if (!aiEligible) {
     // 비활성 InputText로 입력 영역 가로 폭 유지 (UI 흔들림 방지)
-    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 330);
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - UIScale::Px(330));
     ImGui::PushStyleColor(ImGuiCol_FrameBg, IM_COL32(35, 35, 45, 255));
     ImGui::PushStyleColor(ImGuiCol_Text, Theme::ToU32(Theme::TEXT_GRAY));
     ImGui::BeginDisabled(true);
@@ -2143,35 +2155,35 @@ void MainWindow::RenderBottomBar() {
                      ImGuiInputTextFlags_ReadOnly);
     ImGui::EndDisabled();
     ImGui::PopStyleColor(2);
-    ImGui::SameLine(0, 8);
+    ImGui::SameLine(0, UIScale::Px(8));
 
     // Pro 구독하기 버튼 — 모달 안내 또는 즉시 페이지 오픈
     ImGui::PushStyleColor(ImGuiCol_Button, Theme::ToU32(Theme::GRAD_START));
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
                           Theme::ToU32(Theme::GRAD_END));
-    if (ImGui::Button(u8"Pro 구독하기", {130, 0})) {
+    if (ImGui::Button(u8"Pro 구독하기", UIScale::V(130, 0))) {
       m_showUpgradePopup = true;
     }
     ImGui::PopStyleColor(2);
-    ImGui::SameLine(0, 8);
+    ImGui::SameLine(0, UIScale::Px(8));
   } else {
     // 프롬프트 입력
-    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 330);
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - UIScale::Px(330));
     bool enter = ImGui::InputText("##prompt", m_promptBuf, sizeof(m_promptBuf),
                                   ImGuiInputTextFlags_EnterReturnsTrue);
-    ImGui::SameLine(0, 8);
+    ImGui::SameLine(0, UIScale::Px(8));
 
     // 입력 버튼
     ImGui::PushStyleColor(ImGuiCol_Button, Theme::ToU32(Theme::BTN_SECONDARY));
-    if (ImGui::Button("입력", {80, 0}) || enter)
+    if (ImGui::Button("입력", UIScale::V(80, 0)) || enter)
       TriggerAIGeneration();
     ImGui::PopStyleColor();
-    ImGui::SameLine(0, 8);
+    ImGui::SameLine(0, UIScale::Px(8));
   }
 
   // 수동 초기화
   ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(61, 61, 61, 255));
-  if (ImGui::Button("수동 초기화", {110, 0})) {
+  if (ImGui::Button("수동 초기화", UIScale::V(110, 0))) {
     g_recordManager.ClearManualEQ(m_currentTitle, m_currentArtist);
 
     bool restored = false;
@@ -2210,14 +2222,14 @@ void MainWindow::RenderBottomBar() {
     }
   }
   ImGui::PopStyleColor();
-  ImGui::SameLine(0, 8);
+  ImGui::SameLine(0, UIScale::Px(8));
 
   // AI 초기화 — Free 플랜에서는 노출 자체를 막는다 (의미 없는 버튼 제거).
   //   [의도] 사용자 프롬프트로 추가한 "prompt" 소스만 제거하고, 원본 자동 분석
   //   "AI" 소스의 EQ 로 복원. AI 재분석은 트리거하지 않음.
   if (aiEligible) {
     ImGui::PushStyleColor(ImGuiCol_Button, Theme::ToU32(Theme::GRAD_START));
-    if (ImGui::Button("AI 초기화", {100, 0})) {
+    if (ImGui::Button("AI 초기화", UIScale::V(100, 0))) {
       g_recordManager.ClearPromptEQ(m_currentTitle, m_currentArtist);
 
       // [AI 소스 한정 조회] 우선순위(direct/manual/prompt/AI) 무시하고 "AI" 만.
@@ -2318,7 +2330,7 @@ void MainWindow::RenderRestorePopup() {
   ImGui::SetNextWindowSize(UIScale::ClampPopupSize(UIScale::V(460, 400)),
                            ImGuiCond_Always);
   ImGui::PushStyleColor(ImGuiCol_WindowBg, Theme::ToU32(Theme::PANEL_COLOR));
-  ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 12.0f);
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, UIScale::Px(12.0f));
 
   ImGui::Begin("백업 복원##restore_popup", &m_restorePopupOpen,
                ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize |
@@ -2329,8 +2341,9 @@ void MainWindow::RenderRestorePopup() {
   ImDrawList *dl = ImGui::GetWindowDrawList();
   ImVec2 p = ImGui::GetCursorScreenPos();
   float cw = ImGui::GetContentRegionAvail().x;
-  dl->AddLine({p.x, p.y}, {p.x + cw, p.y}, IM_COL32(255, 255, 255, 30), 1.0f);
-  ImGui::Dummy({0, 8});
+  dl->AddLine({p.x, p.y}, {p.x + cw, p.y}, IM_COL32(255, 255, 255, 30),
+              UIScale::Px(1.0f));
+  ImGui::Dummy(UIScale::V(0, 8));
 
   if (m_backupList.empty()) {
     ImGui::TextColored(Theme::TEXT_GRAY, "저장된 백업이 없습니다.");
@@ -2340,7 +2353,7 @@ void MainWindow::RenderRestorePopup() {
     ImGui::Spacing();
 
     // 백업 목록 (스크롤 가능)
-    ImGui::BeginChild("##backup_list", {0, 240}, true);
+    ImGui::BeginChild("##backup_list", UIScale::V(0, 240), true);
     for (int i = 0; i < (int)m_backupList.size(); i++) {
       bool isSelected = (m_selectedBackup == i);
       std::string label = (i == 0) ? m_backupList[i].displayName + " (최신)"
@@ -2352,7 +2365,7 @@ void MainWindow::RenderRestorePopup() {
         ImGui::PushStyleColor(ImGuiCol_HeaderHovered,
                               Theme::ToU32(Theme::ACCENT_HOVER));
       }
-      if (ImGui::Selectable(label.c_str(), isSelected, 0, {0, 28})) {
+      if (ImGui::Selectable(label.c_str(), isSelected, 0, UIScale::V(0, 28))) {
         m_selectedBackup = i;
       }
       if (isSelected) {
@@ -2365,7 +2378,7 @@ void MainWindow::RenderRestorePopup() {
   ImGui::Spacing();
 
   // 버튼들
-  float btnW = (cw - 12) / 2;
+  float btnW = (cw - UIScale::Px(12)) / 2;
   bool hasSelection = !m_backupList.empty();
 
   // 복원 버튼
@@ -2376,7 +2389,7 @@ void MainWindow::RenderRestorePopup() {
     ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(80, 80, 80, 255));
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(80, 80, 80, 255));
   }
-  if (ImGui::Button("복원하기", {btnW, 36}) && hasSelection) {
+  if (ImGui::Button("복원하기", ImVec2(btnW, UIScale::Px(36))) && hasSelection) {
     if (m_selectedBackup >= 0 && m_selectedBackup < (int)m_backupList.size()) {
       ExecuteRestore(m_backupList[m_selectedBackup].fullPath);
     }
@@ -2384,12 +2397,12 @@ void MainWindow::RenderRestorePopup() {
   }
   ImGui::PopStyleColor(2);
 
-  ImGui::SameLine(0, 12);
+  ImGui::SameLine(0, UIScale::Px(12));
 
   // 취소 버튼
   ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(60, 60, 60, 255));
   ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(90, 90, 90, 255));
-  if (ImGui::Button("취소", {btnW, 36})) {
+  if (ImGui::Button("취소", ImVec2(btnW, UIScale::Px(36)))) {
     m_restorePopupOpen = false;
   }
   ImGui::PopStyleColor(2);
@@ -2585,7 +2598,7 @@ void MainWindow::RenderDiagnosticPanel() {
                         "WASAPI Exclusive 탐지 + FAQ 링크 추가 예정)");
 
     ImGui::Spacing();
-    if (ImGui::Button("닫기", ImVec2(120, 0)))
+    if (ImGui::Button("닫기", UIScale::V(120, 0)))
       m_diagnosticOpen = false;
   }
   ImGui::End();
@@ -2720,7 +2733,7 @@ void MainWindow::RenderPresetPopups() {
   ImGui::SetNextWindowSize(UIScale::ClampPopupSize(UIScale::V(340, 0)),
                            ImGuiCond_Always);
   ImGui::PushStyleColor(ImGuiCol_WindowBg, Theme::ToU32(Theme::PANEL_COLOR));
-  ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 12.0f);
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, UIScale::Px(12.0f));
   ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, UIScale::V(20, 16));
 
   if (ImGui::BeginPopupModal("##save_preset_popup", nullptr,
@@ -2731,8 +2744,9 @@ void MainWindow::RenderPresetPopups() {
     ImDrawList *dl = ImGui::GetWindowDrawList();
     ImVec2 p = ImGui::GetCursorScreenPos();
     float cw = ImGui::GetContentRegionAvail().x;
-    dl->AddLine({p.x, p.y}, {p.x + cw, p.y}, IM_COL32(255, 255, 255, 30), 1.0f);
-    ImGui::Dummy({0, 8});
+    dl->AddLine({p.x, p.y}, {p.x + cw, p.y}, IM_COL32(255, 255, 255, 30),
+                UIScale::Px(1.0f));
+    ImGui::Dummy(UIScale::V(0, 8));
 
     ImGui::TextColored(Theme::TEXT_GRAY,
                        "현재 슬라이더 값을 프리셋으로 저장합니다.");
@@ -2756,20 +2770,20 @@ void MainWindow::RenderPresetPopups() {
     }
     ImGui::Spacing();
 
-    float btnW = (cw - 8) / 2;
+    float btnW = (cw - UIScale::Px(8)) / 2;
     // 저장 버튼
     ImGui::PushStyleColor(ImGuiCol_Button, Theme::ToU32(Theme::GRAD_START));
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
                           Theme::ToU32(Theme::GRAD_END));
     ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(0, 0, 0, 255));
-    bool doSave = ImGui::Button("저장", {btnW, 36}) || enter;
+    bool doSave = ImGui::Button("저장", ImVec2(btnW, UIScale::Px(36))) || enter;
     ImGui::PopStyleColor(3);
-    ImGui::SameLine(0, 8);
+    ImGui::SameLine(0, UIScale::Px(8));
 
     // 취소 버튼
     ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(60, 60, 60, 255));
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(90, 90, 90, 255));
-    bool doCancel = ImGui::Button("취소", {btnW, 36});
+    bool doCancel = ImGui::Button("취소", ImVec2(btnW, UIScale::Px(36)));
     ImGui::PopStyleColor(2);
 
     if (doSave) {
@@ -2813,7 +2827,7 @@ void MainWindow::RenderPresetPopups() {
   ImGui::SetNextWindowSize(UIScale::ClampPopupSize(UIScale::V(300, 0)),
                            ImGuiCond_Always);
   ImGui::PushStyleColor(ImGuiCol_WindowBg, Theme::ToU32(Theme::PANEL_COLOR));
-  ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 12.0f);
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, UIScale::Px(12.0f));
   ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, UIScale::V(20, 16));
 
   if (ImGui::BeginPopupModal("##delete_preset_popup", nullptr,
@@ -2831,11 +2845,11 @@ void MainWindow::RenderPresetPopups() {
     ImGui::Spacing();
 
     float cw2 = ImGui::GetContentRegionAvail().x;
-    float btnW2 = (cw2 - 8) / 2;
+    float btnW2 = (cw2 - UIScale::Px(8)) / 2;
 
     ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(180, 40, 40, 255));
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(220, 60, 60, 255));
-    if (ImGui::Button("삭제", {btnW2, 36})) {
+    if (ImGui::Button("삭제", ImVec2(btnW2, UIScale::Px(36)))) {
       if (m_selectedPresetIdx >= 0 &&
           m_selectedPresetIdx < (int)m_userPresets.size()) {
         m_userPresets.erase(m_userPresets.begin() + m_selectedPresetIdx);
@@ -2847,11 +2861,11 @@ void MainWindow::RenderPresetPopups() {
       ImGui::CloseCurrentPopup();
     }
     ImGui::PopStyleColor(2);
-    ImGui::SameLine(0, 8);
+    ImGui::SameLine(0, UIScale::Px(8));
 
     ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(60, 60, 60, 255));
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(90, 90, 90, 255));
-    if (ImGui::Button("취소", {btnW2, 36}))
+    if (ImGui::Button("취소", ImVec2(btnW2, UIScale::Px(36))))
       ImGui::CloseCurrentPopup();
     ImGui::PopStyleColor(2);
 
@@ -2873,7 +2887,7 @@ void MainWindow::RenderExitPopup() {
   ImGui::SetNextWindowSize(UIScale::ClampPopupSize(UIScale::V(380, 0)),
                            ImGuiCond_Always);
   ImGui::PushStyleColor(ImGuiCol_WindowBg, Theme::ToU32(Theme::PANEL_COLOR));
-  ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 12.0f);
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, UIScale::Px(12.0f));
   ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, UIScale::V(20, 16));
 
   if (ImGui::BeginPopupModal("##exit_confirm_popup", nullptr,
@@ -2884,24 +2898,25 @@ void MainWindow::RenderExitPopup() {
     ImDrawList *dl = ImGui::GetWindowDrawList();
     ImVec2 p = ImGui::GetCursorScreenPos();
     float cw = ImGui::GetContentRegionAvail().x;
-    dl->AddLine({p.x, p.y}, {p.x + cw, p.y}, IM_COL32(255, 255, 255, 30), 1.0f);
-    ImGui::Dummy({0, 8});
+    dl->AddLine({p.x, p.y}, {p.x + cw, p.y}, IM_COL32(255, 255, 255, 30),
+                UIScale::Px(1.0f));
+    ImGui::Dummy(UIScale::V(0, 8));
 
     ImGui::TextColored(Theme::TEXT_GRAY, "프로그램을 완전히 종료하시겠습니까,\n아니면 트레이 아이콘으로 최소화하시겠습니까?");
     ImGui::Spacing();
-    ImGui::Dummy({0, 8});
+    ImGui::Dummy(UIScale::V(0, 8));
 
     // Buttons
     extern void AppMinimizeToTray();
     extern void AppExit();
 
-    if (PurpleButton("트레이 최소화", {cw, 36})) {
+    if (PurpleButton("트레이 최소화", ImVec2(cw, UIScale::Px(36)))) {
       AppMinimizeToTray();
       ImGui::CloseCurrentPopup();
     }
     ImGui::Spacing();
-    
-    if (ImGui::Button("프로그램 종료", {cw, 36})) {
+
+    if (ImGui::Button("프로그램 종료", ImVec2(cw, UIScale::Px(36)))) {
       AppExit();
       ImGui::CloseCurrentPopup();
     }
@@ -2909,7 +2924,7 @@ void MainWindow::RenderExitPopup() {
 
     ImGui::PushStyleColor(ImGuiCol_Button, Theme::ToU32(Theme::COLOR_RED));
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(255, 100, 100, 255));
-    if (ImGui::Button("취소", {cw, 36})) {
+    if (ImGui::Button("취소", ImVec2(cw, UIScale::Px(36)))) {
       ImGui::CloseCurrentPopup();
     }
     ImGui::PopStyleColor(2);
@@ -3048,7 +3063,7 @@ void MainWindow::RenderUpdatePopup() {
   ImGui::SetNextWindowSize(UIScale::ClampPopupSize(UIScale::V(380, 0)),
                            ImGuiCond_Always);
   ImGui::PushStyleColor(ImGuiCol_WindowBg, Theme::ToU32(Theme::PANEL_COLOR));
-  ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 12.0f);
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, UIScale::Px(12.0f));
   ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, UIScale::V(20, 16));
 
   // 강제 업데이트일 경우 창을 끌 수 없음
@@ -3079,7 +3094,7 @@ void MainWindow::RenderUpdatePopup() {
     }
 
     float cw = ImGui::GetContentRegionAvail().x;
-    float btnW = m_isMandatoryUpdate ? cw : (cw - 8) / 2;
+    float btnW = m_isMandatoryUpdate ? cw : (cw - UIScale::Px(8)) / 2;
 
     // ── 다운로드 진행 중 ──
     if (m_updateDownloading.load()) {
@@ -3096,7 +3111,7 @@ void MainWindow::RenderUpdatePopup() {
       ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
                             Theme::ToU32(Theme::GRAD_END));
       ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(0, 0, 0, 255));
-      if (ImGui::Button(u8"다시 시도", {cw, 36})) {
+      if (ImGui::Button(u8"다시 시도", ImVec2(cw, UIScale::Px(36)))) {
         m_updateDownloadFailed = false;
         m_updateDownloading = true;
         std::thread([this]() {
@@ -3115,7 +3130,7 @@ void MainWindow::RenderUpdatePopup() {
                             Theme::ToU32(Theme::GRAD_END));
       ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(0, 0, 0, 255));
 
-      if (ImGui::Button(u8"지금 업데이트", {btnW, 36})) {
+      if (ImGui::Button(u8"지금 업데이트", ImVec2(btnW, UIScale::Px(36)))) {
         if (m_isMandatoryUpdate) {
           // 강제 업데이트: 팝업 닫지 않고 다운로드 시작, 완료 시 exit(0)
           m_updateDownloading = true;
@@ -3135,11 +3150,11 @@ void MainWindow::RenderUpdatePopup() {
 
       // 선택적 업데이트일 때만 "나중에" 버튼 표시
       if (!m_isMandatoryUpdate) {
-        ImGui::SameLine(0, 8);
+        ImGui::SameLine(0, UIScale::Px(8));
         ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(60, 60, 60, 255));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
                               IM_COL32(90, 90, 90, 255));
-        if (ImGui::Button(u8"나중에", {btnW, 36})) {
+        if (ImGui::Button(u8"나중에", ImVec2(btnW, UIScale::Px(36)))) {
           ImGui::CloseCurrentPopup();
         }
         ImGui::PopStyleColor(2);
@@ -3193,7 +3208,7 @@ void MainWindow::RenderDeviceLimitPopup() {
   ImGui::SetNextWindowSize(UIScale::ClampPopupSize(UIScale::V(440, 0)),
                            ImGuiCond_Always);
   ImGui::PushStyleColor(ImGuiCol_WindowBg, Theme::ToU32(Theme::PANEL_COLOR));
-  ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 12.0f);
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, UIScale::Px(12.0f));
   ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, UIScale::V(20, 16));
 
   int flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
@@ -3220,22 +3235,22 @@ void MainWindow::RenderDeviceLimitPopup() {
     ImGui::Spacing();
 
     float cw = ImGui::GetContentRegionAvail().x;
-    float btnW = (cw - 8) / 2;
+    float btnW = (cw - UIScale::Px(8)) / 2;
 
     ImGui::PushStyleColor(ImGuiCol_Button, Theme::ToU32(Theme::GRAD_START));
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
                           Theme::ToU32(Theme::GRAD_END));
     ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(0, 0, 0, 255));
-    if (ImGui::Button(u8"기존 기기 관리하기", {btnW, 36})) {
+    if (ImGui::Button(u8"기존 기기 관리하기", ImVec2(btnW, UIScale::Px(36)))) {
       OpenDeviceManagementPage();
       ImGui::CloseCurrentPopup();
     }
     ImGui::PopStyleColor(3);
 
-    ImGui::SameLine(0, 8);
+    ImGui::SameLine(0, UIScale::Px(8));
     ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(60, 60, 60, 255));
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(90, 90, 90, 255));
-    if (ImGui::Button(u8"닫기", {btnW, 36})) {
+    if (ImGui::Button(u8"닫기", ImVec2(btnW, UIScale::Px(36)))) {
       ImGui::CloseCurrentPopup();
     }
     ImGui::PopStyleColor(2);
@@ -3259,7 +3274,7 @@ void MainWindow::RenderUpgradePopup() {
   ImGui::SetNextWindowSize(UIScale::ClampPopupSize(UIScale::V(420, 0)),
                            ImGuiCond_Always);
   ImGui::PushStyleColor(ImGuiCol_WindowBg, Theme::ToU32(Theme::PANEL_COLOR));
-  ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 12.0f);
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, UIScale::Px(12.0f));
   ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, UIScale::V(20, 16));
 
   int flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
@@ -3279,22 +3294,22 @@ void MainWindow::RenderUpgradePopup() {
     ImGui::Spacing();
 
     float cw = ImGui::GetContentRegionAvail().x;
-    float btnW = (cw - 8) / 2;
+    float btnW = (cw - UIScale::Px(8)) / 2;
 
     ImGui::PushStyleColor(ImGuiCol_Button, Theme::ToU32(Theme::GRAD_START));
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
                           Theme::ToU32(Theme::GRAD_END));
     ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(0, 0, 0, 255));
-    if (ImGui::Button(u8"Pro 구독하기", {btnW, 36})) {
+    if (ImGui::Button(u8"Pro 구독하기", ImVec2(btnW, UIScale::Px(36)))) {
       OpenPricingPage();
       ImGui::CloseCurrentPopup();
     }
     ImGui::PopStyleColor(3);
 
-    ImGui::SameLine(0, 8);
+    ImGui::SameLine(0, UIScale::Px(8));
     ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(60, 60, 60, 255));
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(90, 90, 90, 255));
-    if (ImGui::Button(u8"닫기", {btnW, 36})) {
+    if (ImGui::Button(u8"닫기", ImVec2(btnW, UIScale::Px(36)))) {
       ImGui::CloseCurrentPopup();
     }
     ImGui::PopStyleColor(2);

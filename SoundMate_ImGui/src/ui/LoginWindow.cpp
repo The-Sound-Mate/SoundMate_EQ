@@ -410,17 +410,19 @@ void LoginWindow::Render() {
     ImGui::Spacing(); ImGui::Spacing();
 
     // 브라우저 로그인 버튼
-    ImGui::SetCursorPosX(30);
-    if (ImGui::Button("웹 브라우저에서 로그인", {cw-60, 46})) OpenBrowser();
+    ImGui::SetCursorPosX(UIScale::Px(30));
+    if (ImGui::Button("웹 브라우저에서 로그인", ImVec2(cw - UIScale::Px(60), UIScale::Px(46))))
+        OpenBrowser();
 
     ImGui::Spacing();
 
     // 게스트 버튼
     if constexpr (!SoundMate::Features::kBetaTestRestriction) {
-        ImGui::SetCursorPosX(30);
+        ImGui::SetCursorPosX(UIScale::Px(30));
         ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(0,0,0,0));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Theme::ToU32(Theme::BTN_SECONDARY));
-        if (ImGui::Button("로그인하지 않고 실행하기", {cw-60, 38})) LoginAsGuest();
+        if (ImGui::Button("로그인하지 않고 실행하기", ImVec2(cw - UIScale::Px(60), UIScale::Px(38))))
+            LoginAsGuest();
         ImGui::PopStyleColor(2);
     }
 

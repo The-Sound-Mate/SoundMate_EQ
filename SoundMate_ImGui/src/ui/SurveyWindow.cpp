@@ -51,7 +51,7 @@ void SurveyWindow::Render() {
     ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
     ImGui::SetNextWindowSize(UIScale::ClampPopupSize(UIScale::V(600, 450)), ImGuiCond_Appearing);
     
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 12.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, UIScale::Px(12.0f));
     ImGui::PushStyleColor(ImGuiCol_WindowBg, Theme::ToU32(Theme::PANEL_COLOR));
     
     if (ImGui::Begin("오디오 취향 설문", &m_open, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoSavedSettings)) {
@@ -66,7 +66,8 @@ void SurveyWindow::Render() {
             int prefillIdx = (m_step < (int)m_prefillIndices.size())
                                  ? m_prefillIndices[m_step] : -1;
 
-            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 8.0f);
+            // -1 은 "남은 가로 공간 채우기" sentinel 이라 스케일 금지. 세로만 Px.
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, UIScale::Px(8.0f));
             for (size_t i = 0; i < q.options.size(); ++i) {
                 bool isPrefill = ((int)i == prefillIdx);
                 if (isPrefill) {
@@ -81,7 +82,7 @@ void SurveyWindow::Render() {
                 }
                 std::string label = q.options[i];
                 if (isPrefill) label = "[이전] " + label;
-                if (ImGui::Button(label.c_str(), ImVec2(-1, 50))) {
+                if (ImGui::Button(label.c_str(), ImVec2(-1.0f, UIScale::Px(50.0f)))) {
                     m_answers.push_back((int)i);
                     m_step++;
                 }
@@ -94,14 +95,14 @@ void SurveyWindow::Render() {
             if (prefillIdx >= 0) {
                 ImGui::Spacing();
                 ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(70, 70, 90, 255));
-                if (ImGui::Button(u8"이전 답변 유지 ▶", ImVec2(-1, 32))) {
+                if (ImGui::Button(u8"이전 답변 유지 ▶", ImVec2(-1.0f, UIScale::Px(32.0f)))) {
                     m_answers.push_back(prefillIdx);
                     m_step++;
                 }
                 ImGui::PopStyleColor();
             }
 
-            ImGui::SetCursorPosY(ImGui::GetWindowHeight() - 40);
+            ImGui::SetCursorPosY(ImGui::GetWindowHeight() - UIScale::Px(40));
             ImGui::TextColored(Theme::TEXT_GRAY, "진행률: %d / %d", m_step + 1, (int)m_questions.size());
         } else {
             ImGui::Spacing(); ImGui::Spacing();
@@ -112,7 +113,7 @@ void SurveyWindow::Render() {
             
             ImGui::PushStyleColor(ImGuiCol_Button, Theme::ToU32(Theme::GRAD_START));
             ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Theme::ToU32(Theme::GRAD_END));
-            if (ImGui::Button("적용 및 닫기", ImVec2(120, 40))) {
+            if (ImGui::Button("적용 및 닫기", UIScale::V(120, 40))) {
                 std::string preference;
                 if (m_answers.size() == 5) {
                     const char* t1[] = {"Bass Heavy", "Balanced Bass", "Vocal Focused", "Flat Bass"};

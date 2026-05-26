@@ -124,8 +124,8 @@ void SettingsWindow::RenderSection(const char *title) {
   ImVec2 p = ImGui::GetCursorScreenPos();
   dl->AddLine(ImVec2(p.x, p.y),
               ImVec2(p.x + ImGui::GetContentRegionAvail().x, p.y),
-              IM_COL32(255, 255, 255, 30), 1.0f);
-  ImGui::Dummy(ImVec2(0.0f, 8.0f));
+              IM_COL32(255, 255, 255, 30), UIScale::Px(1.0f));
+  ImGui::Dummy(UIScale::V(0.0f, 8.0f));
 }
 
 bool SettingsWindow::ToggleButton(const char *str_id, bool *v) {
@@ -184,9 +184,9 @@ void SettingsWindow::Render() {
                    ImGuiWindowFlags_NoTitleBar);
 
   float cw = ImGui::GetContentRegionAvail().x;
-  float rightCol = cw - 150.0f;
+  float rightCol = cw - UIScale::Px(150.0f);
   // [PR-2D] 모든 우측 정렬 버튼이 같은 X에서 끝나도록 공통 right edge 사용.
-  const float kRightEdge = cw - 4.0f;
+  const float kRightEdge = cw - UIScale::Px(4.0f);
 
   // [1-B] Free 사용자 정책: 강제 덮어쓰기 → "값 보존 + 비활성 UI" 로 변경.
   // 사용자 데이터(이전 선택) 를 임의로 지우지 않음. Pro 업그레이드 시 자동 부활.
@@ -205,7 +205,7 @@ void SettingsWindow::Render() {
   RenderSection("시스템 설정");
 
   ImGui::TextColored(Theme::TEXT_GRAY, "시작 시 자동 실행");
-  ImGui::SameLine(cw - 40.0f);
+  ImGui::SameLine(cw - UIScale::Px(40.0f));
   if (ToggleButton("##startup", &m_settings.runOnStartup)) {
     HKEY hKey;
     if (RegOpenKeyExA(HKEY_CURRENT_USER,
@@ -228,7 +228,7 @@ void SettingsWindow::Render() {
   {
     const bool eligible = g_recordManager.IsAIEligible();
     ImGui::TextColored(Theme::TEXT_GRAY, "트레이 아이콘으로 최소화");
-    ImGui::SameLine(cw - 40.0f);
+    ImGui::SameLine(cw - UIScale::Px(40.0f));
     ImGui::BeginDisabled(!eligible);
     if (ToggleButton("##tray", &m_settings.minimizeToTray)) {
       SaveSettings(m_settings);
@@ -242,7 +242,7 @@ void SettingsWindow::Render() {
 
   ImGui::TextColored(Theme::TEXT_GRAY, "언어 (Language)");
   ImGui::SameLine(rightCol);
-  ImGui::SetNextItemWidth(150);
+  ImGui::SetNextItemWidth(UIScale::Px(150));
   // [Phase 3] i18n 본 작업(I18nManager) 전까지 dropdown 비활성. 동작 안 하는
   // 토글을 노출하면 다른 토글의 신뢰도까지 떨어뜨림.
   ImGui::BeginDisabled(true);
@@ -267,19 +267,19 @@ void SettingsWindow::Render() {
   for (int i = 0; i < 4; i++) {
     maxTextW = std::max(maxTextW, ImGui::CalcTextSize(bandNames[i]).x);
   }
-  float btnW = maxTextW + ImGui::GetStyle().FramePadding.x * 2.0f + 8.0f;
+  float btnW = maxTextW + ImGui::GetStyle().FramePadding.x * 2.0f + UIScale::Px(8.0f);
   // [PR-2D fix] 실제 그룹 폭 = 버튼들 + 4px 간격(아래 SameLine(0, 4))으로 계산.
   // 기존엔 ItemSpacing.x(기본 8)로 계산해 SameLine(0, 4) 실제 간격과 4px
   // 어긋남.
-  const float kBtnGap = 4.0f;
+  const float kBtnGap = UIScale::Px(4.0f);
   float totalBtnW = btnW * 4.0f + kBtnGap * 3.0f;
 
   ImGui::SameLine(kRightEdge - totalBtnW);
 
-  ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 8.0f);
+  ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, UIScale::Px(8.0f));
   for (int i = 0; i < 4; i++) {
     if (i > 0)
-      ImGui::SameLine(0, 4);
+      ImGui::SameLine(0, kBtnGap);
     if (m_bandIdx == i) {
       ImGui::PushStyleColor(ImGuiCol_Button, Theme::ToU32(Theme::ACCENT_COLOR));
       ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
@@ -290,7 +290,7 @@ void SettingsWindow::Render() {
       ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(80, 70, 120, 255));
       ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(200, 200, 200, 255));
     }
-    if (ImGui::Button(bandNames[i], {btnW, 28})) {
+    if (ImGui::Button(bandNames[i], ImVec2(btnW, UIScale::Px(28)))) {
       m_bandIdx = i;
       m_settings.defaultBands = bandCounts[i];
       SaveSettings(m_settings);
@@ -320,18 +320,18 @@ void SettingsWindow::Render() {
     float segMaxW = 0.0f;
     for (auto &o : kOptions)
       segMaxW = std::max(segMaxW, ImGui::CalcTextSize(o.label).x);
-    float segW = segMaxW + ImGui::GetStyle().FramePadding.x * 2.0f + 8.0f;
+    float segW = segMaxW + ImGui::GetStyle().FramePadding.x * 2.0f + UIScale::Px(8.0f);
     // [PR-2D fix] 4px 간격(SameLine(0, 4))과 동일하게 폭 계산. ItemSpacing.x
     // (기본 8)로 계산하면 실제 우측 끝이 4px 안쪽으로 들어와 어긋남.
-    const float kSegGap = 4.0f;
+    const float kSegGap = UIScale::Px(4.0f);
     float segTotal = segW * 2.0f + kSegGap * 1.0f;
 
     ImGui::SameLine(kRightEdge - segTotal);
-    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 8.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, UIScale::Px(8.0f));
     ImGui::BeginDisabled(!eligible);
     for (int i = 0; i < 2; ++i) {
       if (i > 0)
-        ImGui::SameLine(0, 4);
+        ImGui::SameLine(0, kSegGap);
       bool selected = (m_settings.eqMode == kOptions[i].mode);
       if (selected) {
         ImGui::PushStyleColor(ImGuiCol_Button,
@@ -345,7 +345,7 @@ void SettingsWindow::Render() {
                               IM_COL32(80, 70, 120, 255));
         ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(200, 200, 200, 255));
       }
-      if (ImGui::Button(kOptions[i].label, {segW, 28})) {
+      if (ImGui::Button(kOptions[i].label, ImVec2(segW, UIScale::Px(28)))) {
         m_settings.eqMode = kOptions[i].mode;
         m_settings.autoAnalyze = (m_settings.eqMode == EqMode::AiAuto);
         m_settings.globalAverage = (m_settings.eqMode == EqMode::AiAuto ||
@@ -366,21 +366,21 @@ void SettingsWindow::Render() {
   }
 
   ImGui::TextColored(Theme::TEXT_GRAY, "자동 장치 설정");
-  ImGui::SameLine(kRightEdge - 110.0f);
+  ImGui::SameLine(kRightEdge - UIScale::Px(110.0f));
   ImGui::PushStyleColor(ImGuiCol_Button,
                         IM_COL32(233, 30, 99, 255)); // Pinkish red
   ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(255, 64, 129, 255));
-  if (ImGui::Button("자동 설정", {110, 28})) {
+  if (ImGui::Button("자동 설정", UIScale::V(110, 28))) {
     if (m_onAutoDevice)
       m_onAutoDevice();
   }
   ImGui::PopStyleColor(2);
 
   ImGui::TextColored(Theme::TEXT_GRAY, "자동 설정 장치 복원");
-  ImGui::SameLine(kRightEdge - 110.0f);
+  ImGui::SameLine(kRightEdge - UIScale::Px(110.0f));
   ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(117, 117, 117, 255));
   ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(158, 158, 158, 255));
-  if (ImGui::Button("복원", {110, 28})) {
+  if (ImGui::Button("복원", UIScale::V(110, 28))) {
     if (m_onRestoreDevice)
       m_onRestoreDevice();
   }
@@ -407,11 +407,11 @@ void SettingsWindow::Render() {
   ImGui::Spacing();
 
   ImGui::TextColored(Theme::TEXT_GRAY, "오디오 맞춤형 취향 설정");
-  ImGui::SameLine(cw - 160.0f);
+  ImGui::SameLine(cw - UIScale::Px(160.0f));
   ImGui::PushStyleColor(ImGuiCol_Button, Theme::ToU32(Theme::GRAD_START));
   ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Theme::ToU32(Theme::GRAD_END));
   ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(0, 0, 0, 255));
-  if (ImGui::Button("취향 설문하기", {160, 32})) {
+  if (ImGui::Button("취향 설문하기", UIScale::V(160, 32))) {
     // [Phase 3] z-order 충돌 방지 — Settings를 먼저 닫고 Survey 호출
     m_open = false;
     if (m_onSurvey)
@@ -420,10 +420,10 @@ void SettingsWindow::Render() {
   ImGui::PopStyleColor(3);
 
   ImGui::TextColored(Theme::TEXT_GRAY, "계정 관리");
-  ImGui::SameLine(cw - 160.0f);
+  ImGui::SameLine(cw - UIScale::Px(160.0f));
   ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(216, 27, 96, 255));
   ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(233, 30, 99, 255));
-  if (ImGui::Button("로그아웃", {160, 32})) {
+  if (ImGui::Button("로그아웃", UIScale::V(160, 32))) {
     if (m_onLogout)
       m_onLogout();
     m_open = false;
@@ -435,7 +435,7 @@ void SettingsWindow::Render() {
 
   ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(50, 50, 50, 255));
   ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(80, 80, 80, 255));
-  if (ImGui::Button("닫기", {cw, 40}))
+  if (ImGui::Button("닫기", ImVec2(cw, UIScale::Px(40))))
     m_open = false;
   ImGui::PopStyleColor(2);
 
