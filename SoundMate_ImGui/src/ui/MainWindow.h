@@ -226,6 +226,10 @@ private:
   bool m_isMandatoryUpdate = false;
   std::atomic<bool> m_updateDownloading{false};
   bool m_updateDownloadFailed = false;
+  // 진행률 표시 — URLMon이 disk에 progressively 쓰는 특성을 polling thread 가
+  //   읽어서 갱신. Content-Length 는 사전 HEAD 로 m_updateBytesTotal 에 셋팅.
+  std::atomic<uint64_t> m_updateBytesDownloaded{0};
+  std::atomic<uint64_t> m_updateBytesTotal{0};
 
   void CheckForUpdates();
   void DownloadAndExecuteUpdate();

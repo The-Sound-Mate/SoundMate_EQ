@@ -3030,9 +3030,70 @@ void MainWindow::DownloadAndExecuteUpdate() {
   std::string installerPath =
       std::string(tempPath) + "SoundMate_Setup_Update.exe";
 
+  // 이전 잔재 (truncated 6MB 등) 제거.
+  std::error_code _ec;
+  std::filesystem::remove(installerPath, _ec);
+
+  m_updateBytesDownloaded = 0;
+  m_updateBytesTotal = 0;
+
+  // [v0.0.3] HEAD 요청으로 Content-Length 미리 받기 → 진행률 % 계산에 사용.
+  //   URLMon 은 callback 없이 호출하면 진행률 알려주지 않으므로 외부에서 추적.
+  //   GitHub Release 는 redirect 후 Azure Blob 에서 정확한 Content-Length 반환.
+  {
+    CURL *curl = curl_easy_init();
+    if (curl) {
+      curl_easy_setopt(curl, CURLOPT_URL, m_downloadUrl.c_str());
+      curl_easy_setopt(curl, CURLOPT_NOBODY, 1L);
+      curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+      curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
+      if (curl_easy_perform(curl) == CURLE_OK) {
+        curl_off_t dl = 0;
+        curl_easy_getinfo(curl, CURLINFO_CONTENT_LENGTH_DOWNLOAD_T, &dl);
+        if (dl > 0)
+          m_updateBytesTotal = (uint64_t)dl;
+      }
+      curl_easy_cleanup(curl);
+    }
+  }
+
+  // [v0.0.3] 진행률 폴링 thread — URLMon 이 disk 에 progressively write 하는
+  //   특성을 이용. 200ms 마다 file size 체크 → m_updateBytesDownloaded.
+  //   IBindStatusCallback COM 구현보다 훨씬 간단, RT 영향 0.
+  std::atomic<bool> pollerStop{false};
+  std::thread poller([this, installerPath, &pollerStop]() {
+    while (!pollerStop.load()) {
+      std::error_code ec;
+      auto sz = std::filesystem::file_size(installerPath, ec);
+      if (!ec)
+        m_updateBytesDownloaded = (uint64_t)sz;
+      std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+  });
+
   HRESULT hr = URLDownloadToFileA(NULL, m_downloadUrl.c_str(),
                                   installerPath.c_str(), 0, NULL);
-  if (SUCCEEDED(hr)) {
+
+  pollerStop = true;
+  poller.join();
+
+  // [v0.0.3] 사이즈 무결성 검증 — URLMon 이 truncate 한 경우 SUCCESS 반환할 수
+  //   있으므로 (Vercel Blob 6MB 잘림 버그) Content-Length 와 비교.
+  uint64_t expected = m_updateBytesTotal.load();
+  uint64_t actual = 0;
+  {
+    std::error_code ec;
+    auto sz = std::filesystem::file_size(installerPath, ec);
+    if (!ec)
+      actual = (uint64_t)sz;
+  }
+  // 최종 진행률 UI 반영용.
+  m_updateBytesDownloaded = actual;
+
+  bool downloadOk = SUCCEEDED(hr) && actual > 0 &&
+                    (expected == 0 || actual == expected);
+
+  if (downloadOk) {
     // [Installer race 방어] exit(0) 는 스택 객체 소멸자를 호출하지 않으므로
     // MainWindow::~MainWindow 의 SilentTaskKill 이 안 돈다. 인스톨러가 시작되기
     // 전에 컨트롤러를 명시적으로 끄지 않으면 SoundMate_APO.dll 등 잠금이
@@ -3047,6 +3108,9 @@ void MainWindow::DownloadAndExecuteUpdate() {
                   NULL, SW_SHOWNORMAL);
     exit(0);
   } else {
+    // 부분 다운로드 잔재 삭제 — 다음 retry 가 깨끗하게 받도록.
+    std::error_code ec;
+    std::filesystem::remove(installerPath, ec);
     SetStatus(u8"업데이트 다운로드 실패", Theme::COLOR_RED);
   }
 }
@@ -3096,10 +3160,33 @@ void MainWindow::RenderUpdatePopup() {
     float cw = ImGui::GetContentRegionAvail().x;
     float btnW = m_isMandatoryUpdate ? cw : (cw - UIScale::Px(8)) / 2;
 
-    // ── 다운로드 진행 중 ──
+    // ── 다운로드 진행 중 — 진행률 + 안내 ──
     if (m_updateDownloading.load()) {
+      uint64_t got = m_updateBytesDownloaded.load();
+      uint64_t total = m_updateBytesTotal.load();
+
       ImGui::Spacing();
       ImGui::TextColored(Theme::COLOR_CYAN, u8"⏳ 업데이트 다운로드 중...");
+      ImGui::Spacing();
+
+      if (total > 0) {
+        float progress = (float)((double)got / (double)total);
+        if (progress > 1.f) progress = 1.f;
+        ImGui::ProgressBar(progress, ImVec2(cw, UIScale::Px(10)), "");
+        ImGui::Text("%.1f / %.1f MB  (%.0f%%)",
+                    (double)got / 1048576.0,
+                    (double)total / 1048576.0,
+                    progress * 100.0);
+      } else if (got > 0) {
+        ImGui::Text("%.1f MB 다운로드 중...", (double)got / 1048576.0);
+      } else {
+        ImGui::TextColored(Theme::TEXT_GRAY, u8"서버 연결 중...");
+      }
+      ImGui::Spacing();
+      ImGui::TextColored(Theme::TEXT_GRAY,
+                         u8"네트워크 환경에 따라 1-3분 정도 걸릴 수 있습니다.");
+      ImGui::TextColored(Theme::TEXT_GRAY,
+                         u8"완료되면 자동으로 설치가 시작됩니다.");
       ImGui::Spacing();
     }
     // ── 다운로드 실패 시 재시도 버튼 ──
@@ -3131,20 +3218,18 @@ void MainWindow::RenderUpdatePopup() {
       ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(0, 0, 0, 255));
 
       if (ImGui::Button(u8"지금 업데이트", ImVec2(btnW, UIScale::Px(36)))) {
-        if (m_isMandatoryUpdate) {
-          // 강제 업데이트: 팝업 닫지 않고 다운로드 시작, 완료 시 exit(0)
-          m_updateDownloading = true;
-          std::thread([this]() {
-            DownloadAndExecuteUpdate();
-            // exit(0) 안 됐으면 실패
-            m_updateDownloading = false;
-            m_updateDownloadFailed = true;
-          }).detach();
-        } else {
-          // 선택적 업데이트: 기존 동작 — 팝업 닫고 백그라운드 다운로드
-          std::thread([this]() { DownloadAndExecuteUpdate(); }).detach();
-          ImGui::CloseCurrentPopup();
-        }
+        // [v0.0.3] 강제/선택적 모두 동일 UX — 팝업 유지하고 진행률 표시.
+        //   기존 비강제는 팝업 즉시 닫고 백그라운드 다운로드 → 실패 시 사용자
+        //   인지 못 함. 이제 둘 다 popup 안에서 progress + retry.
+        m_updateDownloading = true;
+        m_updateBytesDownloaded = 0;
+        m_updateBytesTotal = 0;
+        std::thread([this]() {
+          DownloadAndExecuteUpdate();
+          // exit(0) 안 됐으면 실패
+          m_updateDownloading = false;
+          m_updateDownloadFailed = true;
+        }).detach();
       }
       ImGui::PopStyleColor(3);
 
