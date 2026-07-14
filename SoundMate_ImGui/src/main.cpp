@@ -17,8 +17,10 @@
 
 
 #include "core/AIClient.h"
+#include "core/AudioCapture.h"
 #include "core/EQController.h"
 #include "core/GenreManager.h"
+#include "core/LocalAudioAnalyzer.h"
 #include "core/MediaMonitor.h"
 #include "core/RecordManager.h"
 #include "core/FeatureFlags.h"
@@ -334,6 +336,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
   AIClient aiClient;
   // API 키는 클라이언트에 두지 않는다. Supabase Edge Function이 자체 키로 처리.
 
+  // [LocalAnalyzer] Gemini 대신 로컬 파이썬 태그 알고리즘을 사용할 때 준비물.
+  //   - LocalAudioAnalyzer: python subprocess 실행 & eq.json 파싱
+  //   - AudioCapture      : WASAPI loopback 캡처 (시스템 재생 → temp WAV)
+  //   FeatureFlags::kUseLocalAnalyzer=false 여도 객체는 생성만 하고 사용 안 함.
+  //   (nullptr 로 넘겨도 동작 — MainWindow 가 존재 여부 확인 후 결정)
+  LocalAudioAnalyzer localAnalyzer;
+  AudioCapture       audioCapture;
+
   MediaMonitor monitor;
 
   // ── 로그인 창 ──
@@ -426,7 +436,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
         [&mainWin](const SongInfo &song) { mainWin.OnSongChanged(song); });
   };
 
-  if (!g_recordManager.GetUserIdFromToken().empty()) {
+  // [Steam 배포] Standalone 모드에서는 로그인 창을 건너뛰고 MachineGuid 를
+  // pseudo-user-id 로 사용하여 즉시 메인 화면으로 진입.  Steam 이 계정/결제/
+  // 라이선스를 담당하므로 앱 내부 인증은 불필요.
+  if constexpr (SoundMate::Features::kStandaloneMode) {
+    g_recordManager.SetUserId(g_recordManager.GetMachineGuid());
+    loggedIn = true;
+    // refreshProfileAsync / registerDeviceAsync / startPendingSyncAsync 는
+    // 네트워크 호출이므로 스킵. 각각 RecordManager 내부에서 kStandaloneMode
+    // gate 로 조기 리턴하지만 스레드 자체를 안 띄우는 게 깔끔.
+  } else if (!g_recordManager.GetUserIdFromToken().empty()) {
     loggedIn = true; // m_userId 는 GetUserIdFromToken 내부에서 설정됨
     refreshProfileAsync();
     registerDeviceAsync();
@@ -444,7 +463,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
   }
 
   // ── UI 초기화 ──
-  mainWin.Initialize(&eqCtrl, &aiClient, &monitor);
+  mainWin.Initialize(&eqCtrl, &aiClient, &monitor,
+                     &localAnalyzer, &audioCapture);
   // [PR-A] 세션 폴링이 force_logout/deactivated를 감지하면 호출됨.
   // 로그아웃 콜백과 동일 흐름을 재사용하되 토큰 파일은 삭제하지 않음
   // (사용자 의도 로그아웃과 구분).

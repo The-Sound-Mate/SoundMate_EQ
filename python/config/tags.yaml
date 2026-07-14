@@ -1,0 +1,420 @@
+# =============================================================================
+#  Tag Generator configuration
+# =============================================================================
+#
+# One entry per registered tag.  Structure:
+#
+#   <tag_name>:
+#     enabled:    true | false        # default true — disable to skip the tag
+#     weight:     0.0 .. 2.0          # default 1.0 — post-multiplier on the intensity
+#     thresholds:                     # numeric constants read by the rule function
+#       key: value
+#
+# Thresholds are **numeric only**.  The rule function decides what each key
+# means; keys are documented above every tag block below.  Missing thresholds
+# raise a clear error at generation time — no silent fallbacks.
+#
+# Band-energy ratios ("*_ratio") are fractions of total spectral energy, so
+# they sit in [0.0, 1.0] and typical values are small (0.05 - 0.30 per band).
+#
+# Two tags in the user spec had duplicate names; they've been renamed here to
+# keep dict keys unique:
+#   Treble.neutral  →  treble_neutral
+#   Tone.neutral    →  tone_neutral
+# =============================================================================
+
+version: 1
+
+tags:
+
+  # ==========================================================================
+  #  BASS
+  # ==========================================================================
+
+  bass_none:
+    # ratio_low → intensity=1  |  ratio_high → intensity=0
+    thresholds: { ratio_low: 0.02, ratio_high: 0.08 }
+
+  bass_light:
+    # tent centered at `center`, hits 0 at ±`half_width`
+    thresholds: { center: 0.12, half_width: 0.05 }
+
+  bass_balanced:
+    thresholds: { center: 0.20, half_width: 0.06 }
+
+  bass_heavy:
+    # ratio_min → intensity=0  |  ratio_max → intensity=1
+    thresholds: { ratio_min: 0.25, ratio_max: 0.40 }
+
+  bass_overpower:
+    thresholds: { ratio_min: 0.40, ratio_max: 0.55 }
+
+  sub_bass:
+    thresholds: { ratio_min: 0.03, ratio_max: 0.12 }
+
+  punchy_bass:
+    thresholds:
+      bass_min: 0.15
+      bass_max: 0.30
+      perc_min: 0.40
+      perc_max: 0.60
+      crest_min: 10.0   # dB
+      crest_max: 20.0
+
+  muddy_bass:
+    # low_mid / bass ratio — high value = mud
+    thresholds: { ratio_min: 0.40, ratio_max: 0.80 }
+
+  tight_bass:
+    thresholds:
+      bass_min: 0.15
+      bass_max: 0.30
+      dr_min: 8.0
+      dr_max: 16.0
+      perc_min: 0.40
+      perc_max: 0.60
+
+  # ==========================================================================
+  #  MID
+  # ==========================================================================
+
+  mid_recessed:
+    thresholds: { ratio_low: 0.15, ratio_high: 0.30 }
+
+  mid_balanced:
+    thresholds: { center: 0.35, half_width: 0.08 }
+
+  mid_forward:
+    thresholds: { ratio_min: 0.40, ratio_max: 0.55 }
+
+  boxy:
+    thresholds: { ratio_min: 0.15, ratio_max: 0.28 }
+
+  nasal:
+    thresholds: { ratio_min: 0.12, ratio_max: 0.22 }
+
+  honky:
+    thresholds:
+      ratio_min: 0.15
+      ratio_max: 0.28
+      bw_narrow_hz: 1000.0   # bandwidth ≤ 1kHz → narrow (intensity=1)
+      bw_wide_hz: 3000.0     # bandwidth ≥ 3kHz → wide  (intensity=0)
+
+  # ==========================================================================
+  #  TREBLE
+  # ==========================================================================
+
+  dark:
+    thresholds:
+      centroid_low_hz: 800.0    # centroid ≤ 800  → dark
+      centroid_high_hz: 2000.0  # centroid ≥ 2000 → not dark
+      top_low: 0.02
+      top_high: 0.10
+
+  treble_neutral:
+    thresholds: { center_hz: 2500.0, half_width_hz: 1000.0 }
+
+  bright:
+    thresholds:
+      centroid_min_hz: 2500.0
+      centroid_max_hz: 4500.0
+      top_min: 0.10
+      top_max: 0.25
+
+  airy:
+    thresholds: { ratio_min: 0.03, ratio_max: 0.10 }
+
+  harsh:
+    thresholds:
+      presence_min: 0.08
+      presence_max: 0.20
+      peak_min_dbfs: -3.0
+      peak_max_dbfs: 0.0
+
+  smooth:
+    thresholds: { flat_low: 0.15, flat_high: 0.35 }
+
+  crisp:
+    thresholds:
+      onset_min: 3.0
+      onset_max: 8.0
+      hi_min: 0.15
+      hi_max: 0.30
+
+  sparkly:
+    thresholds:
+      air_min: 0.04
+      air_max: 0.12
+      perc_min: 0.40
+      perc_max: 0.60
+
+  # ==========================================================================
+  #  VOCAL
+  # ==========================================================================
+
+  vocal_buried:
+    thresholds: { ratio_low: 0.25, ratio_high: 0.45 }
+
+  vocal_balanced:
+    thresholds: { center: 0.55, half_width: 0.10 }
+
+  vocal_forward:
+    thresholds: { ratio_min: 0.60, ratio_max: 0.78 }
+
+  vocal_sibilant:
+    thresholds: { ratio_min: 0.06, ratio_max: 0.14 }
+
+  breathy:
+    thresholds:
+      air_min: 0.03
+      air_max: 0.10
+      voiced_min: 0.20
+      voiced_max: 0.50
+
+  intimate:
+    thresholds:
+      dr_low: 6.0
+      dr_high: 14.0
+      mid_min: 0.25
+      mid_max: 0.45
+      voiced_min: 0.30
+      voiced_max: 0.60
+
+  powerful_vocal:
+    thresholds:
+      mid_min: 0.30
+      mid_max: 0.50
+      peak_min_dbfs: -2.0
+      peak_max_dbfs: 0.0
+      voiced_min: 0.30
+      voiced_max: 0.60
+
+  # ==========================================================================
+  #  DRUM
+  # ==========================================================================
+
+  kick_soft:
+    thresholds: { val_low: 0.01, val_high: 0.05 }
+
+  kick_balanced:
+    thresholds: { center: 0.08, half_width: 0.04 }
+
+  kick_punchy:
+    thresholds:
+      thump_min: 0.05
+      thump_max: 0.15
+      click_min: 0.08
+      click_max: 0.18
+      crest_min: 12.0
+      crest_max: 22.0
+
+  kick_boomy:
+    thresholds:
+      sub_min: 0.05
+      sub_max: 0.15
+      thump_min: 0.08
+      thump_max: 0.18
+
+  snare_soft:
+    thresholds: { val_low: 0.01, val_high: 0.04 }
+
+  snare_balanced:
+    thresholds: { center: 0.14, half_width: 0.05 }
+
+  snare_sharp:
+    thresholds:
+      snap_min: 0.08
+      snap_max: 0.20
+      onset_min: 2.5
+      onset_max: 6.0
+
+  cymbal_dark:
+    thresholds: { val_low: 0.06, val_high: 0.14 }
+
+  cymbal_balanced:
+    thresholds: { center: 0.15, half_width: 0.05 }
+
+  cymbal_bright:
+    thresholds: { val_min: 0.18, val_max: 0.32 }
+
+  # ==========================================================================
+  #  SPACE
+  # ==========================================================================
+
+  mono:
+    thresholds: { width_low: 0.02, width_high: 0.10 }
+
+  narrow:
+    thresholds: { center: 0.18, half_width: 0.08 }
+
+  wide:
+    thresholds: { width_min: 0.35, width_max: 0.55 }
+
+  huge:
+    thresholds:
+      width_min: 0.45
+      width_max: 0.65
+      corr_low: 0.20   # |corr| ≤ 0.20 → 1
+      corr_high: 0.60  # |corr| ≥ 0.60 → 0
+
+  reverb_heavy:
+    thresholds:
+      flat_min: 0.20
+      flat_max: 0.45
+      crest_low: 8.0
+      crest_high: 15.0
+
+  dry:
+    thresholds:
+      flat_low: 0.10
+      flat_high: 0.25
+      crest_min: 12.0
+      crest_max: 20.0
+
+  # ==========================================================================
+  #  DYNAMICS
+  # ==========================================================================
+
+  compressed:
+    thresholds: { dr_low: 6.0, dr_high: 12.0 }
+
+  balanced:
+    thresholds: { center_db: 12.0, half_width_db: 4.0 }
+
+  dynamic:
+    thresholds: { dr_min: 14.0, dr_max: 20.0 }
+
+  transient_heavy:
+    thresholds:
+      onset_min: 4.0
+      onset_max: 8.0
+      crest_min: 12.0
+      crest_max: 20.0
+
+  # ==========================================================================
+  #  TONE
+  # ==========================================================================
+
+  warm:
+    thresholds:
+      lm_min: 0.30    # bass + low_mid ≥ 0.30 → intensity contribution 1
+      lm_max: 0.50
+      hi_low: 0.08    # presence + brilliance ≤ 0.08 → 1
+      hi_high: 0.20
+
+  tone_neutral:
+    thresholds: { center_hz: 2000.0, half_width_hz: 800.0 }
+
+  cold:
+    thresholds:
+      hi_min: 0.18
+      hi_max: 0.32
+      lm_low: 0.20
+      lm_high: 0.35
+
+  analog:
+    thresholds:
+      warm_min: 0.30
+      warm_max: 0.45
+      flat_center: 0.20       # a bit of noise floor = tape-like
+      flat_half_width: 0.10
+      air_low: 0.02           # gentle top = analog
+      air_high: 0.08
+
+  digital:
+    thresholds:
+      dr_min: 12.0
+      dr_max: 20.0
+      air_min: 0.05
+      air_max: 0.12
+      crest_min: 14.0
+      crest_max: 22.0
+
+  # ==========================================================================
+  #  MIX
+  # ==========================================================================
+
+  clean_mix:
+    thresholds:
+      lm_low: 0.15    # boxy band ≤ 0.15 → contribution 1
+      lm_high: 0.28
+      dr_min: 8.0
+      dr_max: 16.0
+      flat_low: 0.15
+      flat_high: 0.35
+
+  muddy_mix:
+    thresholds: { ratio_min: 0.20, ratio_max: 0.32 }
+
+  dense_mix:
+    thresholds:
+      onset_min: 4.0
+      onset_max: 8.0
+      flat_min: 0.25
+      flat_max: 0.45
+
+  sparse_mix:
+    thresholds:
+      onset_low: 1.0
+      onset_high: 3.0
+      contrast_min: 15.0
+      contrast_max: 25.0
+
+  # ==========================================================================
+  #  INSTRUMENT FOCUS  (heuristic — best-effort without stem separation)
+  # ==========================================================================
+
+  vocal_focus:
+    thresholds:
+      band_min: 0.50
+      band_max: 0.72
+      voiced_min: 0.35
+      voiced_max: 0.65
+
+  bass_focus:
+    thresholds:
+      band_min: 0.25
+      band_max: 0.40
+      harmonic_min: 0.50
+      harmonic_max: 0.75
+
+  drum_focus:
+    thresholds:
+      perc_min: 0.50
+      perc_max: 0.70
+      onset_min: 3.0
+      onset_max: 7.0
+
+  piano_focus:
+    thresholds:
+      range_min: 0.60
+      range_max: 0.80
+      harmonic_min: 0.60
+      harmonic_max: 0.80
+      onset_min: 2.0
+      onset_max: 5.0
+
+  guitar_focus:
+    thresholds:
+      range_min: 0.55
+      range_max: 0.78
+      harmonic_min: 0.55
+      harmonic_max: 0.75
+
+  synth_focus:
+    thresholds:
+      band_min: 0.30
+      band_max: 0.50
+      harmonic_min: 0.55
+      harmonic_max: 0.75
+      flat_min: 0.20
+      flat_max: 0.40
+
+  strings_focus:
+    thresholds:
+      range_min: 0.55
+      range_max: 0.75
+      harmonic_min: 0.60
+      harmonic_max: 0.80
+      onset_low: 1.0
+      onset_high: 3.5

@@ -2,6 +2,7 @@
 #include "RecordManager.h"
 #include "../utils/StringUtils.h"
 #include "../ui/LoginWindow.h"   // [Phase 2-A] DPAPI 헬퍼 공유
+#include "FeatureFlags.h"        // [Steam] kStandaloneMode
 #include "SurveyMapping.h"       // [C-2] 라벨 ↔ ID 변환
 #include "AIClient.h"            // [Task 3-A] F5/F10/F15/F31 정적 주파수 테이블 공유
 #include <algorithm>
@@ -439,20 +440,26 @@ void RecordManager::SetUserId(const std::string &uid) {
 }
 
 bool RecordManager::IsAnonymous() const {
+  // [Steam 배포] Standalone 모드에서는 항상 "정식 로그인 상태(=Pro)" 로 취급.
+  if constexpr (SoundMate::Features::kStandaloneMode) return false;
   // m_mutex 잠금 비용 회피 — m_userId 는 SetUserId 1번만 변경,
   // race 시 worst case 도 잠시 잘못된 결과 후 자동 정정.
   return m_userId.empty() || m_userId == "guest";
 }
 
 bool RecordManager::IsGuestMode() const {
+  if constexpr (SoundMate::Features::kStandaloneMode) return false;
   return m_userId == "guest";
 }
 
 bool RecordManager::IsLoggedIn() const {
+  if constexpr (SoundMate::Features::kStandaloneMode) return true;
   return !m_userId.empty() && m_userId != "guest";
 }
 
 void RecordManager::MigrateAnonymousData() {
+  // [Steam 배포] 익명→정식 전환 개념 없음 — no-op.
+  if constexpr (SoundMate::Features::kStandaloneMode) return;
   // 1) 로컬 cache 의 모든 songs 를 SaveInteraction 으로 재기록.
   //    SaveInteraction 내부에서 IsAIEligible() 검사를 우회해야 하므로 직접 pending 작성.
   //    (이 시점엔 m_userId 가 새 user 로 갱신됨)
@@ -559,6 +566,7 @@ static std::string B64Decode(std::string payload) {
 // [세션 정책] 디스크 토큰 파일에서 refresh_token 추출 → RefreshAccessToken 호출.
 // 401 받은 시점에 즉시 새 access_token 발급용. 실패 시 빈 string.
 std::string RecordManager::ForceRefreshAccessToken() {
+  if constexpr (SoundMate::Features::kStandaloneMode) return "";
   try {
     if (!std::filesystem::exists(m_tokenFile)) return "";
     std::ifstream f(m_tokenFile);
@@ -636,6 +644,11 @@ std::string RecordManager::RefreshAccessToken(const std::string &refreshToken) {
 //   - v1 (평문) 발견 시 그대로 읽고 m_pendingV1Migration = true 표시 →
 //     상위 caller(LoginWindow::TryAutoLogin) 가 SaveToken 으로 재기록.
 std::string RecordManager::GetUserIdFromToken() {
+  // [Steam 배포] 로그인 없음 — 머신 GUID 를 pseudo-user-id 로 사용.
+  // 이 값은 로컬 EQ 캐시의 네임스페이스 키로만 쓰이며, DB 로 나가지 않음.
+  if constexpr (SoundMate::Features::kStandaloneMode) {
+    return GetMachineGuid();
+  }
   if (!std::filesystem::exists(m_tokenFile))
     return "";
   try {
@@ -692,6 +705,9 @@ std::string RecordManager::GetUserIdFromToken() {
 }
 
 std::string RecordManager::GetAccessToken() {
+  // [Steam 배포] JWT 개념 없음. 빈 문자열이 곧 "인증 정보 없음" 이며,
+  // 아래 네트워크 메서드들은 모두 kStandaloneMode gate 로 조기 리턴한다.
+  if constexpr (SoundMate::Features::kStandaloneMode) return "";
   // GetUserIdFromToken은 access_token을 리턴하면서 m_userId를 채워줌.
   // 만료 1분 전이면 자동으로 refresh access_token까지 처리.
   return GetUserIdFromToken();
@@ -722,6 +738,8 @@ static std::string NormalizePlan(std::string s) {
 }
 
 bool RecordManager::RefreshUserProfile() {
+  // [Steam 배포] 원격 profile 없음 — 무해하게 성공 반환.
+  if constexpr (SoundMate::Features::kStandaloneMode) return true;
   std::string at = GetAccessToken();
   if (at.empty() || m_userId.empty())
     return false;
@@ -759,6 +777,8 @@ bool RecordManager::RefreshUserProfile() {
 // 5개 컬럼 (bass/vocal/treble/soundstage/volume) 을 콤마 연결 문자열로 복원하여
 // m_cache["profile"]["tendency"] 에 저장. AI 호출 시 이 값이 userPref 로 들어감.
 bool RecordManager::FetchUserTendency() {
+  // [Steam 배포] 원격 tendency 없음 — 로컬 캐시 tendency 만 사용.
+  if constexpr (SoundMate::Features::kStandaloneMode) return true;
   std::string at = GetAccessToken();
   if (at.empty() || m_userId.empty())
     return false;
@@ -894,6 +914,7 @@ std::pair<std::string, std::string> RecordManager::GetUserInfo() {
 }
 
 std::string RecordManager::GetUserPlanType() {
+  if constexpr (SoundMate::Features::kStandaloneMode) return "pro";
   try {
     if (!m_cache.contains("profile") ||
         !m_cache["profile"].is_object() ||
@@ -915,6 +936,8 @@ std::string RecordManager::GetUserPlanType() {
 static constexpr std::time_t kTrialDurationSec = 7 * 24 * 60 * 60;
 
 int RecordManager::GetTrialRemainingDays() {
+  // Pro 고정 모드에서는 Trial 개념 자체가 무의미 (-1 = 비활성).
+  if constexpr (SoundMate::Features::kStandaloneMode) return -1;
   try {
     if (!m_cache.contains("profile") || !m_cache["profile"].is_object() ||
         !m_cache["profile"].contains("trial_started_at"))
@@ -968,6 +991,13 @@ std::string RecordManager::GetMachineGuid() {
 // [PR-A] 현재 PC를 connected_devices에 등록.
 RecordManager::DeviceRegistration RecordManager::RegisterCurrentDevice() {
   DeviceRegistration result;
+  // [Steam 배포] device_limit 개념 없음 — Steam 계정이 곧 라이선스.
+  if constexpr (SoundMate::Features::kStandaloneMode) {
+    result.allowed = true;
+    result.plan    = "pro";
+    result.reason  = "";
+    return result;
+  }
   std::string at = GetAccessToken();
   if (at.empty() || m_userId.empty()) {
     result.reason = "unauthenticated";
@@ -1025,6 +1055,8 @@ RecordManager::DeviceRegistration RecordManager::RegisterCurrentDevice() {
 // [PR-A] 세션 도중 force_logout/is_active 검사.
 RecordManager::DeviceSessionState RecordManager::CheckDeviceSession() {
   DeviceSessionState st;
+  // [Steam 배포] force_logout / is_active 검사 없음 — 항상 유효.
+  if constexpr (SoundMate::Features::kStandaloneMode) return st;
   std::string at = GetAccessToken();
   if (at.empty() || m_userId.empty()) {
     // 로그아웃 상태 — 검사 안 함, valid=true(기본값) 유지.
@@ -1046,6 +1078,8 @@ RecordManager::DeviceSessionState RecordManager::CheckDeviceSession() {
 }
 
 void RecordManager::SignOut() {
+  // [Steam 배포] 로그아웃 개념 없음 — no-op.  (Steam 이 계정 관리)
+  if constexpr (SoundMate::Features::kStandaloneMode) return;
   std::lock_guard<std::mutex> lk(m_mutex);
   m_userId.clear();
   m_accessToken.clear();
@@ -1063,6 +1097,8 @@ bool RecordManager::UploadAudioPreferences(const std::string &bass,
                                            const std::string &treble,
                                            const std::string &soundstage,
                                            const std::string &volume) {
+  // [Steam 배포] 원격 저장 없음 — 로컬 tendency 저장은 SaveUserTendency 로 대체.
+  if constexpr (SoundMate::Features::kStandaloneMode) return true;
   std::string at = GetAccessToken();
   if (at.empty() || m_userId.empty()) {
     WriteSyncLog({{"event","prefs_skip"},{"reason","no_auth"}});
@@ -1091,6 +1127,8 @@ bool RecordManager::UploadAudioPreferences(const std::string &bass,
 }
 
 bool RecordManager::IsAIEligible() {
+  // [Steam 배포] Standalone 모드는 항상 Pro — AI/EQ 기능 모두 허용.
+  if constexpr (SoundMate::Features::kStandaloneMode) return true;
   // [E-1] 익명 사용자는 AI/DB 모두 차단 — 로컬 캐시만 동작.
   if (IsAnonymous()) return false;
   std::string plan = GetUserPlanType();
@@ -1100,6 +1138,7 @@ bool RecordManager::IsAIEligible() {
 }
 
 std::string RecordManager::GetPlanDisplayLabel() {
+  if constexpr (SoundMate::Features::kStandaloneMode) return u8"Pro 플랜";
   std::string plan = GetUserPlanType();
 
   std::string base;
@@ -1414,6 +1453,14 @@ std::string RecordManager::SupabaseRequest(const std::string &method,
                                            const std::string &accessToken,
                                            long *outHttpCode,
                                            long timeoutSecs) {
+  // [Steam 배포] Supabase 사용 안 함 — 모든 HTTP 요청 스킵.
+  //   빈 응답을 반환하면 상위 코드(json::parse 등)가 자연스럽게 실패로 처리.
+  //   상위에서 이 stub 이 fail-open (성공) 을 원하는 경우는 개별 메서드 stub 이
+  //   조기 리턴으로 우회하므로 여기까지 오지 않는다.
+  if constexpr (SoundMate::Features::kStandaloneMode) {
+    if (outHttpCode) *outHttpCode = 0;
+    return "";
+  }
   if (outHttpCode) *outHttpCode = 0;
   std::string url = std::string(SUPABASE_URL) + endpoint;
   std::string response;
@@ -1494,6 +1541,8 @@ void RecordManager::WriteSyncLog(const nlohmann::json &record) {
 std::vector<float>
 RecordManager::GetGlobalSongAverage(const std::string &title,
                                     const std::string &artist, int bandCount) {
+  // [Steam 배포] 원격 집계 없음 — 상위 호출자는 빈 반환 시 로컬 계산으로 폴백.
+  if constexpr (SoundMate::Features::kStandaloneMode) return {};
   if (m_userId.empty())
     return {};
   try {
@@ -1515,6 +1564,7 @@ RecordManager::GetGlobalSongAverage(const std::string &title,
 
 std::vector<float>
 RecordManager::GetGlobalGenreAverage(const std::string &genre, int bandCount) {
+  if constexpr (SoundMate::Features::kStandaloneMode) return {};
   if (genre.empty())
     return {};
   try {
@@ -1534,6 +1584,10 @@ RecordManager::GetGlobalGenreAverage(const std::string &genre, int bandCount) {
 
 bool RecordManager::CheckUserHistory(const std::string &title,
                                      const std::string &artist) {
+  // [Steam 배포] 원격 히스토리 없음 — 로컬 캐시 존재 여부로 판단.
+  if constexpr (SoundMate::Features::kStandaloneMode) {
+    return GetCachedEQ(title, artist) != nullptr;
+  }
   if (m_userId.empty())
     return false;
   try {
@@ -1559,6 +1613,9 @@ bool RecordManager::CheckUserHistory(const std::string &title,
 // [DB-Sync] pending/ 디렉터리에서 모든 .json 파일을 읽어 batch upload.
 // 성공한 파일만 정확히 삭제 → 실패 항목은 다음 시도에서 재처리.
 bool RecordManager::SyncToDB(long timeoutSecs) {
+  // [Steam 배포] DB 동기화 없음 — 로컬 캐시만 유지.  성공으로 처리해서
+  // 상위의 재시도 루프에 걸리지 않게 한다.
+  if constexpr (SoundMate::Features::kStandaloneMode) return true;
   std::string accessToken = GetUserIdFromToken();
   if (accessToken.empty() || m_userId.empty()) {
     WriteSyncLog({{"event","skip"},{"reason","no_auth"}});
@@ -1747,6 +1804,11 @@ bool RecordManager::SyncToDB(long timeoutSecs) {
 
 // [Q5 결정] 5개 이상 OR forceAll만 sync. 시간 기반 폴링 없음.
 void RecordManager::ProcessBatchSync(bool forceAll, long timeoutSecs) {
+  // [Steam 배포] DB 동기화 없음 — 로컬 파일 통합만 유지하고 리턴.
+  if constexpr (SoundMate::Features::kStandaloneMode) {
+    ConsolidateLocalRecords(forceAll);
+    return;
+  }
   ConsolidateLocalRecords(forceAll);
 
   // pending/ 파일 개수 카운트 — 메모리 큐 의존 제거

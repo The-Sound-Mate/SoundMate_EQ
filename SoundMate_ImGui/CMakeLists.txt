@@ -29,15 +29,27 @@ set(IMGUI_SOURCES
 )
 
 # ─── Windows 리소스 설정 (아이콘 주입) ───
+# RC 컴파일러는 문자열 안의 백슬래시를 C 이스케이프로 해석하므로
+# ("\a" → bell) 슬래시를 이중 백슬래시로 escape.  가장 안전한 건 슬래시 그대로.
 if(WIN32)
     set(LOGO_ICO_PATH "${CMAKE_CURRENT_SOURCE_DIR}/assets/logo.ico")
-    string(REPLACE "/" "\\" LOGO_ICO_PATH "${LOGO_ICO_PATH}")
+    string(REPLACE "\\" "\\\\" LOGO_ICO_PATH "${LOGO_ICO_PATH}")
+    string(REPLACE "/"  "\\\\" LOGO_ICO_PATH "${LOGO_ICO_PATH}")
     configure_file(
         "${CMAKE_CURRENT_SOURCE_DIR}/resource.rc.in"
         "${CMAKE_CURRENT_BINARY_DIR}/resource.rc"
         @ONLY
     )
 endif()
+
+# ─── Version.h 자동 생성 ───
+# project(... VERSION ...) 을 SoT 로 Version.h 를 빌드 디렉터리에 생성.
+# MainWindow.cpp 등이 #include "Version.h" 하므로 필수.
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/Version.h.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/Version.h"
+    @ONLY
+)
 
 # ─── 프로젝트 소스 파일 ───
 set(APP_SOURCES
@@ -58,10 +70,19 @@ set(APP_SOURCES
     src/core/MediaMonitor.h
     src/core/AIClient.cpp
     src/core/AIClient.h
+    src/core/AudioCapture.cpp
+    src/core/AudioCapture.h
+    src/core/LocalAudioAnalyzer.cpp
+    src/core/LocalAudioAnalyzer.h
     src/core/RecordManager.cpp
     src/core/RecordManager.h
     src/core/GenreManager.cpp
     src/core/GenreManager.h
+    src/core/EngineHealthMonitor.cpp
+    src/core/EngineHealthMonitor.h
+    src/core/SurveyMapping.cpp
+    src/core/SurveyMapping.h
+    src/core/FeatureFlags.h
     src/utils/StringUtils.h
     "${CMAKE_CURRENT_BINARY_DIR}/resource.rc"
 )
@@ -78,6 +99,7 @@ target_include_directories(SoundMate_EQ PRIVATE
     ${STBI_DIR}
     ${CURL_DIR}/include
     src/
+    ${CMAKE_CURRENT_BINARY_DIR}   # Version.h (configure_file 산출물) 픽업용
 )
 
 # ─── Windows 시스템 라이브러리 링크 ───
@@ -92,6 +114,11 @@ target_link_libraries(SoundMate_EQ PRIVATE
     oleaut32
     shell32
     ntdll
+    # [LocalAnalyzer] WASAPI loopback capture (AudioCapture.cpp) 에서 사용.
+    #   IMMDeviceEnumerator / IAudioClient / IAudioCaptureClient 는
+    #   mmdevapi.lib 로 링크됨. Uuid.lib 은 __uuidof 심볼용.
+    mmdevapi
+    uuid
     ${CURL_DIR}/lib/libcurl.lib
 )
 

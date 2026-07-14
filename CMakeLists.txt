@@ -202,6 +202,8 @@ set(GUI_SOURCES
     ${GUI_SRC_DIR}/src/core/GenreManager.cpp
     ${GUI_SRC_DIR}/src/core/EngineHealthMonitor.cpp
     ${GUI_SRC_DIR}/src/core/SurveyMapping.cpp
+    ${GUI_SRC_DIR}/src/core/AudioCapture.cpp
+    ${GUI_SRC_DIR}/src/core/LocalAudioAnalyzer.cpp
     "${CMAKE_CURRENT_BINARY_DIR}/resource.rc"
 )
 

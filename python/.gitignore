@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# uv
+.venv/
+.uv-cache/
+
+# Test / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Local outputs (results go here; keep the dir, ignore contents)
+output/*
+!output/.gitkeep
+
+# Trained model artifacts (large binaries)
+models/*
+!models/.gitkeep
+!models/__init__.py
+
+# IDE
+.vscode/
+.idea/
+*.swp

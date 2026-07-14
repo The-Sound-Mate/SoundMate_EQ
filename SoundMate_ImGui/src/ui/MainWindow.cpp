@@ -89,10 +89,14 @@ MainWindow::~MainWindow() {
 }
 
 void MainWindow::Initialize(EQController *eq, AIClient *ai,
-                            MediaMonitor *monitor) {
+                            MediaMonitor *monitor,
+                            LocalAudioAnalyzer *localAnalyzer,
+                            AudioCapture       *audioCapture) {
   m_eqCtrl = eq;
   m_ai = ai;
   m_monitor = monitor;
+  m_localAnalyzer = localAnalyzer;
+  m_audioCapture  = audioCapture;
   m_settings = LoadSettings();
   FetchAudioDevices();
   LoadUserPresets(); // 사용자 프리셋 로드
@@ -534,6 +538,25 @@ void MainWindow::TriggerAIGeneration() {
   if (m_currentTitle.empty() || m_aiProcessing)
     return;
 
+  // [LocalAnalyzer] FeatureFlags::kUseLocalAnalyzer 가 true 이고 python/main.py 를
+  // 찾을 수 있으면 WASAPI loopback 캡처 → 파이썬 태그 알고리즘 경로로 전환.
+  //   - Free/Pro 플랜 게이팅 없음 (로컬은 무료)
+  //   - Gemini 호출 X (네트워크 트래픽 0)
+  //   - 실패 시에도 이전 EQ 유지 (Gemini 경로로 자동 폴백하지 않음)
+  //
+  // 이 경로를 통째로 컴파일에서 빼려면 FeatureFlags.h 에서 kUseLocalAnalyzer=false.
+  if constexpr (SoundMate::Features::kUseLocalAnalyzer) {
+    if (m_localAnalyzer && m_audioCapture && m_localAnalyzer->IsAvailable()) {
+      TriggerLocalAnalysis();
+      return;
+    }
+    // python 이나 audio capture 준비 안 됨 → 상태 표시 후 조용히 리턴.
+    // 사용자가 python 을 설치/배치할 때까지 EQ 미적용.
+    SetStatus(u8"로컬 분석기 준비 안 됨 (python/main.py 미탐지)",
+              Theme::COLOR_ORANGE);
+    return;
+  }
+
   // [Phase 3] Free 플랜은 AI 호출 자체를 막는다. 서버도 이중으로 막지만
   // 호출 비용·대기시간을 줄이기 위해 클라이언트에서 1차 컷.
   // (auto 트리거에서도 호출되므로 popup은 띄우지 않고 상태바만 표시 →
@@ -735,6 +758,187 @@ void MainWindow::TriggerAIGeneration() {
     // m_aiProcessing 은 위 AiProcessingGuard 의 RAII 가 reset 한다.
     // (이전엔 epoch 불일치 시 reset 누락으로 후속 AI 호출이 영구 차단되는
     //  데드락 버그가 있었음.)
+  });
+}
+
+// ── [LocalAnalyzer] 로컬 파이썬 태그 알고리즘으로 곡 분석 ───────────────────
+// TriggerAIGeneration 이 kUseLocalAnalyzer=true 이고 python 이 준비되어 있을 때
+// 위임하는 진입점.  네트워크 호출 없음, 플랜 게이팅 없음.
+//
+// 흐름:
+//   1. 캐시 조회 — title|artist source=local 이 있으면 즉시 적용, subprocess 스킵
+//   2. abort 플래그 + song epoch 스냅샷
+//   3. 백그라운드 스레드에서:
+//        a) AudioCapture 로 시스템 재생 30초 캡처 → temp WAV
+//        b) LocalAudioAnalyzer 로 WAV 분석 → EQBands
+//        c) 곡이 여전히 같으면 결과 적용 + 캐시 저장
+//        d) 실패/취소 시 상태 메시지만 표시, 이전 EQ 유지
+void MainWindow::TriggerLocalAnalysis() {
+  if (!m_localAnalyzer || !m_audioCapture) return;
+  if (m_currentTitle.empty() || m_aiProcessing) return;
+
+  // ---- 캐시 조회 (기존과 동일한 title|artist 키 사용) --------------------
+  // source="local" 인 캐시 엔트리만 골라 조회 — Gemini 캐시와 충돌 방지.
+  if (!m_currentTitle.empty() && !m_currentArtist.empty()) {
+    if (EQEntry* cached = g_recordManager.GetCachedEQBySource(
+            m_currentTitle, m_currentArtist, "local")) {
+      if (!cached->gains31.empty() && (int)cached->gains31.size() == 31) {
+        std::lock_guard<std::mutex> lk(m_eqUpdateMutex);
+        m_queuedGains =
+            m_ai->Map31ToTargetBands(cached->gains31, m_currentBands);
+        m_queuedMaster31 = cached->gains31;
+        m_pendingEQUpdate = true;
+        m_eqOrigin = EqOrigin::Cache;
+        SetStatus(u8"로컬 분석 캐시 적용", Theme::COLOR_GREEN);
+        return;
+      }
+    }
+  }
+
+  SetStatus(u8"오디오 캡처 중...", Theme::TEXT_WHITE);
+  m_aiProcessing = true;
+
+  if (m_aiThread.joinable()) m_aiThread.detach();
+
+  // 이전 캡처/subprocess 가 진행 중이면 취소
+  if (m_aiAbortFlag) m_aiAbortFlag->store(true);
+  m_aiAbortFlag = std::make_shared<std::atomic<bool>>(false);
+
+  const int myEpoch = m_songEpoch.load();
+  auto abortFlagPtr = m_aiAbortFlag;
+  const std::string capTitle  = m_currentTitle;
+  const std::string capArtist = m_currentArtist;
+
+  m_aiThread = std::thread([this, myEpoch, abortFlagPtr, capTitle, capArtist]() {
+    struct AiProcessingGuard {
+      std::atomic<bool>& flag;
+      ~AiProcessingGuard() { flag = false; }
+    } _g{m_aiProcessing};
+
+    // ---- 캡처 대상 임시 WAV 경로 ----------------------------------------
+    wchar_t tempDir[MAX_PATH];
+    if (GetTempPathW(MAX_PATH, tempDir) == 0) {
+      SetStatus(u8"임시 폴더 접근 실패", Theme::COLOR_RED);
+      return;
+    }
+    std::wstring wavPathW = std::wstring(tempDir) + L"soundmate_capture_" +
+                            std::to_wstring(GetCurrentProcessId()) + L".wav";
+    std::string wavPath;
+    {
+      int n = WideCharToMultiByte(CP_UTF8, 0, wavPathW.c_str(),
+                                  (int)wavPathW.size(),
+                                  nullptr, 0, nullptr, nullptr);
+      wavPath.resize(n);
+      WideCharToMultiByte(CP_UTF8, 0, wavPathW.c_str(), (int)wavPathW.size(),
+                          wavPath.data(), n, nullptr, nullptr);
+    }
+
+    // ---- 1) 시스템 오디오 캡처 -------------------------------------------
+    const int captureSec =
+        SoundMate::Features::kLocalAnalyzerCaptureSeconds;
+    const int startDelay =
+        SoundMate::Features::kLocalAnalyzerStartDelayMs;
+
+    if (!m_audioCapture->CaptureLoopbackToWav(
+            wavPath, captureSec, abortFlagPtr.get(), startDelay)) {
+      if (abortFlagPtr->load() || m_songEpoch.load() != myEpoch) {
+        SetStatus(u8"캡처 취소 (곡 변경)", Theme::TEXT_GRAY);
+      } else {
+        SetStatus(u8"오디오 캡처 실패: " +
+                      m_audioCapture->LastError(),
+                  Theme::COLOR_RED);
+      }
+      return;
+    }
+
+    // 어떤 디바이스로 캡처됐는지 진단 로그 (성공 케이스).
+    // 향후 문제 시 "어느 디바이스가 잡혔는가" 를 확인하기 위한 용도.
+    // 상태바에는 짧게, 추후 로그 파일에도 남기면 진단 편의성 향상.
+    if (!m_audioCapture->LastDeviceName().empty()) {
+      SetStatus(u8"캡처 완료: " + m_audioCapture->LastDeviceName(),
+                Theme::TEXT_GRAY);
+    }
+
+    if (m_songEpoch.load() != myEpoch) {
+      SetStatus(u8"분석 폐기 (곡 변경)", Theme::TEXT_GRAY);
+      DeleteFileA(wavPath.c_str());
+      return;
+    }
+
+    // ---- 2) 파이썬 태그 알고리즘 실행 -----------------------------------
+    SetStatus(u8"오디오 분석 중 (태그 알고리즘)...", Theme::TEXT_WHITE);
+    const int timeoutSec = SoundMate::Features::kLocalAnalyzerTimeoutSeconds;
+    EQBands result = m_localAnalyzer->AnalyzeFromWav(
+        wavPath, abortFlagPtr.get(), timeoutSec);
+
+    // 임시 wav 는 분석 종료 후 삭제 — 디스크 정리.
+    DeleteFileA(wavPath.c_str());
+
+    if (m_songEpoch.load() != myEpoch) {
+      SetStatus(u8"분석 결과 폐기 (곡 변경)", Theme::TEXT_GRAY);
+      return;
+    }
+
+    if (result.errorCode != 0) {
+      // 실패 유형별 사용자 메시지
+      std::string msg;
+      switch (result.errorCode) {
+        case LocalAudioAnalyzer::kErrPythonNotFound:
+          msg = u8"python.exe / main.py 를 찾을 수 없음";
+          break;
+        case LocalAudioAnalyzer::kErrProcessNonZero:
+          msg = u8"분석기 오류: " + result.errorMsg;
+          break;
+        case LocalAudioAnalyzer::kErrTimeout:
+          msg = u8"분석 타임아웃 — 이전 EQ 유지";
+          break;
+        case LocalAudioAnalyzer::kErrAborted:
+          msg = u8"분석 취소";
+          break;
+        default:
+          msg = u8"로컬 분석 실패 (code=" +
+                std::to_string(result.errorCode) + u8")";
+      }
+      SetStatus(msg, Theme::COLOR_RED);
+      return;
+    }
+
+    // ---- 3) 결과를 master31 로 적용 (기존 Gemini 성공 경로와 동일 shape) --
+    SetStatus(u8"EQ 적용 중...", Theme::COLOR_GREEN);
+    std::vector<float> targetView =
+        m_ai->Map31ToTargetBands(result.bands31, m_currentBands);
+    if (m_settings.globalAverage) {
+      auto baseline = g_recordManager.GetGlobalGenreAverage(
+          m_currentGenre, m_currentBands.size());
+      if (baseline.size() == targetView.size()) {
+        for (size_t i = 0; i < targetView.size(); ++i) {
+          targetView[i] = (targetView[i] + baseline[i]) / 2.0f;
+        }
+      }
+    }
+
+    {
+      std::lock_guard<std::mutex> lk(m_eqUpdateMutex);
+      m_queuedGains    = targetView;
+      m_queuedMaster31 = result.bands31;
+      m_pendingEQUpdate = true;
+    }
+    m_eqOrigin = EqOrigin::AI;   // 기존 EqOrigin 카테고리 재사용
+    SetStatus(u8"로컬 분석 완료", Theme::COLOR_GREEN);
+
+    // ---- 4) 캐시 저장 (source="local") — 재분석 방지 ---------------------
+    if (!capTitle.empty() && !capArtist.empty()) {
+      EQEntry entry;
+      entry.title   = capTitle;
+      entry.artist  = capArtist;
+      entry.source  = "local";     // Gemini("AI") 와 구분
+      entry.gains5  = result.bands5;
+      entry.gains10 = result.bands10;
+      entry.gains15 = result.bands15;
+      entry.gains31 = result.bands31;
+      entry.deviceName = GetSelectedDeviceGuid();
+      g_recordManager.SaveInteraction(entry);
+    }
   });
 }
 
@@ -2970,6 +3174,9 @@ bool IsNewerVersion(const std::string &latest, const std::string &current) {
 } // namespace
 
 void MainWindow::CheckForUpdates() {
+  // [Steam 배포] Steam Client 가 자동 업데이트를 담당하므로 Supabase 릴리즈 조회 생략.
+  if constexpr (SoundMate::Features::kStandaloneMode) return;
+
   CURL *curl = curl_easy_init();
   if (!curl)
     return;

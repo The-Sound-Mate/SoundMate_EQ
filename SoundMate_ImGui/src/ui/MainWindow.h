@@ -2,8 +2,10 @@
 // Python의 App 클래스 (main.py) UI 부분을 ImGui로 이식
 #pragma once
 #include "../core/AIClient.h"
+#include "../core/AudioCapture.h"
 #include "../core/EQController.h"
 #include "../core/EngineHealthMonitor.h"
+#include "../core/LocalAudioAnalyzer.h"
 #include "../core/MediaMonitor.h"
 #include "SettingsWindow.h"
 #include "SurveyWindow.h"
@@ -28,7 +30,9 @@ public:
   MainWindow();
   ~MainWindow();
 
-  void Initialize(EQController *eq, AIClient *ai, MediaMonitor *monitor);
+  void Initialize(EQController *eq, AIClient *ai, MediaMonitor *monitor,
+                  LocalAudioAnalyzer *localAnalyzer = nullptr,
+                  AudioCapture       *audioCapture  = nullptr);
 
   // 매 프레임 호출 (ImGui 렌더 루프)
   void Render();
@@ -82,6 +86,11 @@ private:
   // ── 백그라운드 처리 ──────────────────────────────────────────
   void TriggerAIGeneration(); // Python의 trigger_ai_generation()
 
+  // [LocalAnalyzer] Gemini 대신 로컬 파이썬 태그 알고리즘 실행.
+  //   WASAPI loopback 캡처 → temp WAV → python subprocess → EQBands → 적용.
+  //   TriggerAIGeneration 이 kUseLocalAnalyzer=true 일 때 이 함수로 위임.
+  void TriggerLocalAnalysis();
+
   void FetchAudioDevices(); // Python의 fetch_audio_devices()
   std::string GetSelectedDeviceGuid() const;
   std::string GetSelectedDeviceDisplayName() const;
@@ -99,6 +108,13 @@ private:
   EQController *m_eqCtrl = nullptr;
   AIClient *m_ai = nullptr;
   MediaMonitor *m_monitor = nullptr;
+
+  // [LocalAnalyzer] Gemini 대신 로컬 파이썬 태그 알고리즘 사용 시 활성.
+  // FeatureFlags::kUseLocalAnalyzer 로 컴파일타임 토글.
+  //   m_localAnalyzer : python subprocess 래퍼 (WAV → EQBands)
+  //   m_audioCapture  : WASAPI loopback 캡처 (시스템 재생 → temp WAV)
+  LocalAudioAnalyzer *m_localAnalyzer = nullptr;
+  AudioCapture       *m_audioCapture  = nullptr;
 
   // EQ 상태 (Python의 eq_sliders, bands 등)
   std::vector<float> m_eqGains;       // 현재 표시 중인 밴드의 게인 (UI slider 값)

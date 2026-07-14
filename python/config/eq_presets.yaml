@@ -1,0 +1,214 @@
+# =============================================================================
+#  10-Band EQ Preset per Tag
+# =============================================================================
+#
+#  Band centers (Hz): 31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000
+#
+#  Format (compact — matches the user example):
+#      <tag_name>:
+#          <freq_hz>: <gain_db>
+#          <freq_hz>: <gain_db>
+#
+#  Unlisted bands default to 0 dB.  Values are in **dB** (positive = boost,
+#  negative = cut).  The final gain applied to a track is the preset gain
+#  multiplied by the tag's intensity in [0, 1] — so writing -3 dB here means
+#  "cut 3 dB when the tag fires at intensity 1.0".
+#
+#  Tags that describe a well-mixed or neutral condition (e.g. bass_balanced,
+#  wide, treble_neutral) have no preset — they don't need correction.
+#  Simply add a block to enable EQ for them.
+#
+#  Edits to this file are picked up automatically when EQEngine was created
+#  with ``auto_reload_presets=True``.
+# =============================================================================
+
+# ==========================================================================
+#  BASS  — correct bass balance
+# ==========================================================================
+
+bass_none:
+    62: 2
+    125: 1
+
+bass_light:
+    62: 1
+
+bass_heavy:
+    31: -3
+    62: -2
+    125: -1
+
+bass_overpower:
+    31: -5
+    62: -4
+    125: -3
+    250: -1
+
+sub_bass:
+    31: -4
+    62: -1
+
+muddy_bass:
+    125: -1
+    250: -2
+
+# bass_balanced / punchy_bass / tight_bass → no correction
+
+# ==========================================================================
+#  MID  — correct mid-range balance & character
+# ==========================================================================
+
+mid_recessed:
+    500: 1
+    1000: 2
+    2000: 1
+
+mid_forward:
+    500: -1
+    1000: -2
+    2000: -1
+
+boxy:
+    250: -3
+    500: -2
+
+nasal:
+    1000: -2
+    2000: -2
+
+honky:
+    500: -3
+    1000: -2
+
+# mid_balanced → no correction
+
+# ==========================================================================
+#  TREBLE  — brighten dark tracks, tame harsh ones
+# ==========================================================================
+
+dark:
+    4000: 2
+    8000: 2
+    16000: 1
+
+bright:
+    4000: -2
+    8000: -2
+
+airy:
+    8000: -1
+    16000: -2
+
+harsh:
+    2000: -3
+    4000: -4
+
+crisp:
+    4000: -1
+
+sparkly:
+    8000: -1
+    16000: -2
+
+# treble_neutral / smooth → no correction
+
+# ==========================================================================
+#  VOCAL  — push vocals forward / pull them back, tame sibilance
+# ==========================================================================
+
+vocal_buried:
+    1000: 2
+    2000: 2
+    4000: 1
+
+vocal_forward:
+    1000: -1
+    2000: -2
+    4000: -1
+
+vocal_sibilant:
+    4000: -1
+    8000: -3
+
+breathy:
+    16000: -2
+
+powerful_vocal:
+    2000: -1
+    4000: -1
+
+# vocal_balanced / intimate → no correction
+
+# ==========================================================================
+#  DRUM  — correct kick / snare / cymbal balance
+# ==========================================================================
+
+kick_soft:
+    62: 2
+    125: 1
+
+kick_boomy:
+    62: -2
+    125: -2
+
+snare_soft:
+    250: 1
+    2000: 1
+    4000: 1
+
+snare_sharp:
+    4000: -1
+    8000: -1
+
+cymbal_dark:
+    8000: 1
+    16000: 2
+
+cymbal_bright:
+    8000: -2
+    16000: -2
+
+# kick_balanced / kick_punchy / snare_balanced / cymbal_balanced → no correction
+
+# ==========================================================================
+#  SPACE  — mostly EQ-independent (width, reverb are not band problems)
+# ==========================================================================
+
+reverb_heavy:
+    250: -1
+    500: -1
+
+# mono / narrow / wide / huge / dry → no correction (EQ can't fix these)
+
+# ==========================================================================
+#  DYNAMICS  — not correctable with EQ; no presets defined
+# ==========================================================================
+
+# compressed / balanced / dynamic / transient_heavy → no correction
+
+# ==========================================================================
+#  TONE  — subjective; only "cold" gets a mild low-mid warmth push
+# ==========================================================================
+
+cold:
+    250: 1
+    500: 1
+
+# warm / tone_neutral / analog / digital → no correction (subjective)
+
+# ==========================================================================
+#  MIX  — correct spectral-buildup issues
+# ==========================================================================
+
+muddy_mix:
+    250: -3
+    500: -2
+
+# clean_mix / dense_mix / sparse_mix → no correction
+
+# ==========================================================================
+#  INSTRUMENT FOCUS  — informational; no corrections applied
+# ==========================================================================
+
+# vocal_focus / bass_focus / drum_focus / piano_focus / guitar_focus /
+# synth_focus / strings_focus → no correction
