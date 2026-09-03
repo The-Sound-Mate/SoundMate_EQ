@@ -92,8 +92,16 @@ HRESULT SoundMateAPO::NonDelegatingQueryInterface(const IID& iid, void** ppv)
 		*ppv = static_cast<IAudioSystemEffects*>(this);
 	else
 	{
-		// Log every unknown IID — helps confirm we're not missing something
-		// that Equalizer APO also returns E_NOINTERFACE for (i.e. expected).
+		// [로그 용량] 오디오 엔진은 지원하지 않는 인터페이스를 끊임없이 물어보기
+		// 때문에 이 한 줄이 로그의 절반 이상을 차지한다 (실측: 35분에 1,658줄 중
+		// 888줄 = 54%, 누적 125MB). 게다가 WriteAPOLog 는 호출마다 파일을 열고
+		// 닫으므로 디스크 용량보다 I/O 낭비가 더 문제였다.
+		//
+		// 삭제하지 않고 스위치로 남기는 이유: 원래 목적("Equalizer APO 가
+		// E_NOINTERFACE 를 주는 것과 같은 집합인지 확인")은 인터페이스 협상
+		// 문제를 다시 팔 때 여전히 유효하다. 그때 1 로 바꿔 재빌드하면 된다.
+#define SM_LOG_QI_FAILURES 0
+#if SM_LOG_QI_FAILURES
 		wchar_t guidStr[64];
 		StringFromGUID2(iid, guidStr, 64);
 		char buf[128];
@@ -101,6 +109,7 @@ HRESULT SoundMateAPO::NonDelegatingQueryInterface(const IID& iid, void** ppv)
 		char log[200];
 		_snprintf_s(log, sizeof(log), _TRUNCATE, "QI: NO INTERFACE for %s", buf);
 		WriteAPOLog(log);
+#endif
 
 		*ppv = NULL;
 		return E_NOINTERFACE;

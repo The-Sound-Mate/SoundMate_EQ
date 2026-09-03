@@ -26,10 +26,50 @@
 // ============================================================================
 // Logging (APO side — writes to a world-readable log file)
 // ============================================================================
+// 로그 파일 크기 상한. 넘으면 절단한다.
+//
+// [왜 로테이션이 아니라 절단인가] audiodg 안에는 APO 인스턴스가 동시에 여러 개
+//   존재하고(pre-mix 는 스트림마다, post-mix 는 장치마다) 전부 이 파일에 append
+//   핸들을 연다. 이름 변경 방식은 다른 인스턴스가 핸들을 쥐고 있으면 실패하거나
+//   서로 경합한다. TRUNCATE_EXISTING 은 FILE_SHARE_WRITE 로 열린 다른 핸들과
+//   공존하며, 남은 appender 들은 새 끝에서 계속 이어 쓴다.
+#define SM_LOG_MAX_BYTES (4 * 1024 * 1024)
+
+// 크기 확인 주기(호출 횟수). 매번 확인하면 로그 한 줄마다 파일 속성 조회가
+// 붙는다. 64회마다면 4MB 상한 대비 오차가 무시할 수준이고 비용은 거의 0.
+#define SM_LOG_SIZE_CHECK_INTERVAL 64
+
+inline const char *APOLogPath() { return "C:\\Users\\Public\\SoundMateAPO.log"; }
+
 inline void WriteAPOLog(const char *msg) {
   // Avoid heap alloc in AVRT thread — only call from non-RT paths
+
+  // 주기적으로만 크기를 확인하고, 넘으면 절단한다.
+  {
+    static volatile LONG s_calls = 0;
+    if ((InterlockedIncrement(&s_calls) % SM_LOG_SIZE_CHECK_INTERVAL) == 0) {
+      WIN32_FILE_ATTRIBUTE_DATA fad;
+      if (GetFileAttributesExA(APOLogPath(), GetFileExInfoStandard, &fad)) {
+        ULONGLONG sz = ((ULONGLONG)fad.nFileSizeHigh << 32) | fad.nFileSizeLow;
+        if (sz > SM_LOG_MAX_BYTES) {
+          HANDLE hT = CreateFileA(APOLogPath(), GENERIC_WRITE,
+                                  FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                                  TRUNCATE_EXISTING, FILE_ATTRIBUTE_NORMAL,
+                                  NULL);
+          if (hT != INVALID_HANDLE_VALUE) {
+            const char *mark =
+                "--- log truncated (size cap reached) ---\r\n";
+            DWORD w;
+            WriteFile(hT, mark, (DWORD)strlen(mark), &w, NULL);
+            CloseHandle(hT);
+          }
+        }
+      }
+    }
+  }
+
   HANDLE hFile =
-      CreateFileA("C:\\Users\\Public\\SoundMateAPO.log", FILE_APPEND_DATA,
+      CreateFileA(APOLogPath(), FILE_APPEND_DATA,
                   FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS,
                   FILE_ATTRIBUTE_NORMAL, NULL);
   if (hFile == INVALID_HANDLE_VALUE)
