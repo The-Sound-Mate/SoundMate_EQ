@@ -60,6 +60,8 @@ set(APP_SOURCES
     src/core/AIClient.h
     src/core/LocalCurve.cpp
     src/core/LocalCurve.h
+    src/core/AudioTapReader.cpp
+    src/core/AudioTapReader.h
     src/core/RecordManager.cpp
     src/core/RecordManager.h
     src/core/GenreManager.cpp
@@ -80,6 +82,7 @@ target_include_directories(SoundMate_EQ PRIVATE
     ${STBI_DIR}
     ${CURL_DIR}/include
     src/
+    ${CMAKE_CURRENT_SOURCE_DIR}/../engine/SoundMate_APO/include   # SoundMate_AudioTap.h
 )
 
 # ─── Windows 시스템 라이브러리 링크 ───

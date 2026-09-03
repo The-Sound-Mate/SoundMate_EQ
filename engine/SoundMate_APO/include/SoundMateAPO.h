@@ -7,6 +7,7 @@
 #include <mmdeviceapi.h>
 
 #include "FilterEngine.h"
+#include "AudioTapWriter.h"
 
 // Non-Delegating Unknown — matches Equalizer APO exactly.
 class INonDelegatingUnknown
@@ -70,6 +71,11 @@ private:
 	long refCount;
 	IUnknown* pUnkOuter;
 	FilterEngine engine;
+
+	// [v0.1.x 오디오 탭] EQ 적용 전 신호를 UI 분석 스레드로 넘기는 링버퍼 writer.
+	//   post-mix 인스턴스 하나만 소유권을 잡는다 — SoundMate_AudioTap.h 참조.
+	AudioTapWriter audioTap;
+	bool isPostMix;
 	bool allowSilentBufferModification;
 
 	// Child APO chain

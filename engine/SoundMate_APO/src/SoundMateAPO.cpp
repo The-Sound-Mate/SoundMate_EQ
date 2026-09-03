@@ -39,6 +39,10 @@ SoundMateAPO::SoundMateAPO(IUnknown* pUnkOuter)
 	childAPO = NULL;
 	childRT = NULL;
 	childCfg = NULL;
+	// Initialize() 에서 실제 GUID 로 확정된다. 생성자 기본값이 post-mix 인 이유는
+	// 위 base 초기화가 regPostMixProperties 를 쓰기 때문 — 값이 확정되기 전에
+	// 오디오 탭을 잡는 경로는 없다(LockForProcess 에서만 claim).
+	isPostMix = true;
 	InterlockedIncrement(&instCount);
 	WriteAPOLog("SoundMateAPO v29.1 Constructor");
 }
@@ -177,6 +181,11 @@ HRESULT SoundMateAPO::Initialize(UINT32 cbDataSize, BYTE* pbyData)
 
 	GUID apoGuid = initStruct->APOInit.clsid;
 	WriteAPOLog("Initialize: clsid read");
+
+	// [오디오 탭] pre-mix(SFX)는 스트림마다 인스턴스가 따로 생겨 여러 개가 동시에
+	// 존재한다. 믹스가 끝난 장치 출력을 봐야 하므로 post-mix 만 탭 소유권을
+	// 시도한다 — 자세한 이유는 SoundMate_AudioTap.h 의 '소유권' 주석 참조.
+	isPostMix = (apoGuid != SOUNDMATE_PRE_MIX_GUID);
 
 	try {
 		TraceF(L"APO GUID: %s", RegistryHelper::getGuidString(apoGuid).c_str());
@@ -434,12 +443,27 @@ HRESULT SoundMateAPO::LockForProcess(
 	engine.initialize(outFormat.fFramesPerSecond, inFormat.dwSamplesPerFrame,
 		realChannelCount, outFormat.dwSamplesPerFrame, channelMask, maxFrameCount);
 
+	// [오디오 탭] 실패해도 무시 — 탭이 없으면 UI 가 장르 커브로 폴백할 뿐이고
+	// 오디오 재생 자체에는 아무 영향이 없다. post-mix 만 소유권을 시도한다.
+	if (isPostMix && audioTap.open(this)) {
+		if (audioTap.tryClaim()) {
+			audioTap.publishFormat((uint32_t)outFormat.fFramesPerSecond,
+				(uint32_t)outFormat.dwSamplesPerFrame);
+			WriteAPOLog("LockForProcess: audio tap claimed");
+		} else {
+			WriteAPOLog("LockForProcess: audio tap owned by another instance");
+		}
+	}
+
 	WriteAPOLog("LockForProcess: SUCCESS");
 	return hr;
 }
 
 HRESULT SoundMateAPO::UnlockForProcess()
 {
+	// 소유권을 먼저 놓아, 장치가 바뀌는 동안 다른 인스턴스가 즉시 이어받게 한다.
+	audioTap.close();
+
 	if (childCfg) {
 		HRESULT hr = childCfg->UnlockForProcess();
 		if (FAILED(hr)) {
@@ -512,9 +536,17 @@ void SoundMateAPO::APOProcess(
 			memcpy(outputFrames, inputFrames, frameCount * engine.outChannels * sizeof(float));
 		}
 		// After child: input and output buffers may alias; read from output
+		//
+		// [오디오 탭] engine.process 직전 = 우리 EQ 가 적용되기 전 신호.
+		//   여기서 떠야 분석→EQ→분석 폐루프가 생기지 않는다. 자식 APO 가 있으면
+		//   실제 입력은 outputFrames 이므로 그쪽을 읽는다.
+		audioTap.write(outputFrames, frameCount, engine.outChannels,
+			flags == BUFFER_SILENT);
 		engine.updateFromSharedMemory();
 		engine.process(outputFrames, outputFrames, frameCount);
 	} else {
+		audioTap.write(inputFrames, frameCount, engine.inChannels,
+			flags == BUFFER_SILENT);
 		engine.updateFromSharedMemory();
 		engine.process(outputFrames, inputFrames, frameCount);
 	}

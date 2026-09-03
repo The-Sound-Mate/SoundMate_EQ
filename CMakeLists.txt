@@ -203,6 +203,7 @@ set(GUI_SOURCES
     ${GUI_SRC_DIR}/src/core/EngineHealthMonitor.cpp
     ${GUI_SRC_DIR}/src/core/SurveyMapping.cpp
     ${GUI_SRC_DIR}/src/core/LocalCurve.cpp
+    ${GUI_SRC_DIR}/src/core/AudioTapReader.cpp
     "${CMAKE_CURRENT_BINARY_DIR}/resource.rc"
 )
 
@@ -219,6 +220,7 @@ target_include_directories(SoundMate_EQ PRIVATE
     ${THIRD_PARTY}/nlohmann
     ${THIRD_PARTY}/curl/include
     ${GUI_SRC_DIR}/src
+    ${APO_DIR}/include                        # SoundMate_AudioTap.h (오디오 탭 레이아웃 SSOT)
     "${CMAKE_CURRENT_BINARY_DIR}/generated"   # [PR-C] generated Version.h
 )
 
