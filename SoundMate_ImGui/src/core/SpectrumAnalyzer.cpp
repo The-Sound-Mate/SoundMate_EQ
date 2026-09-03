@@ -15,18 +15,23 @@ constexpr double kMaxFreqRatio = 0.45;
 
 } // namespace
 
-SpectrumAnalyzer::SpectrumAnalyzer() : m_sampleRate(0.0), m_samples(0) {}
+SpectrumAnalyzer::SpectrumAnalyzer()
+    : m_sampleRate(0.0), m_samples(0), m_fastAlpha(0.0) {}
 
 void SpectrumAnalyzer::Configure(double sampleRate,
                                  const std::vector<int>& freqs) {
   m_sampleRate = sampleRate;
   m_filters.assign(freqs.size(), Biquad{});
   m_sumSq.assign(freqs.size(), 0.0);
+  m_fastSq.assign(freqs.size(), 0.0);
   m_usable.assign(freqs.size(), false);
   m_samples = 0;
 
   if (sampleRate <= 0.0)
     return;
+
+  // 지수 감쇠 계수: 한 샘플 지날 때 남는 비율.
+  m_fastAlpha = std::exp(-1.0 / ((kFastTauMs / 1000.0) * sampleRate));
 
   for (size_t i = 0; i < freqs.size(); ++i) {
     const double f0 = (double)freqs[i];
@@ -59,23 +64,47 @@ void SpectrumAnalyzer::Reset() {
   for (auto& s : m_sumSq)
     s = 0.0;
   m_samples = 0;
+  // m_fastSq 는 일부러 비우지 않는다 — 시각화는 곡 경계에서도 끊기지 않아야
+  // 자연스럽다. 어차피 120ms 시상수라 곧 새 곡 값으로 수렴한다.
 }
 
-void SpectrumAnalyzer::Process(const float* mono, size_t count) {
+void SpectrumAnalyzer::Process(const float* mono, size_t count,
+                               bool accumulate) {
   if (!mono || count == 0 || m_filters.empty())
     return;
 
   const size_t n = m_filters.size();
+  const double a = m_fastAlpha;
   for (size_t k = 0; k < count; ++k) {
     const double x = (double)mono[k];
     for (size_t i = 0; i < n; ++i) {
       if (!m_usable[i])
         continue;
       const double y = m_filters[i].Process(x);
-      m_sumSq[i] += y * y;
+      const double p = y * y;
+      m_fastSq[i] = m_fastSq[i] * a + p * (1.0 - a);
+      if (accumulate)
+        m_sumSq[i] += p;
     }
   }
-  m_samples += count;
+  if (accumulate)
+    m_samples += count;
+}
+
+std::vector<float> SpectrumAnalyzer::FastLevelsDb() const {
+  std::vector<float> out;
+  if (m_fastSq.empty())
+    return out;
+  out.resize(m_fastSq.size());
+  for (size_t i = 0; i < m_fastSq.size(); ++i) {
+    if (!m_usable[i]) {
+      out[i] = -200.0f;
+      continue;
+    }
+    const double rms = std::sqrt(m_fastSq[i]);
+    out[i] = (rms > 1e-12) ? (float)(20.0 * std::log10(rms)) : -200.0f;
+  }
+  return out;
 }
 
 std::vector<float> SpectrumAnalyzer::BandLevelsDb() const {

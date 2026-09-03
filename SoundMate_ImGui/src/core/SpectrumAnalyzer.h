@@ -32,7 +32,11 @@ public:
   void Reset();
 
   // 모노 샘플을 흘려 넣는다. 여러 번 나눠 호출해도 된다.
-  void Process(const float* mono, size_t count);
+  //
+  // accumulate=false 면 필터는 계속 돌리되 LTAS 누적만 건너뛴다.
+  //   - 필터를 멈추면 상태(z1,z2)가 끊겨 다시 켤 때 과도응답이 섞인다.
+  //   - 시각화용 빠른 레벨은 적분 구간 밖에서도 계속 갱신돼야 한다.
+  void Process(const float* mono, size_t count, bool accumulate = true);
 
   // 지금까지 누적된 샘플 수.
   size_t AccumulatedSamples() const { return m_samples; }
@@ -40,6 +44,13 @@ public:
   // 대역별 RMS 를 dBFS 로. 누적 샘플이 없으면 빈 벡터.
   // 반환 크기는 Configure 에 넘긴 freqs 와 동일.
   std::vector<float> BandLevelsDb() const;
+
+  // 시각화용 순간 레벨(dBFS). LTAS 는 20초 적분이라 화면에서 거의 움직이지
+  // 않으므로, 약 kFastTauMs 시상수의 지수 감쇠 평균을 따로 유지한다.
+  std::vector<float> FastLevelsDb() const;
+
+  // 빠른 레벨의 시상수 (ms). 소리에 반응하되 프레임마다 튀지 않는 값.
+  static constexpr double kFastTauMs = 120.0;
 
   // 나이퀴스트에 너무 가까워 측정에서 제외된 밴드는 false.
   const std::vector<bool>& BandUsable() const { return m_usable; }
@@ -61,7 +72,9 @@ private:
 
   double              m_sampleRate;
   std::vector<Biquad> m_filters;
-  std::vector<double> m_sumSq;   // 대역별 제곱합 누적
+  std::vector<double> m_sumSq;    // 대역별 제곱합 누적 (LTAS)
+  std::vector<double> m_fastSq;   // 대역별 지수 감쇠 평균 (시각화)
   std::vector<bool>   m_usable;
   size_t              m_samples;
+  double              m_fastAlpha;  // 샘플당 감쇠 계수
 };

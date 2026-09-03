@@ -63,6 +63,17 @@ std::vector<float> AdaptiveEngine::LastLevelsDb() const {
   return m_lastLevels;
 }
 
+std::vector<float> AdaptiveEngine::LiveLevelsDb() const {
+  // 오디오가 끊긴 지 오래면 빈 벡터를 준다. 그래야 호출부가 "정지 상태"를
+  // 알아채고 폴백(기존 애니메이션)으로 넘어갈 수 있다. 마지막 값을 계속
+  // 돌려주면 화면이 얼어붙은 것처럼 보인다.
+  const uint32_t last = m_lastAudioTick.load(std::memory_order_relaxed);
+  if (last == 0 || (uint32_t)(GetTickCount() - last) > 500u)
+    return {};
+  std::lock_guard<std::mutex> lk(m_mutex);
+  return m_liveLevels;
+}
+
 void AdaptiveEngine::WorkerLoop() {
   AudioTapReader  tap;
   SpectrumAnalyzer analyzer;
@@ -127,32 +138,46 @@ void AdaptiveEngine::WorkerLoop() {
     if (n == 0)
       continue;
 
-    if (!collecting)
-      continue;
+    m_lastAudioTick.store(GetTickCount(), std::memory_order_relaxed);
 
+    // 필터뱅크는 **항상** 돌린다. 두 가지 이유:
+    //   1) 필터를 멈추면 상태(z1,z2)가 끊겨 재개 시 과도응답이 섞인다.
+    //   2) 시각화용 빠른 레벨이 적분 창 밖에서도 갱신돼야 한다.
+    // LTAS 누적만 구간에 따라 켜고 끈다.
     const uint64_t skipTarget = (uint64_t)(kSkipSeconds * configuredRate);
     const uint64_t intTarget = (uint64_t)(kIntegrateSeconds * configuredRate);
 
-    size_t offset = 0;
-    if (skipped < skipTarget) {
+    size_t pos = 0;
+    if (collecting && skipped < skipTarget) {
       const uint64_t need = skipTarget - skipped;
       const size_t drop = (need < (uint64_t)n) ? (size_t)need : n;
+      analyzer.Process(buf.data(), drop, /*accumulate=*/false);
       skipped += drop;
-      offset = drop;
+      pos = drop;
       m_state.store(State::Skipping);
     }
 
-    if (offset < n && integrated < intTarget) {
+    if (collecting && pos < n && integrated < intTarget) {
       const uint64_t room = intTarget - integrated;
-      size_t take = n - offset;
+      size_t take = n - pos;
       if ((uint64_t)take > room)
         take = (size_t)room;
-      analyzer.Process(buf.data() + offset, take);
+      analyzer.Process(buf.data() + pos, take, /*accumulate=*/true);
       integrated += take;
+      pos += take;
       m_state.store(State::Integrating);
     }
 
-    if (integrated >= intTarget) {
+    // 남은 구간(적분 완료 후 / 측정 중이 아닐 때)도 필터는 통과시킨다.
+    if (pos < n)
+      analyzer.Process(buf.data() + pos, n - pos, /*accumulate=*/false);
+
+    {
+      std::lock_guard<std::mutex> lk(m_mutex);
+      m_liveLevels = analyzer.FastLevelsDb();
+    }
+
+    if (collecting && integrated >= intTarget) {
       const std::vector<float> levels = analyzer.BandLevelsDb();
       const std::vector<float> delta =
           AdaptiveCurve::ComputeDelta(levels, analyzer.BandUsable(), AIClient::F31);

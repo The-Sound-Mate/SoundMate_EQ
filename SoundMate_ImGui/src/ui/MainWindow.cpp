@@ -968,11 +968,52 @@ void MainWindow::Render() {
   }
 
   // ── 비주얼라이저 업데이트 ──
+  //   오디오 탭에서 실측한 31밴드 스펙트럼을 VIS_BARS 개 막대로 보간해 그린다.
+  //   탭이 없거나(구버전 APO) 재생이 멈추면 기존 애니메이션으로 폴백해
+  //   화면이 죽어 보이지 않게 한다.
   m_visTimer += m_deltaTime;
-  for (int i = 0; i < VIS_BARS; i++) {
-    float phase = (float)i / VIS_BARS * 6.28f + m_visTimer * 2.0f;
-    float target = (std::sin(phase) * 0.5f + 0.5f) * 0.8f + 0.1f;
-    m_visBars[i] += (target - m_visBars[i]) * m_deltaTime * 8.0f;
+  {
+    std::vector<float> live = m_adaptive.LiveLevelsDb();
+
+    // 나이퀴스트 제외 밴드는 -200dB 로 들어온다(예: 44.1kHz 의 20kHz 밴드).
+    // 그대로 보간하면 끝에 거대한 골이 생기므로 유효값만 쓴다.
+    float peak = -1e9f;
+    for (float v : live)
+      if (v > -120.f && v > peak)
+        peak = v;
+
+    // 무음이거나 유효 밴드가 없으면 실측을 쓰지 않는다.
+    const bool haveLive = (live.size() >= 2 && peak > -90.f);
+
+    // 가장 큰 밴드 기준 kVisRangeDb 아래까지를 화면 높이에 매핑한다.
+    // 절대 레벨이 아니라 상대값이라, 재생 음량이 달라도 스펙트럼 '모양'이
+    // 항상 보인다.
+    constexpr float kVisRangeDb = 45.f;
+    const float floorDb = peak - kVisRangeDb;
+    if (haveLive) {
+      for (float& v : live)
+        v = (v < floorDb) ? floorDb : v;  // -200 밴드를 바닥으로 끌어올림
+    }
+
+    for (int i = 0; i < VIS_BARS; i++) {
+      float target;
+      if (haveLive) {
+        // 밴드 인덱스 축이 곧 로그 주파수 축이므로 선형 보간으로 충분하다.
+        const float t =
+            (float)i / (float)(VIS_BARS - 1) * (float)(live.size() - 1);
+        const int lo = (int)t;
+        const int hi = (lo + 1 < (int)live.size()) ? (lo + 1) : lo;
+        const float fr = t - (float)lo;
+        const float db = live[lo] * (1.f - fr) + live[hi] * fr;
+        target = (db - floorDb) / kVisRangeDb;
+        if (target < 0.02f) target = 0.02f;
+        if (target > 1.00f) target = 1.00f;
+      } else {
+        const float phase = (float)i / VIS_BARS * 6.28f + m_visTimer * 2.0f;
+        target = (std::sin(phase) * 0.5f + 0.5f) * 0.8f + 0.1f;
+      }
+      m_visBars[i] += (target - m_visBars[i]) * m_deltaTime * 8.0f;
+    }
   }
 
   // ── 곡별 적응 보정 델타 수거 (메인 스레드) ──

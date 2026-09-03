@@ -62,6 +62,10 @@ public:
   // 진단용 — 마지막 측정의 대역 레벨(dB). 비어 있을 수 있다.
   std::vector<float> LastLevelsDb() const;
 
+  // 시각화용 순간 대역 레벨(dB). 적분 창 밖에서도 계속 갱신된다.
+  // 오디오가 없거나 탭이 없으면 빈 벡터 — 호출부가 폴백을 판단할 수 있다.
+  std::vector<float> LiveLevelsDb() const;
+
 private:
   void WorkerLoop();
 
@@ -74,4 +78,7 @@ private:
   mutable std::mutex m_mutex;
   std::vector<float> m_delta;
   std::vector<float> m_lastLevels;
+  std::vector<float> m_liveLevels;
+  // 마지막으로 오디오가 들어온 시각(GetTickCount). 오래되면 시각화를 끈다.
+  std::atomic<uint32_t> m_lastAudioTick{0};
 };
