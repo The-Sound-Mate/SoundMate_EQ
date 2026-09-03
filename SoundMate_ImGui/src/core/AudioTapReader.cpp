@@ -20,13 +20,19 @@ bool AudioTapReader::Open() {
     return true;
 
   // 만들지 않고 열기만 한다 — 섹션 생성은 APO 의 책임.
-  HANDLE h = OpenFileMappingW(FILE_MAP_ALL_ACCESS, FALSE,
-                              SOUNDMATE_AUDIO_SHM_NAME);
+  //
+  // [권한] FILE_MAP_ALL_ACCESS 를 쓰면 안 된다. 그 값은 SECTION_ALL_ACCESS =
+  //   STANDARD_RIGHTS_REQUIRED(WRITE_DAC / WRITE_OWNER / DELETE 포함) 까지
+  //   요구하는데, 섹션의 SDDL 은 Interactive User 에게 GRGW(읽기+쓰기)만 준다.
+  //   그래서 UI 가 일반 사용자 권한으로 열면 ERROR_ACCESS_DENIED 가 난다.
+  //   실제로 필요한 건 읽기(samples) + 쓰기(consumerActive/heartbeat) 뿐이다.
+  const DWORD kAccess = FILE_MAP_READ | FILE_MAP_WRITE;
+
+  HANDLE h = OpenFileMappingW(kAccess, FALSE, SOUNDMATE_AUDIO_SHM_NAME);
   if (!h)
     return false;
 
-  void* v = MapViewOfFile(h, FILE_MAP_ALL_ACCESS, 0, 0,
-                          sizeof(SoundMateAudioTap));
+  void* v = MapViewOfFile(h, kAccess, 0, 0, sizeof(SoundMateAudioTap));
   if (!v) {
     CloseHandle(h);
     return false;

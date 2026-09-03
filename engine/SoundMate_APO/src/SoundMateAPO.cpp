@@ -186,6 +186,13 @@ HRESULT SoundMateAPO::Initialize(UINT32 cbDataSize, BYTE* pbyData)
 	// 존재한다. 믹스가 끝난 장치 출력을 봐야 하므로 post-mix 만 탭 소유권을
 	// 시도한다 — 자세한 이유는 SoundMate_AudioTap.h 의 '소유권' 주석 참조.
 	isPostMix = (apoGuid != SOUNDMATE_PRE_MIX_GUID);
+	{
+		char gl[96];
+		_snprintf_s(gl, sizeof(gl), _TRUNCATE,
+			"Initialize: isPostMix=%d (clsid.Data1=%08lX)",
+			(int)isPostMix, (unsigned long)apoGuid.Data1);
+		WriteAPOLog(gl);
+	}
 
 	try {
 		TraceF(L"APO GUID: %s", RegistryHelper::getGuidString(apoGuid).c_str());
@@ -445,13 +452,25 @@ HRESULT SoundMateAPO::LockForProcess(
 
 	// [오디오 탭] 실패해도 무시 — 탭이 없으면 UI 가 장르 커브로 폴백할 뿐이고
 	// 오디오 재생 자체에는 아무 영향이 없다. post-mix 만 소유권을 시도한다.
-	if (isPostMix && audioTap.open(this)) {
-		if (audioTap.tryClaim()) {
+	{
+		char tapLog[192];
+		if (!isPostMix) {
+			WriteAPOLog("AudioTap: skipped (pre-mix instance)");
+		} else if (!audioTap.open(this)) {
+			_snprintf_s(tapLog, sizeof(tapLog), _TRUNCATE,
+				"AudioTap: open FAILED err=%lu size=%zu",
+				GetLastError(), sizeof(SoundMateAudioTap));
+			WriteAPOLog(tapLog);
+		} else if (audioTap.tryClaim()) {
 			audioTap.publishFormat((uint32_t)outFormat.fFramesPerSecond,
 				(uint32_t)outFormat.dwSamplesPerFrame);
-			WriteAPOLog("LockForProcess: audio tap claimed");
+			_snprintf_s(tapLog, sizeof(tapLog), _TRUNCATE,
+				"AudioTap: CLAIMED rate=%u ch=%u",
+				(unsigned)outFormat.fFramesPerSecond,
+				(unsigned)outFormat.dwSamplesPerFrame);
+			WriteAPOLog(tapLog);
 		} else {
-			WriteAPOLog("LockForProcess: audio tap owned by another instance");
+			WriteAPOLog("AudioTap: open OK but owned by another instance");
 		}
 	}
 
