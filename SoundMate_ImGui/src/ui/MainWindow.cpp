@@ -21,6 +21,7 @@
 #pragma comment(lib, "propsys.lib")
 #include "../core/FeatureFlags.h"
 #include "../core/GenreManager.h"
+#include "../core/LocalCurve.h"
 #include "../core/RecordManager.h"
 #include <curl/curl.h>
 #include <nlohmann/json.hpp>
@@ -600,6 +601,27 @@ void MainWindow::TriggerAIGeneration() {
     EQBands result;
     bool aiAborted = false;
 
+    // [v0.1.0 로컬 전환] 자유 텍스트 프롬프트가 없는 자동 경로(곡 변경 / 설문
+    //   저장 직후)는 네트워크를 전혀 타지 않고 LocalCurve 가 즉시 커브를 산출한다.
+    //   → 호출 비용 0, 지연 0. Gemini 503/429 로 "이전 곡 EQ 가 새 곡에 그대로
+    //     남는" 현상(아래 429/503 분기)이 자동 경로에서 원천 소멸.
+    //   사용자가 직접 입력한 자연어 프롬프트는 로컬 룩업으로 대체할 수 없으므로
+    //   그 경로만 기존 AI 를 그대로 사용한다 (프롬프트 InputText → 이 함수 진입).
+    const bool useLocalCurve = prompt.empty();
+
+    if (useLocalCurve) {
+      SetStatus(u8"로컬 분석 중...", Theme::TEXT_WHITE);
+      std::vector<float> local31 =
+          LocalCurve::Generate(m_currentGenre, userPref);
+      // 5/10/15 밴드는 기존 큐빅 스플라인 보간을 그대로 재사용 (RecordManager
+      // 저장 포맷 동일). bands31 은 보간 왕복 없이 원본을 유지.
+      result = m_ai->UpsampleToAllBands(local31, AIClient::F31);
+      result.bands31 = local31;
+      result.errorCode = 0;
+
+      // AI 경로와 동일하게 곡 변경 시 결과 폐기.
+      if (m_songEpoch.load() != myEpoch) aiAborted = true;
+    } else {
     for (int attempt = 0; attempt < kAiAttempts; ++attempt) {
       if (kAiBackoffMs[attempt] > 0) {
         int slept = 0;
@@ -631,6 +653,7 @@ void MainWindow::TriggerAIGeneration() {
       // 503/429 가 아닌 결과(성공 or 다른 에러)는 즉시 결과 처리 단계로.
       if (result.errorCode != 503 && result.errorCode != 429) break;
     }
+    } // else (AI 경로)
 
     if (aiAborted) {
       SetStatus(u8"AI: 응답 폐기 (곡 변경됨)", Theme::TEXT_GRAY);

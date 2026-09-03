@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(SoundMate_EQ VERSION 0.0.2 LANGUAGES CXX RC)
+project(SoundMate_EQ VERSION 0.1.0 LANGUAGES CXX RC)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -58,6 +58,8 @@ set(APP_SOURCES
     src/core/MediaMonitor.h
     src/core/AIClient.cpp
     src/core/AIClient.h
+    src/core/LocalCurve.cpp
+    src/core/LocalCurve.h
     src/core/RecordManager.cpp
     src/core/RecordManager.h
     src/core/GenreManager.cpp

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(SoundMate_EQ VERSION 0.0.2 LANGUAGES C CXX RC)
+project(SoundMate_EQ VERSION 0.1.0 LANGUAGES C CXX RC)
 
 
 set(CMAKE_CXX_STANDARD 17)
@@ -202,6 +202,7 @@ set(GUI_SOURCES
     ${GUI_SRC_DIR}/src/core/GenreManager.cpp
     ${GUI_SRC_DIR}/src/core/EngineHealthMonitor.cpp
     ${GUI_SRC_DIR}/src/core/SurveyMapping.cpp
+    ${GUI_SRC_DIR}/src/core/LocalCurve.cpp
     "${CMAKE_CURRENT_BINARY_DIR}/resource.rc"
 )
 
