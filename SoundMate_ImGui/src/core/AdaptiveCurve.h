@@ -52,9 +52,18 @@ constexpr float kFloorRangeDb = 40.0f;
 
 // measuredDb : SpectrumAnalyzer::BandLevelsDb() 결과
 // usable     : SpectrumAnalyzer::BandUsable() (나이퀴스트 제외 밴드)
+// freqs      : 밴드 중심주파수 (AIClient::F31). 라우드니스 가중 중립화에 쓴다.
+//              비워서 넘기면 중립화를 건너뛴다.
 // 반환       : measuredDb 와 같은 크기의 dB 델타. 입력이 비면 빈 벡터.
+//
+// [라우드니스 중립화] 델타의 가중평균을 0 으로 맞춘다.
+//   이탈 보정은 구조상 합이 0 근처지만 **보장은 아니다** — 가장자리 제외와
+//   클램프 때문에 한쪽으로 치우칠 수 있다. 치우치면 곡이 바뀔 때마다 음량이
+//   미묘하게 오르내린다. 보정의 '모양'은 그대로 두고 공통 오프셋만 빼므로
+//   부작용이 없다. LocalCurve 의 중립화와 같은 가중치를 쓴다.
 std::vector<float> ComputeDelta(const std::vector<float>& measuredDb,
                                 const std::vector<bool>&  usable,
+                                const std::vector<int>&   freqs,
                                 float strength = kDefaultStrength,
                                 float clampDb  = kDefaultClampDb);
 

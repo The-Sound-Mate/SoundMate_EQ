@@ -155,7 +155,7 @@ void AdaptiveEngine::WorkerLoop() {
     if (integrated >= intTarget) {
       const std::vector<float> levels = analyzer.BandLevelsDb();
       const std::vector<float> delta =
-          AdaptiveCurve::ComputeDelta(levels, analyzer.BandUsable());
+          AdaptiveCurve::ComputeDelta(levels, analyzer.BandUsable(), AIClient::F31);
       {
         std::lock_guard<std::mutex> lk(m_mutex);
         m_lastLevels = levels;

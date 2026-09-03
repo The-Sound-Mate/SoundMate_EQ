@@ -6,8 +6,20 @@
 
 namespace AdaptiveCurve {
 
+namespace {
+// LocalCurve 의 LoudnessWeight 와 동일한 완만한 밴드패스 가중치.
+// (200Hz~8kHz 강조. 로그 간격 밴드에서 단순평균을 쓰면 실질 에너지가 적은
+//  최저역/최고역이 과대 반영된다 — 근거는 LocalCurve.cpp 주석 참조.)
+float LoudnessWeight(float f) {
+  const float lo = f / 200.f;
+  const float hi = f / 8000.f;
+  return (lo * lo / (1.f + lo * lo)) * (1.f / (1.f + hi * hi));
+}
+} // namespace
+
 std::vector<float> ComputeDelta(const std::vector<float>& measuredDb,
                                 const std::vector<bool>&  usable,
+                                const std::vector<int>&   freqs,
                                 float strength, float clampDb) {
   const size_t n = measuredDb.size();
   std::vector<float> delta;
@@ -79,6 +91,10 @@ std::vector<float> ComputeDelta(const std::vector<float>& measuredDb,
     return delta;
 
   // 5) 추세로부터의 이탈을 반대 방향으로, 강도를 곱해 클램프.
+  //    corrected[] 로 "실제로 보정한 밴드"를 따로 기록한다 — 다음 단계에서
+  //    필요하다. active 만으로는 부족하다: 가장자리 밴드는 active 이지만
+  //    의도적으로 보정하지 않았고, 거기에 오프셋을 뿌리면 끝단 보호가 깨진다.
+  std::vector<bool> corrected(n, false);
   for (size_t i = 0; i < n; ++i) {
     if (!active[i])
       continue;  // 0 유지
@@ -89,6 +105,28 @@ std::vector<float> ComputeDelta(const std::vector<float>& measuredDb,
     float d = -dev * strength;
     d = std::max(-clampDb, std::min(clampDb, d));
     delta[i] = d;
+    corrected[i] = true;
+  }
+
+  // 6) 라우드니스 중립화 — 이 계층이 전체 음량을 바꾸지 않도록 보장한다.
+  //    실제로 보정한 밴드만 대상으로 가중평균을 빼고 다시 클램프한다.
+  if (freqs.size() == n) {
+    float wsum = 0.f, acc = 0.f;
+    for (size_t i = 0; i < n; ++i) {
+      if (!corrected[i])
+        continue;
+      const float w = LoudnessWeight((float)freqs[i]);
+      acc += delta[i] * w;
+      wsum += w;
+    }
+    if (wsum > 1e-6f) {
+      const float mean = acc / wsum;
+      for (size_t i = 0; i < n; ++i) {
+        if (!corrected[i])
+          continue;
+        delta[i] = std::max(-clampDb, std::min(clampDb, delta[i] - mean));
+      }
+    }
   }
 
   return delta;
