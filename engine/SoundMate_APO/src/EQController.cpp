@@ -13,7 +13,16 @@ EQController::~EQController() {
 bool EQController::Initialize() {
     // SDDL: SYSTEM, Administrators, LocalService all get full access.
     // LocalService is the account under which audiodg.exe (the APO host) runs.
-    LPCWSTR sddl = L"D:P(A;OICI;GA;;;SY)(A;OICI;GA;;;BA)(A;OICI;GA;;;LS)";
+    //
+    // [수정] Interactive User(IU) 에게 GRGW 를 준다 — FilterEngine 쪽 SDDL 과
+    //   반드시 같아야 한다. 섹션은 **먼저 만든 쪽의 ACL 로 확정**되므로, 여기에
+    //   IU 가 빠져 있으면 Controller 가 경쟁에서 이긴 경우 일반 사용자 권한의
+    //   UI 가 limiterActiveFlag 를 읽지 못한다(ERROR_ACCESS_DENIED).
+    //   실제로 그 상태를 확인했다. APO 쪽에는 이미 IU 가 들어가 있었는데
+    //   Controller 쪽만 갱신이 누락돼 있었다 — 누가 먼저 뜨냐에 따라 증상이
+    //   나타났다 사라졌다 하는 종류의 버그다.
+    LPCWSTR sddl =
+        L"D:P(A;OICI;GA;;;SY)(A;OICI;GA;;;BA)(A;OICI;GA;;;LS)(A;OICI;GRGW;;;IU)";
 
     PSECURITY_DESCRIPTOR pSD = NULL;
     SECURITY_ATTRIBUTES sa;
