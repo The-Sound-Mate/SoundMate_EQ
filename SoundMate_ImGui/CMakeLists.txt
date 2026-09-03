@@ -62,6 +62,10 @@ set(APP_SOURCES
     src/core/LocalCurve.h
     src/core/AudioTapReader.cpp
     src/core/AudioTapReader.h
+    src/core/SpectrumAnalyzer.cpp
+    src/core/SpectrumAnalyzer.h
+    src/core/AdaptiveCurve.cpp
+    src/core/AdaptiveCurve.h
     src/core/RecordManager.cpp
     src/core/RecordManager.h
     src/core/GenreManager.cpp

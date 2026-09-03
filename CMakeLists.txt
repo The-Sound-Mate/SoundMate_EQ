@@ -204,6 +204,8 @@ set(GUI_SOURCES
     ${GUI_SRC_DIR}/src/core/SurveyMapping.cpp
     ${GUI_SRC_DIR}/src/core/LocalCurve.cpp
     ${GUI_SRC_DIR}/src/core/AudioTapReader.cpp
+    ${GUI_SRC_DIR}/src/core/SpectrumAnalyzer.cpp
+    ${GUI_SRC_DIR}/src/core/AdaptiveCurve.cpp
     "${CMAKE_CURRENT_BINARY_DIR}/resource.rc"
 )
 
