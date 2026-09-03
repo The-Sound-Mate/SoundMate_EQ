@@ -98,6 +98,11 @@ void MainWindow::Initialize(EQController *eq, AIClient *ai,
   FetchAudioDevices();
   LoadUserPresets(); // 사용자 프리셋 로드
 
+  // [곡별 적응 보정] 오디오 탭 분석 워커 기동. 탭이 없으면(구버전 APO 이거나
+  //   재생 중이 아니면) State::NoTap 으로 조용히 대기만 하므로, 실패해도
+  //   기존 동작에 영향이 없다.
+  m_adaptive.Start();
+
   std::thread([this]() { CheckForUpdates(); }).detach();
 
   // [v12.0] 엔진의 config.txt에서 현재 값을 읽어와 슬라이더 동기화
@@ -463,15 +468,33 @@ void MainWindow::ApplyEQNoSave() {
   std::string dev = GetSelectedDeviceGuid();
   static std::atomic<bool> s_healthRecoveryInFlight{false};
 
+  // [곡별 적응 보정] 엔진으로 보낼 값에만 델타를 더한다.
+  //   m_eqGains31Master 는 **사용자 소유 데이터**다 — 슬라이더 표시값이자
+  //   RecordManager 가 곡별로 DB 에 저장하는 값. 여기에 델타를 써넣으면
+  //   슬라이더가 저절로 움직이고 저장되는 프리셋이 오염된다. 그래서 원본은
+  //   그대로 두고 송신 직전에만 합성한다. UI 는 아무것도 바뀌지 않는다.
+  std::vector<float> master31 = m_eqGains31Master;
+  {
+    std::lock_guard<std::mutex> lk(m_adaptiveMutex);
+    if (m_adaptiveDelta.size() == master31.size()) {
+      for (size_t i = 0; i < master31.size(); ++i) {
+        float v = master31[i] + m_adaptiveDelta[i];
+        // 엔진 상한과 동일하게 제한 (FilterConfiguration 이 ±24dB 를 넘기면
+        // Controller 단에서 잘리므로 여기서 미리 맞춘다).
+        master31[i] = (v < -24.f) ? -24.f : ((v > 24.f) ? 24.f : v);
+      }
+    }
+  }
+
   // 뷰 모드별로 N개 필터를 송신 — 엔진이 옥타브 폭에 맞는 Q 로 처리.
   // 31밴드 외엔 master31 을 N밴드 주파수에서 log-주파수 보간 (Map31ToTargetBands).
   std::vector<float> sendGains;
   std::vector<int>   sendFreqs;
   if (m_ai && !m_currentBands.empty() && (int)m_currentBands.size() != 31) {
-    sendGains = m_ai->Map31ToTargetBands(m_eqGains31Master, m_currentBands);
+    sendGains = m_ai->Map31ToTargetBands(master31, m_currentBands);
     sendFreqs = m_currentBands;
   } else {
-    sendGains = m_eqGains31Master;
+    sendGains = master31;
     sendFreqs = AIClient::F31;
   }
 
@@ -952,6 +975,29 @@ void MainWindow::Render() {
     m_visBars[i] += (target - m_visBars[i]) * m_deltaTime * 8.0f;
   }
 
+  // ── 곡별 적응 보정 델타 수거 (메인 스레드) ──
+  //   워커가 10~30초 구간 적분을 마치면 한 번 건네준다. 사용자 게인은 건드리지
+  //   않고 엔진 송신값에만 반영되므로(ApplyEQNoSave), 슬라이더는 그대로다.
+  //   ApplyEQNoSave 는 SmoothTransition 을 거치지 않지만, 델타가 ±3dB 이내이고
+  //   Controller -> APO 경로가 곡 변경 때와 동일한 빈도(곡당 1회)라 안전하다.
+  {
+    std::vector<float> newDelta;
+    if (m_adaptive.TryTakeDelta(newDelta)) {
+      {
+        std::lock_guard<std::mutex> lk(m_adaptiveMutex);
+        m_adaptiveDelta = newDelta;
+      }
+      float mx = 0.f;
+      for (float v : newDelta)
+        mx = (std::fabs(v) > mx) ? std::fabs(v) : mx;
+      char msg[128];
+      _snprintf_s(msg, sizeof(msg), _TRUNCATE,
+                  u8"곡 분석 완료 — 보정 적용 (최대 %.1f dB)", mx);
+      SetStatus(msg, Theme::TEXT_GRAY);
+      ApplyEQNoSave();
+    }
+  }
+
   // ── 예약된 EQ 업데이트 처리 (메인 스레드 안전) ──
   if (m_pendingEQUpdate.exchange(false)) {
     std::vector<float> target;
@@ -1041,6 +1087,14 @@ void MainWindow::Render() {
 
       // [4-B] 곡 변경 epoch 증가 — 디바운스 스레드가 자기가 가장 최신인지 검사
       int myEpoch = ++m_songEpoch;
+
+      // [곡별 적응 보정] 이전 곡의 델타를 즉시 버리고 새 곡 측정을 시작한다.
+      //   버리지 않으면 새 곡 앞 30초 동안 이전 곡의 보정이 걸린 채로 들린다.
+      {
+        std::lock_guard<std::mutex> lk(m_adaptiveMutex);
+        m_adaptiveDelta.clear();
+      }
+      m_adaptive.OnSongChanged();
 
       // ── 프리셋 모드 활성 중: AI/캐시 건너뛰고 프리셋 EQ 고정 재적용 ──
       if (m_presetModeActive && m_selectedPresetIdx >= 0 &&

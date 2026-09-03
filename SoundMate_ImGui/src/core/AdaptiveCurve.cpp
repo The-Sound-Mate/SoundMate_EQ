@@ -59,10 +59,32 @@ std::vector<float> ComputeDelta(const std::vector<float>& measuredDb,
     smoothed[i] = (cnt > 0) ? (sum / (float)cnt) : measuredDb[i];
   }
 
-  // 4) 추세로부터의 이탈을 반대 방향으로, 강도를 곱해 클램프.
+  // 4) 유효 구간의 가장자리는 보정하지 않는다.
+  //
+    //  [왜 필요한가] 이동평균 창이 구간 끝에서 잘리면 한쪽 이웃만 평균에
+    //  들어간다. 그러면 단조 롤오프가 '골'로 오인된다 — 실측 예: 20kHz 가
+    //  -72dB, 이웃 12.5k/16k 가 -60.3/-65.1 이라 평균이 -65.8 이 되고
+    //  이탈 -6.2dB -> 델타 +3.0dB(상한). 사실상 아무것도 없는 대역을 최대치로
+    //  부스트하는 셈이다. 배열 끝이 아니라 **유효 구간의 끝** 기준이어야
+    //  코덱이 고역을 잘라낸 경우에도 같은 보호가 걸린다.
+  int firstActive = -1, lastActive = -1;
+  for (size_t i = 0; i < n; ++i) {
+    if (!active[i])
+      continue;
+    if (firstActive < 0)
+      firstActive = (int)i;
+    lastActive = (int)i;
+  }
+  if (firstActive < 0)
+    return delta;
+
+  // 5) 추세로부터의 이탈을 반대 방향으로, 강도를 곱해 클램프.
   for (size_t i = 0; i < n; ++i) {
     if (!active[i])
       continue;  // 0 유지
+    if ((int)i < firstActive + kSmoothHalfWidth ||
+        (int)i > lastActive - kSmoothHalfWidth)
+      continue;  // 가장자리 — 추세를 신뢰할 수 없다
     const float dev = measuredDb[i] - smoothed[i];
     float d = -dev * strength;
     d = std::max(-clampDb, std::min(clampDb, d));

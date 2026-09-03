@@ -3,6 +3,7 @@
 #pragma once
 #include "../core/AIClient.h"
 #include "../core/EQController.h"
+#include "../core/AdaptiveEngine.h"
 #include "../core/EngineHealthMonitor.h"
 #include "../core/MediaMonitor.h"
 #include "SettingsWindow.h"
@@ -363,6 +364,12 @@ private:
   //   채워져 있으면 master 를 그대로 사용 (정밀도 손실 0).
   std::vector<float> m_queuedMaster31;
   std::mutex m_eqUpdateMutex;
+
+  // [곡별 적응 보정] 오디오 탭 분석 결과. m_eqGains31Master(사용자 값)와
+  //   분리 보관하고, 엔진 송신 직전에만 합성한다 — ApplyEQNoSave 참조.
+  AdaptiveEngine     m_adaptive;
+  mutable std::mutex m_adaptiveMutex;
+  std::vector<float> m_adaptiveDelta;
 
   std::atomic<bool> m_aiProcessing{false};
   std::thread m_aiThread;

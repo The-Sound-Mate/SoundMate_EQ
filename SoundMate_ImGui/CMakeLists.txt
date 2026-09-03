@@ -66,6 +66,8 @@ set(APP_SOURCES
     src/core/SpectrumAnalyzer.h
     src/core/AdaptiveCurve.cpp
     src/core/AdaptiveCurve.h
+    src/core/AdaptiveEngine.cpp
+    src/core/AdaptiveEngine.h
     src/core/RecordManager.cpp
     src/core/RecordManager.h
     src/core/GenreManager.cpp
