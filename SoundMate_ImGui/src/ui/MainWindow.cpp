@@ -1023,18 +1023,23 @@ void MainWindow::Render() {
   //   Controller -> APO 경로가 곡 변경 때와 동일한 빈도(곡당 1회)라 안전하다.
   {
     std::vector<float> newDelta;
-    if (m_adaptive.TryTakeDelta(newDelta)) {
+    bool isFirst = false;
+    if (m_adaptive.TryTakeDelta(newDelta, &isFirst)) {
       {
         std::lock_guard<std::mutex> lk(m_adaptiveMutex);
         m_adaptiveDelta = newDelta;
       }
-      float mx = 0.f;
-      for (float v : newDelta)
-        mx = (std::fabs(v) > mx) ? std::fabs(v) : mx;
-      char msg[128];
-      _snprintf_s(msg, sizeof(msg), _TRUNCATE,
-                  u8"곡 분석 완료 — 보정 적용 (최대 %.1f dB)", mx);
-      SetStatus(msg, Theme::TEXT_GRAY);
+      // 상태 메시지는 곡당 첫 적용에만 띄운다. 연속 보정은 5초마다 갱신될 수
+      // 있어서 매번 띄우면 상태바가 계속 깜빡이는 소음이 된다.
+      if (isFirst) {
+        float mx = 0.f;
+        for (float v : newDelta)
+          mx = (std::fabs(v) > mx) ? std::fabs(v) : mx;
+        char msg[128];
+        _snprintf_s(msg, sizeof(msg), _TRUNCATE,
+                    u8"곡 분석 완료 — 보정 적용 (최대 %.1f dB)", mx);
+        SetStatus(msg, Theme::TEXT_GRAY);
+      }
       ApplyEQNoSave();
     }
   }

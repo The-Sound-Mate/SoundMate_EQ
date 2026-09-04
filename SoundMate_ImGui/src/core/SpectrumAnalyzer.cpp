@@ -16,7 +16,8 @@ constexpr double kMaxFreqRatio = 0.45;
 } // namespace
 
 SpectrumAnalyzer::SpectrumAnalyzer()
-    : m_sampleRate(0.0), m_samples(0), m_fastAlpha(0.0) {}
+    : m_sampleRate(0.0), m_samples(0), m_slowSamples(0), m_fastAlpha(0.0),
+      m_slowAlpha(0.0) {}
 
 void SpectrumAnalyzer::Configure(double sampleRate,
                                  const std::vector<int>& freqs) {
@@ -24,14 +25,17 @@ void SpectrumAnalyzer::Configure(double sampleRate,
   m_filters.assign(freqs.size(), Biquad{});
   m_sumSq.assign(freqs.size(), 0.0);
   m_fastSq.assign(freqs.size(), 0.0);
+  m_slowSq.assign(freqs.size(), 0.0);
   m_usable.assign(freqs.size(), false);
   m_samples = 0;
+  m_slowSamples = 0;
 
   if (sampleRate <= 0.0)
     return;
 
   // 지수 감쇠 계수: 한 샘플 지날 때 남는 비율.
   m_fastAlpha = std::exp(-1.0 / ((kFastTauMs / 1000.0) * sampleRate));
+  m_slowAlpha = std::exp(-1.0 / (kSlowTauSec * sampleRate));
 
   for (size_t i = 0; i < freqs.size(); ++i) {
     const double f0 = (double)freqs[i];
@@ -63,9 +67,22 @@ void SpectrumAnalyzer::Reset() {
     f.Reset();
   for (auto& s : m_sumSq)
     s = 0.0;
+  for (auto& s : m_slowSq)
+    s = 0.0;
   m_samples = 0;
+  // 느린 EMA 는 곡이 바뀌면 반드시 비워야 한다 — 25초 시상수라 안 비우면
+  // 이전 곡의 스펙트럼이 한참 섞인다. 워밍업 카운터도 같이 초기화.
+  m_slowSamples = 0;
   // m_fastSq 는 일부러 비우지 않는다 — 시각화는 곡 경계에서도 끊기지 않아야
   // 자연스럽다. 어차피 120ms 시상수라 곧 새 곡 값으로 수렴한다.
+}
+
+bool SpectrumAnalyzer::SlowReady() const {
+  if (m_sampleRate <= 0.0)
+    return false;
+  // 시상수 1배를 채우면 최종값의 63% 까지 올라온다. 여기서는 안전하게
+  // 1.5배를 요구한다 (약 78%).
+  return (double)m_slowSamples >= kSlowTauSec * 1.5 * m_sampleRate;
 }
 
 void SpectrumAnalyzer::Process(const float* mono, size_t count,
@@ -74,7 +91,8 @@ void SpectrumAnalyzer::Process(const float* mono, size_t count,
     return;
 
   const size_t n = m_filters.size();
-  const double a = m_fastAlpha;
+  const double af = m_fastAlpha;
+  const double as = m_slowAlpha;
   for (size_t k = 0; k < count; ++k) {
     const double x = (double)mono[k];
     for (size_t i = 0; i < n; ++i) {
@@ -82,13 +100,33 @@ void SpectrumAnalyzer::Process(const float* mono, size_t count,
         continue;
       const double y = m_filters[i].Process(x);
       const double p = y * y;
-      m_fastSq[i] = m_fastSq[i] * a + p * (1.0 - a);
-      if (accumulate)
+      m_fastSq[i] = m_fastSq[i] * af + p * (1.0 - af);
+      if (accumulate) {
         m_sumSq[i] += p;
+        m_slowSq[i] = m_slowSq[i] * as + p * (1.0 - as);
+      }
     }
   }
-  if (accumulate)
+  if (accumulate) {
     m_samples += count;
+    m_slowSamples += count;
+  }
+}
+
+std::vector<float> SpectrumAnalyzer::SlowLevelsDb() const {
+  std::vector<float> out;
+  if (m_slowSq.empty() || m_slowSamples == 0)
+    return out;
+  out.resize(m_slowSq.size());
+  for (size_t i = 0; i < m_slowSq.size(); ++i) {
+    if (!m_usable[i]) {
+      out[i] = -200.0f;
+      continue;
+    }
+    const double rms = std::sqrt(m_slowSq[i]);
+    out[i] = (rms > 1e-12) ? (float)(20.0 * std::log10(rms)) : -200.0f;
+  }
+  return out;
 }
 
 std::vector<float> SpectrumAnalyzer::FastLevelsDb() const {

@@ -136,7 +136,23 @@ bool EQController::ApplyEQ(const std::vector<float> &gains,
 
   float q = CalculateQ((int)freqs.size());
 
-  float preamp = 0.0f;
+  // [헤드룸] 고정 -1 dB.
+  //
+  // 실측 근거 (Charlie Puth, 60Hz +7dB 커브, 재생 피크 -6.5 dBFS):
+  //   preamp  0 dB -> 리미터 개입 3.3%
+  //   preamp -1 dB -> 0.0%
+  // 같은 커브를 -1 dBFS 짜리 합성 신호로 재면 0dB 에서 100% 가 나온다. 즉
+  // 개입률은 재생 볼륨에 좌우되므로 어떤 고정값도 완벽할 수 없다. -1 dB 는
+  // "지금 필요해서"가 아니라 볼륨을 키우는 사용자에게 주는 마진이다.
+  //
+  // 그리고 리미터가 대신할 수 없는 일을 한다: 우리 리미터는 **샘플 피크**
+  // 브릭월이라 샘플 사이에서 생기는 인터샘플 피크(True Peak)를 원리적으로
+  // 잡지 못한다. 손실 압축(AAC/Opus) 디코딩 결과는 0 dBFS 를 +0.5~1 dB 넘는
+  // 인터샘플 피크를 흔히 만든다 — 스트리밍 마스터링 가이드가 -1 dBTP 헤드룸을
+  // 권하는 이유다. 이 1 dB 가 그 몫이다.
+  //
+  // 청감 비용은 사실상 0 (1 dB 는 A/B 비교 없이는 구분되지 않는다).
+  float preamp = -1.0f;
 
   std::ostringstream oss;
   oss << "Preamp: " << std::fixed << std::setprecision(1) << preamp << " dB\n";

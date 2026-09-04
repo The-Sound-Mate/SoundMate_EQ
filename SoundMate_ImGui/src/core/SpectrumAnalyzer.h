@@ -31,6 +31,10 @@ public:
   // 누적 에너지와 필터 상태를 모두 비운다 (곡이 바뀔 때).
   void Reset();
 
+  // 느린 EMA 가 시상수만큼 채워졌는가. 채워지기 전 값은 0 쪽으로 편향돼
+  // 있으므로 연속 보정에 쓰면 안 된다.
+  bool SlowReady() const;
+
   // 모노 샘플을 흘려 넣는다. 여러 번 나눠 호출해도 된다.
   //
   // accumulate=false 면 필터는 계속 돌리되 LTAS 누적만 건너뛴다.
@@ -49,8 +53,17 @@ public:
   // 않으므로, 약 kFastTauMs 시상수의 지수 감쇠 평균을 따로 유지한다.
   std::vector<float> FastLevelsDb() const;
 
+  // 연속 보정용 장기 레벨(dBFS). 고정 창(BandLevelsDb)은 한 번 채우면 더
+  // 움직이지 않으므로, 곡이 진행되며 편성이 바뀌는 것을 따라가려면 감쇠하는
+  // 평균이 필요하다. kSlowTauSec 시상수의 지수 이동평균.
+  std::vector<float> SlowLevelsDb() const;
+
   // 빠른 레벨의 시상수 (ms). 소리에 반응하되 프레임마다 튀지 않는 값.
   static constexpr double kFastTauMs = 120.0;
+
+  // 느린 레벨의 시상수 (초). 곡 안의 편성 변화는 따라가되 킥드럼 한 방에는
+  // 꿈쩍하지 않는 값. 이보다 짧아지면 음색 펌핑 영역에 들어간다.
+  static constexpr double kSlowTauSec = 25.0;
 
   // 나이퀴스트에 너무 가까워 측정에서 제외된 밴드는 false.
   const std::vector<bool>& BandUsable() const { return m_usable; }
@@ -72,9 +85,12 @@ private:
 
   double              m_sampleRate;
   std::vector<Biquad> m_filters;
-  std::vector<double> m_sumSq;    // 대역별 제곱합 누적 (LTAS)
-  std::vector<double> m_fastSq;   // 대역별 지수 감쇠 평균 (시각화)
+  std::vector<double> m_sumSq;    // 대역별 제곱합 누적 (고정 창 LTAS)
+  std::vector<double> m_fastSq;   // 대역별 지수 감쇠 평균 (시각화, 120ms)
+  std::vector<double> m_slowSq;   // 대역별 지수 이동평균 (연속 보정, 25s)
   std::vector<bool>   m_usable;
   size_t              m_samples;
-  double              m_fastAlpha;  // 샘플당 감쇠 계수
+  size_t              m_slowSamples;  // 느린 EMA 가 받은 총 샘플 수 (워밍업 판정)
+  double              m_fastAlpha;    // 샘플당 감쇠 계수 (빠름)
+  double              m_slowAlpha;    // 샘플당 감쇠 계수 (느림)
 };

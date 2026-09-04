@@ -8,6 +8,8 @@
 
 #include <windows.h>
 
+#include <cmath>
+
 namespace {
 // 워커 주기. 링버퍼가 48kHz 기준 약 1.37초를 담으므로 50ms 는 27배 여유.
 constexpr int kPollMs = 50;
@@ -37,6 +39,9 @@ void AdaptiveEngine::OnSongChanged() {
     std::lock_guard<std::mutex> lk(m_mutex);
     m_delta.clear();
     m_lastLevels.clear();
+    // 새 곡의 첫 델타는 Deadband 없이 무조건 적용돼야 한다. 기준점을 비운다.
+    m_lastApplied.clear();
+    m_deltaIsFirst = true;
   }
   m_restart.store(true);
 }
@@ -47,14 +52,20 @@ void AdaptiveEngine::SetEnabled(bool enabled) {
     m_state.store(State::Idle);
 }
 
-bool AdaptiveEngine::TryTakeDelta(std::vector<float>& out) {
+bool AdaptiveEngine::TryTakeDelta(std::vector<float>& out, bool* outIsFirst) {
   if (m_state.load() != State::Ready)
     return false;
   std::lock_guard<std::mutex> lk(m_mutex);
   if (m_delta.empty())
     return false;
   out = m_delta;
-  m_state.store(State::Taken);
+  if (outIsFirst)
+    *outIsFirst = m_deltaIsFirst;
+  // Deadband 의 기준점은 "마지막으로 **적용된** 값" 이어야 한다. 여기서
+  // 갱신하는 이유가 그것이다 — 계산할 때가 아니라 수거될 때 기록한다.
+  m_lastApplied = m_delta;
+  m_delta.clear();
+  m_state.store(State::Tracking);
   return true;
 }
 
@@ -80,16 +91,33 @@ void AdaptiveEngine::WorkerLoop() {
   std::vector<float> buf(kReadChunk);
 
   double   configuredRate = 0.0;
-  uint64_t skipped = 0;      // 버린 샘플 수
-  uint64_t integrated = 0;   // 적분한 샘플 수
+  uint64_t skipped = 0;       // 버린 샘플 수
+  uint64_t integrated = 0;    // 최초 창에 적분한 샘플 수
+  uint64_t sinceRefresh = 0;  // 마지막 재산출 이후 샘플 수
   bool     collecting = false;
+  bool     firstDone = false; // 최초 델타를 냈는가
 
   auto resetRun = [&]() {
     analyzer.Reset();
     skipped = 0;
     integrated = 0;
+    sinceRefresh = 0;
     collecting = true;
+    firstDone = false;
     tap.SkipToLatest();  // 이전 곡의 잔여 오디오를 버린다
+  };
+
+  // 두 델타의 최대 차이 (dB). Deadband 판정용.
+  auto maxDiff = [](const std::vector<float>& a, const std::vector<float>& b) {
+    if (a.size() != b.size())
+      return 1e9f;  // 크기가 다르면 무조건 적용
+    float m = 0.f;
+    for (size_t i = 0; i < a.size(); ++i) {
+      const float d = std::fabs(a[i] - b[i]);
+      if (d > m)
+        m = d;
+    }
+    return m;
   };
 
   while (m_running.load()) {
@@ -157,18 +185,22 @@ void AdaptiveEngine::WorkerLoop() {
       m_state.store(State::Skipping);
     }
 
-    if (collecting && pos < n && integrated < intTarget) {
-      const uint64_t room = intTarget - integrated;
-      size_t take = n - pos;
-      if ((uint64_t)take > room)
-        take = (size_t)room;
+    if (collecting && pos < n) {
+      // 스킵 구간을 지난 뒤부터는 계속 누적한다. 최초 창(intTarget)이 채워진
+      // 뒤에도 멈추지 않는 이유는 느린 EMA(연속 보정용)가 계속 갱신돼야 하기
+      // 때문이다. integrated 는 최초 델타 시점을 정하는 데만 쓰이므로 상한에서
+      // 멈춘다.
+      const size_t take = n - pos;
       analyzer.Process(buf.data() + pos, take, /*accumulate=*/true);
-      integrated += take;
-      pos += take;
-      m_state.store(State::Integrating);
+      if (integrated < intTarget) {
+        integrated += take;
+        m_state.store(State::Integrating);
+      }
+      sinceRefresh += take;
+      pos = n;
     }
 
-    // 남은 구간(적분 완료 후 / 측정 중이 아닐 때)도 필터는 통과시킨다.
+    // 측정 중이 아닐 때도 필터는 통과시킨다(상태 연속성 + 시각화).
     if (pos < n)
       analyzer.Process(buf.data() + pos, n - pos, /*accumulate=*/false);
 
@@ -177,18 +209,55 @@ void AdaptiveEngine::WorkerLoop() {
       m_liveLevels = analyzer.FastLevelsDb();
     }
 
-    if (collecting && integrated >= intTarget) {
+    if (!collecting)
+      continue;
+
+    // ── 최초 델타: 고정 창(10~30초) 적분값으로 산출 ──────────────────────
+    if (!firstDone && integrated >= intTarget) {
       const std::vector<float> levels = analyzer.BandLevelsDb();
-      const std::vector<float> delta =
-          AdaptiveCurve::ComputeDelta(levels, analyzer.BandUsable(), AIClient::F31);
+      const std::vector<float> delta = AdaptiveCurve::ComputeDelta(
+          levels, analyzer.BandUsable(), AIClient::F31);
       {
         std::lock_guard<std::mutex> lk(m_mutex);
         m_lastLevels = levels;
         m_delta = delta;
+        m_deltaIsFirst = true;
       }
-      collecting = false;
+      firstDone = true;
+      sinceRefresh = 0;
       m_state.store(State::Ready);
+      continue;
     }
+
+    // ── 연속 보정: kRefreshSeconds 마다 느린 EMA 로 재산출 ────────────────
+    if (!firstDone)
+      continue;
+
+    const uint64_t refreshTarget = (uint64_t)(kRefreshSeconds * configuredRate);
+    if (sinceRefresh < refreshTarget || !analyzer.SlowReady())
+      continue;
+    sinceRefresh = 0;
+
+    const std::vector<float> levels = analyzer.SlowLevelsDb();
+    if (levels.empty())
+      continue;
+    const std::vector<float> delta = AdaptiveCurve::ComputeDelta(
+        levels, analyzer.BandUsable(), AIClient::F31);
+
+    {
+      std::lock_guard<std::mutex> lk(m_mutex);
+      m_lastLevels = levels;
+
+      // Deadband — 마지막으로 **적용된** 값과 비교한다. 직전 계산값과 비교하면
+      // 느린 드리프트가 영원히 반영되지 않는다.
+      if (!m_lastApplied.empty() &&
+          maxDiff(delta, m_lastApplied) < kDeadbandDb) {
+        continue;  // 변화가 미미 — 파일 쓰기도 RT 계수 재계산도 하지 않는다
+      }
+      m_delta = delta;
+      m_deltaIsFirst = false;
+    }
+    m_state.store(State::Ready);
   }
 
   if (tap.IsOpen())

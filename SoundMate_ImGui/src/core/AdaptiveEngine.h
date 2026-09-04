@@ -25,16 +25,28 @@ class AdaptiveEngine {
 public:
   // 인트로 회피용으로 버리는 구간 (초, 재생된 오디오 기준)
   static constexpr double kSkipSeconds = 10.0;
-  // 적분 구간 (초). 10~30초 구간을 보게 된다.
+  // 최초 델타를 위한 고정 적분 구간 (초). 10~30초 구간을 보게 된다.
   static constexpr double kIntegrateSeconds = 20.0;
+
+  // [연속 보정] 최초 델타 이후 재산출 주기 (초).
+  //   곡 변경 시 SmoothTransition 이 2초 동안 200ms 간격(=5Hz)으로 갱신을
+  //   밀어넣고 있고 그게 프로덕션에서 문제없이 돌고 있다. 0.2Hz 는 그보다
+  //   25배 느리므로 APO 를 건드리지 않고도 안전하다.
+  static constexpr double kRefreshSeconds = 5.0;
+
+  // [Deadband] 이만큼 안 바뀌면 적용하지 않는다 (dB).
+  //   비교 대상은 반드시 **마지막으로 적용한** 델타다. 직전 계산값과
+  //   비교하면 매 스텝 0.2dB 씩 움직이는 느린 드리프트가 누적 3dB 가 되어도
+  //   영원히 반영되지 않는다.
+  static constexpr float kDeadbandDb = 0.25f;
 
   enum class State {
     Idle,         // 곡 없음 / 분석 대기 아님
     NoTap,        // 오디오 탭을 못 엶 (구버전 APO 이거나 재생 중이 아님)
     Skipping,     // 인트로 구간 버리는 중
-    Integrating,  // 적분 중
-    Ready,        // 델타 산출 완료 (아직 수거 안 됨)
-    Taken         // 수거 완료
+    Integrating,  // 최초 적분 중
+    Ready,        // 새 델타 준비됨 (아직 수거 안 됨)
+    Tracking      // 최초 델타 적용 후 연속 추적 중
   };
 
   AdaptiveEngine();
@@ -54,8 +66,10 @@ public:
   void SetEnabled(bool enabled);
   bool IsEnabled() const { return m_enabled.load(); }
 
-  // 델타가 준비됐으면 true 를 반환하고 out 을 채운다. 한 번만 성공한다.
-  bool TryTakeDelta(std::vector<float>& out);
+  // 새 델타가 준비됐으면 true 를 반환하고 out 을 채운다.
+  // 연속 보정 중에는 Deadband 를 넘는 변화가 생길 때마다 다시 true 가 된다.
+  // outIsFirst: 이 곡에서 처음 적용되는 델타인가 (상태 표시 억제용).
+  bool TryTakeDelta(std::vector<float>& out, bool* outIsFirst = nullptr);
 
   State GetState() const { return m_state.load(); }
 
@@ -76,9 +90,11 @@ private:
   std::atomic<State> m_state{State::Idle};
 
   mutable std::mutex m_mutex;
-  std::vector<float> m_delta;
+  std::vector<float> m_delta;        // 수거 대기 중인 델타
+  std::vector<float> m_lastApplied;  // 마지막으로 수거된 델타 (Deadband 기준)
   std::vector<float> m_lastLevels;
   std::vector<float> m_liveLevels;
+  bool               m_deltaIsFirst = false;  // 이 곡의 첫 델타인가
   // 마지막으로 오디오가 들어온 시각(GetTickCount). 오래되면 시각화를 끈다.
   std::atomic<uint32_t> m_lastAudioTick{0};
 };
