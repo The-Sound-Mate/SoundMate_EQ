@@ -1,9 +1,9 @@
 // src/core/GenreManager.cpp
 #include "GenreManager.h"
+#include "RecordManager.h"
 #include <algorithm>
 #include <chrono>
 #include <ctime>
-#include <curl/curl.h>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
@@ -15,11 +15,6 @@
 
 using json = nlohmann::json;
 GenreManager g_genreManager;
-
-static size_t WCB(char *p, size_t s, size_t n, std::string *d) {
-  d->append(p, s * n);
-  return s * n;
-}
 
 // ── [PR-2D] 정규화 로그 ────────────────────────────────────────────────────
 // 위치: C:\Program Files\SoundMate Equalizer\record\normalize_log.jsonl
@@ -56,146 +51,6 @@ void AppendNormalizeLog(const json &record) {
   }
 }
 } // namespace
-
-std::string GenreManager::SanitizeQuery(const std::string &text) {
-  if (text.empty() || text == "unknown")
-    return "";
-  std::string out;
-  for (char c : text) {
-    bool ok = isalnum((unsigned char)c) || c == ' ' ||
-              (unsigned char)c > 127; // 한글 등 멀티바이트
-    if (ok)
-      out += c;
-    else
-      out += ' ';
-  }
-  // 노이즈 단어 제거
-  static const std::vector<std::string> noise = {
-      "lyrics",       "kpop",     "k-pop",    "official",    "audio",
-      "video",        "live",     "mv",       "music video", "가사",
-      "영어",         "한글",     "발음",     "해석",        "자막",
-      "번역",         "팝송모음", "팝송대회", "빌보드차트",  "명곡",
-      "띵곡",         "모음",     "교차편집", "무대",        "playlist",
-      "플레이리스트", "플리",     "추천",     "공식",        "뮤비",
-      "세로라이브",   "딩고",     "dingo",    "1시간",       "1 hour"};
-  for (auto &nw : noise) {
-    std::string lo = out;
-    std::transform(lo.begin(), lo.end(), lo.begin(), ::tolower);
-    auto pos = lo.find(nw);
-    while (pos != std::string::npos) {
-      out.erase(pos, nw.size());
-      lo.erase(pos, nw.size());
-      pos = lo.find(nw);
-    }
-  }
-  // 중복 공백 정리
-  std::string r;
-  bool sp = false;
-  for (char c : out) {
-    if (c == ' ') {
-      if (!sp)
-        r += ' ';
-      sp = true;
-    } else {
-      r += c;
-      sp = false;
-    }
-  }
-  while (!r.empty() && r.back() == ' ')
-    r.pop_back();
-  return r;
-}
-
-MusicInfo GenreManager::CallITunesAPI(const std::string &title,
-                                      const std::string &artist) {
-  // [PR-2D] 정규화 로그용 record. 끝에서 1회 append.
-  nlohmann::json logRec = {
-      {"ts", IsoNow()},
-      {"sanitize_v", kSanitizeVersion},
-      {"input", {{"title", title}, {"artist", artist}}},
-  };
-  auto t0 = std::chrono::steady_clock::now();
-  auto finish = [&](const MusicInfo &info, const char *reason,
-                    int httpCode = 0) -> MusicInfo {
-    auto t1 = std::chrono::steady_clock::now();
-    logRec["elapsed_ms"] =
-        (int)std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0)
-            .count();
-    logRec["matched"] = info.valid;
-    logRec["reason"] = reason;
-    if (httpCode)
-      logRec["http"] = httpCode;
-    if (info.valid) {
-      logRec["itunes"] = {
-          {"title", info.title},
-          {"artist", info.artist},
-          {"genre", info.genre},
-      };
-    }
-    AppendNormalizeLog(logRec);
-    return info;
-  };
-
-  std::string sanTitle = SanitizeQuery(title);
-  std::string sanArtist = artist.empty() ? "" : SanitizeQuery(artist);
-  std::string q = sanTitle;
-  if (!sanArtist.empty())
-    q += " " + sanArtist;
-  logRec["sanitized"] = {
-      {"title", sanTitle}, {"artist", sanArtist}, {"query", q}};
-
-  if (q.size() < 2)
-    return finish({}, "query_too_short");
-
-  // URL 인코딩
-  CURL *curl = curl_easy_init();
-  if (!curl)
-    return finish({}, "curl_init_failed");
-  char *enc = curl_easy_escape(curl, q.c_str(), (int)q.size());
-  std::string url = "https://itunes.apple.com/search?term=" + std::string(enc) +
-                    "&country=US&entity=musicTrack&limit=1";
-  curl_free(enc);
-
-  std::string resp;
-  curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-  curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WCB);
-  curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resp);
-  curl_easy_setopt(curl, CURLOPT_TIMEOUT, 5L);
-  curl_easy_setopt(curl, CURLOPT_USERAGENT,
-                   "Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
-  CURLcode res = curl_easy_perform(curl);
-  long httpCode = 0;
-  curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpCode);
-  curl_easy_cleanup(curl);
-  if (res != CURLE_OK)
-    return finish({}, "curl_error", (int)httpCode);
-
-  try {
-    auto data = json::parse(resp);
-    auto results = data.value("results", json::array());
-    if (results.empty())
-      return finish({}, "no_results", (int)httpCode);
-    auto &track = results[0];
-    std::string resArtist = track.value("artistName", "");
-    std::string raLower = resArtist;
-    std::transform(raLower.begin(), raLower.end(), raLower.begin(), ::tolower);
-    static const std::vector<std::string> blacklist = {"lyrics", "karaoke",
-                                                       "instrumental", "cover"};
-    for (auto &b : blacklist)
-      if (raLower.find(b) != std::string::npos)
-        return finish({}, "blacklisted_artist", (int)httpCode);
-    MusicInfo info;
-    info.genre = track.value("primaryGenreName", "");
-    info.artist = track.value("artistName", "");
-    info.title = track.value("trackName", "");
-    info.imageUrl = track.value("artworkUrl100", "");
-    info.trackId = track.value("trackId", (int64_t)0); // [4-A] 글로벌 SoT
-    info.valid = true;
-    return finish(info, "ok", (int)httpCode);
-  } catch (...) {
-    return finish({}, "json_parse_error", (int)httpCode);
-  }
-}
 
 // ── [4-C] iTunes 결과 디스크 캐시 ────────────────────────────────────────
 // 위치: %LOCALAPPDATA%\SoundMateEqualizer\record\itunes_cache.json
@@ -304,31 +159,85 @@ void StoreCache(const std::string &key, const MusicInfo &info) {
 }
 } // namespace
 
+// ── [v0.1.0] 곡 해석은 서버(resolve-track) 전담 ─────────────────────────
+// 클라이언트가 iTunes 를 직접 부르지 않게 된 이유:
+//   1) 정규화 규칙과 커브 산출식이 바이너리에 남지 않는다.
+//   2) 100명이 같은 곡을 들어도 iTunes 호출은 서버에서 1번 — rate limit 소멸.
+//   3) 규칙을 고칠 때 클라이언트 재배포가 필요 없다.
+// 서버는 우리 DB 를 먼저 보고, 없을 때만 iTunes 를 부른다.
+MusicInfo GenreManager::ResolveViaServer(const std::string &title,
+                                         const std::string &artist,
+                                         const std::string &tendency) {
+  MusicInfo out;
+  try {
+    json req = {
+        {"rawTitle", title}, {"rawArtist", artist}, {"tendency", tendency}};
+    long http = 0;
+    std::string resp =
+        g_recordManager.CallEdgeFunction("resolve-track", req.dump(), &http);
+    if (http != 200 || resp.empty()) {
+      out.serverFailed = true;
+      return out;
+    }
+    auto j = json::parse(resp);
+
+    // 장르를 못 얻어도 설문 기반 커브는 온다. EQ 가 아예 안 걸리는 상황을
+    // 만들지 않는 것이 로컬 전환의 목표였다.
+    if (j.contains("curve31") && j["curve31"].is_array())
+      out.curve31 = j["curve31"].get<std::vector<float>>();
+
+    const std::string src = j.value("source", "");
+    out.transient = (src == "transient_error");
+    if (src == "itunes") {
+      out.genre = j.value("genre", "");
+      out.title = j.value("canonicalTitle", "");
+      out.artist = j.value("canonicalArtist", "");
+      out.trackId = j.value("itunesTrackId", (int64_t)0);
+      out.valid = !out.title.empty();
+    }
+
+    AppendNormalizeLog({{"ts", IsoNow()},
+                        {"rawTitle", title},
+                        {"rawArtist", artist},
+                        {"normKey", j.value("normKey", "")},
+                        {"source", src},
+                        {"serverCached", j.value("cached", false)},
+                        {"genre", out.genre},
+                        {"curveVersion", j.value("curveVersion", 0)}});
+  } catch (...) {
+    out.serverFailed = true;
+  }
+  return out;
+}
+
 MusicInfo GenreManager::GetMusicInfo(const std::string &title,
-                                     const std::string &artist) {
+                                     const std::string &artist,
+                                     const std::string &tendency) {
   if (title.empty() || title == "unknown")
     return {};
 
-  // [4-C] 캐시 hit → API 호출 우회
-  std::string key = MakeCacheKey(title, artist);
-  MusicInfo cached;
-  bool isNegative = false;
-  if (LookupCache(key, cached, isNegative)) {
-    return cached; // valid → 정상 info, invalid → {} (negative cache)
+  const std::string key = MakeCacheKey(title, artist);
+  MusicInfo info = ResolveViaServer(title, artist, tendency);
+
+  if (!info.serverFailed) {
+    // [중요] 일시 오류(429/5xx)는 캐시에 남기지 않는다. 남기면 해석 가능한
+    //   곡이 TTL 동안 미해석으로 굳는다 — 서버 쪽 정책과 동일한 이유다.
+    if (!info.transient)
+      StoreCache(key, info);
+    return info;
   }
 
-  // 캐시 miss → API 호출
-  auto info = CallITunesAPI(title, artist);
-  if (!info.valid && !artist.empty())
-    info = CallITunesAPI(title, "");
-
-  // 결과 캐시 (성공/실패 모두 — 실패는 짧은 TTL 로 자동 만료)
-  StoreCache(key, info);
-  return info;
+  // 서버 도달 실패 → 디스크 캐시 폴백. 커브는 서버가 주지 못했으므로 비운
+  // 채로 돌려주고, 호출부가 LocalCurve 로 산출한다.
+  MusicInfo cached;
+  bool isNegative = false;
+  if (LookupCache(key, cached, isNegative))
+    return cached;
+  return {};
 }
 
 std::string GenreManager::GetGenre(const std::string &title,
                                    const std::string &artist) {
-  auto info = GetMusicInfo(title, artist);
+  auto info = GetMusicInfo(title, artist, "");
   return info.valid ? info.genre : "";
 }

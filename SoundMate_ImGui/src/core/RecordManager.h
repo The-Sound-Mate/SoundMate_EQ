@@ -134,6 +134,12 @@ public:
 
   // ── 사용자 취향 ────────────────────────────────────────────────
   std::string GetUserTendency();
+
+  // [v0.1.0] Supabase Edge Function 호출. 인증 헤더 구성이 SupabaseRequest
+  //   한 곳에 모여 있어 그대로 재사용한다 (private 이라 이 래퍼가 필요).
+  std::string CallEdgeFunction(const std::string &name,
+                               const std::string &body,
+                               long *outHttpCode = nullptr);
   void SaveUserTendency(const std::string &tendency,
                         const nlohmann::json &prefsDict = {});
 

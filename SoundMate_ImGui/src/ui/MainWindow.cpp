@@ -634,8 +634,13 @@ void MainWindow::TriggerAIGeneration() {
 
     if (useLocalCurve) {
       SetStatus(u8"로컬 분석 중...", Theme::TEXT_WHITE);
-      std::vector<float> local31 =
-          LocalCurve::Generate(m_currentGenre, userPref);
+      // [v0.1.0] 커브는 서버가 산출한 것을 우선 사용한다 (산출식이 바이너리에
+      //   남지 않음 + 규칙 수정 시 클라이언트 재배포 불필요).
+      //   서버에 도달하지 못했을 때만 LocalCurve 로 폴백한다 — 같은 알고리즘
+      //   이므로 결과는 동일하고, 우리 함수가 죽어도 EQ 는 계속 걸린다.
+      std::vector<float> local31 = m_serverCurve31;
+      if (local31.size() != AIClient::F31.size())
+        local31 = LocalCurve::Generate(m_currentGenre, userPref);
       // 5/10/15 밴드는 기존 큐빅 스플라인 보간을 그대로 재사용 (RecordManager
       // 저장 포맷 동일). bands31 은 보간 왕복 없이 원본을 유지.
       result = m_ai->UpsampleToAllBands(local31, AIClient::F31);
@@ -1208,9 +1213,12 @@ void MainWindow::Render() {
           return; // 익명 모드는 여기서 종료
         }
 
-        // iTunes API 호출 (디스크 캐시 통해 — 같은 곡 재생 시 무료)
-        MusicInfo info = g_genreManager.GetMusicInfo(title, artist);
+        // [v0.1.0] 곡 해석 = 서버(resolve-track). 우리 DB 를 먼저 보고,
+        //   없을 때만 서버가 iTunes 를 부른다. 커브도 함께 받아 온다.
+        MusicInfo info = g_genreManager.GetMusicInfo(
+            title, artist, g_recordManager.GetUserTendency());
         m_currentGenre = info.valid ? info.genre : "";
+        m_serverCurve31 = info.curve31;
 
         // [4-A] DB key 는 canonical title/artist 사용.
         // YouTube/Spotify/Apple Music 어디서 듣든 같은 곡 → 같은 row 매칭.

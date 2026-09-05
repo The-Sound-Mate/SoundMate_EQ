@@ -1408,6 +1408,16 @@ bool RecordManager::ClearPromptEQ(const std::string &title,
 }
 
 // ── Supabase REST 요청 ──────────────────────────────────────────────────────
+// [v0.1.0] Edge Function 호출 래퍼.
+// 타임아웃 10초 — 곡 변경 스레드에서 호출되므로 오래 물고 있으면 다음 곡의
+// 해석이 밀린다. 실패하면 호출부가 디스크 캐시로 폴백한다.
+std::string RecordManager::CallEdgeFunction(const std::string &name,
+                                            const std::string &body,
+                                            long *outHttpCode) {
+  return SupabaseRequest("POST", "/functions/v1/" + name, body,
+                         GetAccessToken(), outHttpCode, 10);
+}
+
 std::string RecordManager::SupabaseRequest(const std::string &method,
                                            const std::string &endpoint,
                                            const std::string &body,

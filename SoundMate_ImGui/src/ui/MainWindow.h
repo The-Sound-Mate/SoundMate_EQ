@@ -151,6 +151,10 @@ private:
   std::string m_rawTitle;          // UI 표시용 원본 제목
   std::string m_rawArtist;         // UI 표시용 원본 아티스트
   std::string m_currentGenre;
+  // [v0.1.0] 서버(resolve-track)가 준 31밴드 커브. 비어 있으면 LocalCurve 폴백.
+  //   m_currentGenre 와 같은 스레드에서 쓰이고(곡 변경 스레드), AI 스레드는
+  //   그 뒤에 생성되므로 happens-before 로 보호된다 — 별도 락 불필요.
+  std::vector<float> m_serverCurve31;
   std::atomic<EqOrigin> m_eqOrigin{EqOrigin::None}; // 현재 EQ 출처
   int         m_currentDuration = 0;       // 총 재생 시간 (초)
   std::string m_displayTitle; // UI에 보이는 원본 제목 (마키용)

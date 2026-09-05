@@ -69,3 +69,6 @@ test_env/
 !SoundMate_ImGui/third_party/curl/lib/*.lib
 !SoundMate_ImGui/third_party/curl/bin/*.dll
 
+
+# Supabase CLI 로컬 상태 (프로젝트 링크 정보 — 공유 대상 아님)
+supabase/.temp/
