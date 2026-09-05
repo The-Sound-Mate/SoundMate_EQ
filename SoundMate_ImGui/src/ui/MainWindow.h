@@ -117,7 +117,7 @@ private:
   std::vector<float> m_masterTransitionTarget;
 
   // [수동 초기화 복원용] 곡별 "원본 분석 EQ" 인-메모리 스냅샷.
-  //   AI/Prompt/Cache/GlobalAverage 적용 순간의 master31 을 백업.
+  //   AI/Prompt/Cache 적용 순간의 master31 을 백업.
   //   수동 슬라이더 조작은 origin=Manual 이라 스냅샷에 영향 X.
   //   곡이 바뀌면 클리어 — 다음 자동 적용 시 새로 갱신.
   std::vector<float> m_aiOriginalGains31;
@@ -140,7 +140,6 @@ private:
     Prompt,        // 사용자 프롬프트 기반 AI
     Preset,        // 사용자 프리셋
     Cache,         // 로컬 캐시 (이전 AI 결과)
-    GlobalAverage, // 장르 평균
     Manual,        // 수동 슬라이더 조작
     Flat,          // 평탄(0dB) 리셋
   };

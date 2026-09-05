@@ -32,25 +32,18 @@ AppSettings LoadSettings() {
 
     // [PR-2C] eq_mode 우선 사용. 없으면 기존 두 bool로 마이그레이션.
     if (j.contains("eq_mode") && j["eq_mode"].is_number_integer()) {
-      int m = j["eq_mode"].get<int>();
-      if (m < 0 || m > 2)
-        m = (int)EqMode::AiAuto;
-      s.eqMode = (EqMode)m;
+      const int m = j["eq_mode"].get<int>();
+      // [v0.1.0] 1 = 옛 GlobalAverage. 그 모드는 장르 평균이 영원히 비어 있어
+      //   실제로는 아무 EQ 도 걸리지 않았다 -> 자동 EQ 의도로 보고 AiAuto 로.
+      s.eqMode = (m == (int)EqMode::Off) ? EqMode::Off : EqMode::AiAuto;
     } else {
-      bool oldAuto = j.value("auto_analyze", true);
-      bool oldGlobal = j.value("global_average", false);
-      if (oldAuto)
-        s.eqMode = EqMode::AiAuto;
-      else if (oldGlobal)
-        s.eqMode = EqMode::GlobalAverage;
-      else
-        s.eqMode = EqMode::Off;
+      // 옛 두 bool 에서 마이그레이션. global_average 만 켜져 있던 사용자도
+      // "자동 EQ 를 원한다"는 의도이므로 AiAuto 로 올린다.
+      const bool oldAuto = j.value("auto_analyze", true);
+      const bool oldGlobal = j.value("global_average", false);
+      s.eqMode = (oldAuto || oldGlobal) ? EqMode::AiAuto : EqMode::Off;
     }
-    // 마이그레이션용 옛 필드도 동기화 (다른 곳에서 참조하는 코드가 남아있을 수
-    // 있음)
     s.autoAnalyze = (s.eqMode == EqMode::AiAuto);
-    s.globalAverage =
-        (s.eqMode == EqMode::AiAuto || s.eqMode == EqMode::GlobalAverage);
   } catch (...) {
   }
   return s;
@@ -61,7 +54,7 @@ void SaveSettings(const AppSettings &s) {
   std::filesystem::create_directories(
       std::filesystem::path(path).parent_path());
   try {
-    // [PR-2C] eq_mode 가 SoT. 옛 두 bool은 외부 호환을 위해 같이 기록.
+    // [PR-2C] eq_mode 가 SoT. auto_analyze 는 외부 호환을 위해 같이 기록.
     json j = {
         {"default_device", s.defaultDevice},
         {"default_bands", s.defaultBands},
@@ -70,8 +63,6 @@ void SaveSettings(const AppSettings &s) {
         {"language", s.language},
         {"eq_mode", (int)s.eqMode},
         {"auto_analyze", s.eqMode == EqMode::AiAuto},
-        {"global_average",
-         s.eqMode == EqMode::AiAuto || s.eqMode == EqMode::GlobalAverage},
     };
     std::ofstream f(path);
     f << j.dump(4);
@@ -348,8 +339,6 @@ void SettingsWindow::Render() {
       if (ImGui::Button(kOptions[i].label, ImVec2(segW, UIScale::Px(28)))) {
         m_settings.eqMode = kOptions[i].mode;
         m_settings.autoAnalyze = (m_settings.eqMode == EqMode::AiAuto);
-        m_settings.globalAverage = (m_settings.eqMode == EqMode::AiAuto ||
-                                    m_settings.eqMode == EqMode::GlobalAverage);
         SaveSettings(m_settings);
         if (m_onChanged)
           m_onChanged(m_settings);

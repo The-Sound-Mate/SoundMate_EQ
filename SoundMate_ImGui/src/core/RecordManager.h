@@ -144,11 +144,6 @@ public:
                         const nlohmann::json &prefsDict = {});
 
   // ── Supabase (REST) ───────────────────────────────────────────
-  std::vector<float> GetGlobalSongAverage(const std::string &title,
-                                          const std::string &artist,
-                                          int bandCount = 5);
-  std::vector<float> GetGlobalGenreAverage(const std::string &genre,
-                                           int bandCount = 5);
   bool CheckUserHistory(const std::string &title, const std::string &artist);
   bool SyncToDB(long timeoutSecs = 15);
   void ProcessBatchSync(bool forceAll = false, long timeoutSecs = 15); // Python의 process_batch_sync()

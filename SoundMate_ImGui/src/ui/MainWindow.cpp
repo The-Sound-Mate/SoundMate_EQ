@@ -748,16 +748,6 @@ void MainWindow::TriggerAIGeneration() {
       //   AI 의도와 어긋난다. master31 을 SSOT 로 두고 매번 보간.
       std::vector<float> targetView =
           m_ai->Map31ToTargetBands(result.bands31, m_currentBands);
-      if (m_settings.globalAverage) {
-        auto baseline = g_recordManager.GetGlobalGenreAverage(
-            m_currentGenre, m_currentBands.size());
-        if (baseline.size() == targetView.size()) {
-          for (size_t i = 0; i < targetView.size(); ++i) {
-            targetView[i] = (targetView[i] + baseline[i]) / 2.0f;
-          }
-        }
-      }
-
       // [v12.0] 스레드 안전하게 EQ 업데이트 예약
       // [Task 3-A] master31 도 같이 전달 — AI 는 항상 31밴드 원본 생성하므로
       //   precision 손실 0. 사용자가 5밴드 모드라도 master 는 31밴드 정밀도 유지.
@@ -1089,14 +1079,13 @@ void MainWindow::Render() {
       m_masterTransitionTarget = m_eqGains31Master; // no-op transition
     }
 
-    // [수동 초기화 복원용] AI/Prompt/GlobalAverage 시점의 master 스냅샷.
+    // [수동 초기화 복원용] AI/Prompt 시점의 master 스냅샷.
     //   Cache origin 은 manual 값이 캐시에서 반환된 경우도 포함하므로 제외 →
     //   재생 시 직전 manual 이 snapshot 으로 잡혀 잘못 복원되는 사고 방지.
     //   Cache 케이스는 수동 초기화의 2순위 (ClearManualEQ 후 캐시 재조회) 가 처리.
     EqOrigin curOrigin = m_eqOrigin.load();
     if (m_masterTransitionTarget.size() == 31 &&
-        (curOrigin == EqOrigin::AI || curOrigin == EqOrigin::Prompt ||
-         curOrigin == EqOrigin::GlobalAverage)) {
+        (curOrigin == EqOrigin::AI || curOrigin == EqOrigin::Prompt)) {
       m_aiOriginalGains31 = m_masterTransitionTarget;
       m_aiOriginalSongKey = m_currentTitle + "|" + m_currentArtist;
     }
@@ -1258,48 +1247,11 @@ void MainWindow::Render() {
           }
 
           if (!targetView.empty()) {
-            // GlobalAverage 또는 AiAuto 모드 + 캐시가 수동/직접이 아닐 때
-            // 블렌딩
-            const bool blend =
-                (mode == EqMode::AiAuto || mode == EqMode::GlobalAverage) &&
-                cached->source != "manual" && cached->source != "direct";
-            if (blend) {
-              auto baseline = g_recordManager.GetGlobalGenreAverage(
-                  m_currentGenre, m_currentBands.size());
-              if (baseline.size() == targetView.size()) {
-                std::vector<float> blended = targetView;
-                for (size_t i = 0; i < blended.size(); ++i)
-                  blended[i] = (blended[i] + baseline[i]) / 2.0f;
-                std::lock_guard<std::mutex> lk(m_eqUpdateMutex);
-                m_queuedGains = blended;
-                // [Task 3-A] blend 시엔 31밴드 baseline 도 함께 blend 가능하면 master 갱신.
-                //   baseline 31밴드 버전이 없으면 master 는 비워두고 pending 측에서 재구성.
-                auto baseline31 = g_recordManager.GetGlobalGenreAverage(
-                    m_currentGenre, 31);
-                if (baseline31.size() == 31 && cached->gains31.size() == 31) {
-                  std::vector<float> blendedMaster = cached->gains31;
-                  for (size_t i = 0; i < 31; ++i)
-                    blendedMaster[i] = (blendedMaster[i] + baseline31[i]) / 2.0f;
-                  m_queuedMaster31 = blendedMaster;
-                } else {
-                  m_queuedMaster31.clear();
-                }
-                m_pendingEQUpdate = true;
-                m_eqOrigin = EqOrigin::Cache;
-              } else {
-                std::lock_guard<std::mutex> lk(m_eqUpdateMutex);
-                m_queuedGains = targetView;
-                m_queuedMaster31 = cached->gains31;
-                m_pendingEQUpdate = true;
-                m_eqOrigin = EqOrigin::Cache;
-              }
-            } else {
-              std::lock_guard<std::mutex> lk(m_eqUpdateMutex);
-              m_queuedGains = targetView;
-              m_queuedMaster31 = cached->gains31;
-              m_pendingEQUpdate = true;
-              m_eqOrigin = EqOrigin::Cache;
-            }
+            std::lock_guard<std::mutex> lk(m_eqUpdateMutex);
+            m_queuedGains = targetView;
+            m_queuedMaster31 = cached->gains31; // [Task 3-A] master 정밀도 보존
+            m_pendingEQUpdate = true;
+            m_eqOrigin = EqOrigin::Cache;
             SetStatus("Local Cache Applied.", Theme::COLOR_GREEN);
           }
         } else {
@@ -1318,16 +1270,6 @@ void MainWindow::Render() {
                 Theme::COLOR_YELLOW);
           } else if (mode == EqMode::AiAuto && m_ai) {
             TriggerAIGeneration();
-          } else if (mode == EqMode::GlobalAverage) {
-            auto baseline = g_recordManager.GetGlobalGenreAverage(
-                m_currentGenre, m_currentBands.size());
-            if (!baseline.empty() && baseline.size() == m_currentBands.size()) {
-              std::lock_guard<std::mutex> lk(m_eqUpdateMutex);
-              m_queuedGains = baseline;
-              m_pendingEQUpdate = true;
-              m_eqOrigin = EqOrigin::GlobalAverage;
-              SetStatus("Global Average Applied.", Theme::COLOR_CYAN);
-            }
           }
         }
       }).detach();
@@ -1866,9 +1808,6 @@ void MainWindow::RenderLeftPanel() {
   case EqOrigin::Cache:
     originStr = "Cache (AI)";
     break;
-  case EqOrigin::GlobalAverage:
-    originStr = "Global Average";
-    break;
   case EqOrigin::Manual:
     originStr = "Manual";
     break;
@@ -2320,7 +2259,7 @@ void MainWindow::RenderBottomBar() {
     bool restored = false;
 
     // [1순위] 인-메모리 "원본 분석 EQ" 스냅샷 — 캐시 miss 무관.
-    //   AI/Prompt/GlobalAverage 적용 시점에 master 가 저장돼 있음.
+    //   AI/Prompt 적용 시점에 master 가 저장돼 있음.
     std::string curKey = m_currentTitle + "|" + m_currentArtist;
     if (m_aiOriginalGains31.size() == 31 &&
         !m_aiOriginalSongKey.empty() && m_aiOriginalSongKey == curKey) {

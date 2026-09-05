@@ -1501,47 +1501,6 @@ void RecordManager::WriteSyncLog(const nlohmann::json &record) {
   } catch (...) {}
 }
 
-std::vector<float>
-RecordManager::GetGlobalSongAverage(const std::string &title,
-                                    const std::string &artist, int bandCount) {
-  if (m_userId.empty())
-    return {};
-  try {
-    std::string hash = GenerateTrackHash(title, artist);
-    std::string col = "average_eq_" + std::to_string(bandCount);
-    std::string ep = "/rest/v1/track_average?select=" + col +
-                     ",track!inner(track_hash)" + "&track.track_hash=eq." +
-                     hash + "&limit=1";
-    auto resp = SupabaseRequest("GET", ep);
-    if (resp.empty())
-      return {};
-    auto arr = json::parse(resp);
-    if (!arr.empty() && arr[0].contains(col) && !arr[0][col].is_null())
-      return arr[0][col].get<std::vector<float>>();
-  } catch (...) {
-  }
-  return {};
-}
-
-std::vector<float>
-RecordManager::GetGlobalGenreAverage(const std::string &genre, int bandCount) {
-  if (genre.empty())
-    return {};
-  try {
-    std::string col = "average_eq_" + std::to_string(bandCount);
-    std::string ep = "/rest/v1/genre_average?select=" + col +
-                     "&genre_name=eq." + genre + "&limit=1";
-    auto resp = SupabaseRequest("GET", ep);
-    if (resp.empty())
-      return {};
-    auto arr = json::parse(resp);
-    if (!arr.empty() && arr[0].contains(col) && !arr[0][col].is_null())
-      return arr[0][col].get<std::vector<float>>();
-  } catch (...) {
-  }
-  return {};
-}
-
 bool RecordManager::CheckUserHistory(const std::string &title,
                                      const std::string &artist) {
   if (m_userId.empty())

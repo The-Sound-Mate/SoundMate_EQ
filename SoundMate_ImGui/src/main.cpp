@@ -378,7 +378,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
           AppSettings s = LoadSettings();
           s.eqMode = EqMode::Off;
           s.autoAnalyze = false;
-          s.globalAverage = false;
           SaveSettings(s);
 
           PostMessageW(g_hWnd, WM_CLOSE, 0, 0);
@@ -458,7 +457,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     AppSettings s = LoadSettings();
     s.eqMode = EqMode::Off;
     s.autoAnalyze = false;
-    s.globalAverage = false;
     SaveSettings(s);
     loggedIn = false;
     loginWin.Open(
@@ -480,7 +478,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     AppSettings s = LoadSettings();
     s.eqMode = EqMode::Off;
     s.autoAnalyze = false;
-    s.globalAverage = false;
     SaveSettings(s);
     loggedIn = false;
 
