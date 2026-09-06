@@ -111,6 +111,8 @@ void MainWindow::Initialize(EQController *eq, AIClient *ai,
   // [v12.0] 엔진의 config.txt에서 현재 값을 읽어와 슬라이더 동기화
   if (m_eqCtrl) {
     m_eqCtrl->Initialize();
+    // [헤드룸 서보] 이전 세션의 서보값이 config.txt 에 남아 있으면 지운다.
+    m_eqCtrl->ResetPreampToDefault();
     std::vector<float> currentGains;
     int detectedCount = 0;
     bool loadedFromConfig = false;

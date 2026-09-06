@@ -143,8 +143,13 @@ void AdaptiveEngine::LogMood(SpectrumAnalyzer& analyzer,
 void AdaptiveEngine::ApplyHeadroomServo(double limPct) {
   if (limPct < 0.0)
     return;  // 이 창에 측정이 없었다
-  if (limPct <= (double)kLimiterTargetPct)
+  if (limPct <= (double)kLimiterTargetPct) {
+    m_limOverStreak = 0;
     return;
+  }
+  if (++m_limOverStreak < kOverWindowsToStep)
+    return;  // 아직 단발 — 다음 창에서 한 번 더 확인한다
+  m_limOverStreak = 0;
   std::lock_guard<std::mutex> lk(m_mutex);
   if (m_preampDb <= kPreampMinDb)
     return;  // 하한 — 더 깎아도 리미터가 안 잡히는 상황이면 리미터에 맡긴다
@@ -172,6 +177,9 @@ void AdaptiveEngine::WorkerLoop() {
 
   auto resetRun = [&]() {
     analyzer.Reset();
+    // 연속 초과 카운터는 워커 전용 상태다. 곡이 바뀌면 여기서 비운다
+    // (OnSongChanged 는 UI 스레드라 거기서 건드리면 레이스가 된다).
+    m_limOverStreak = 0;
     skipped = 0;
     integrated = 0;
     sinceRefresh = 0;

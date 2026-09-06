@@ -233,6 +233,33 @@ bool EQController::EnsureShmMapped() {
   return true;
 }
 
+bool EQController::ResetPreampToDefault() {
+  m_preampDb.store(kDefaultPreampDb);
+
+  const std::string path =
+      "C:\\Program Files\\SoundMate Equalizer\\config.txt";
+  std::ifstream in(path);
+  if (!in.is_open())
+    return false;  // 아직 없으면 다음 ApplyEQ 가 기본값으로 만든다
+
+  std::ostringstream oss;
+  std::string line;
+  bool replaced = false;
+  while (std::getline(in, line)) {
+    if (!replaced && line.rfind("Preamp:", 0) == 0) {
+      oss << "Preamp: " << std::fixed << std::setprecision(1)
+          << kDefaultPreampDb << " dB\n";
+      replaced = true;
+      continue;
+    }
+    oss << line << "\n";
+  }
+  in.close();
+  if (!replaced)
+    return false;  // Preamp 줄이 없다 — 형식이 다르므로 건드리지 않는다
+  return WriteEQFile(path, oss.str());
+}
+
 bool EQController::IsLimiterActive() {
   if (!EnsureShmMapped()) return false;
   auto* settings = static_cast<SoundMateSettings*>(m_shmView);

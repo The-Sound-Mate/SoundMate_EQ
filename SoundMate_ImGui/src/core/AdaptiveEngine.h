@@ -49,7 +49,13 @@ public:
   //
   // 곡 안에서는 **내리기만** 한다(래칫). 올렸다 내렸다 하면 매크로 컴프레서가
   // 되어 클라이맥스의 폭발력을 깎는다. 곡이 바뀌면 시작값으로 되돌린다.
-  static constexpr float kLimiterTargetPct = 5.0f;   // 이 이상이면 한 스텝 인하
+  static constexpr float kLimiterTargetPct = 5.0f;
+  // [단발 트리거 방어] 창 하나로 인하하면 안 된다. 같은 곡 같은 지점의 첫
+  //   창 개입률이 실측에서 17.2% 와 4.4% 로 갈렸다 — 임계 5% 를 사이에 두고
+  //   운으로 결정된다. 래칫이라 한 번 잘못 내리면 곡 끝까지 되돌릴 수 없다.
+  //   연속 2창이면 aespa(91.8/88.1/91.0/91.0)는 5초만 늦어질 뿐이고,
+  //   야생화의 단발 스파이크(6.2% 1회)는 걸러진다.
+  static constexpr int   kOverWindowsToStep = 2;
   static constexpr float kPreampStartDb    = -1.0f;  // 캐시 없을 때 시작값
   static constexpr float kPreampStepDb     = 0.5f;
   static constexpr float kPreampMinDb      = -6.0f;  // 폭주 방지 하한
@@ -116,6 +122,7 @@ private:
   // 헤드룸 서보 상태 (워커 스레드 소유, 수거만 뮤텍스로 보호)
   float m_preampDb = kPreampStartDb;
   bool  m_preampDirty = false;
+  int   m_limOverStreak = 0;  // 연속 초과 창 수 (워커 전용)
 
   std::function<bool()> m_limiterProbe;  // Start() 전에만 쓰기
   // 워커 스레드 전용 — 동기화 불필요.

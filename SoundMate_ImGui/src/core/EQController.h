@@ -54,6 +54,15 @@ public:
     // [헤드룸 서보] 프리앰프(dB). AdaptiveEngine 이 실측 리미터 개입률을 보고
     //   곡마다 정한다. 다음 ApplyEQ 때 config.txt 에 반영된다.
     //   atomic 인 이유: UI 스레드가 쓰고 ApplyEQ 가 다른 경로에서도 불린다.
+    // 프리앰프 기본값. AdaptiveEngine::kPreampStartDb 와 같아야 한다.
+    static constexpr float kDefaultPreampDb = -1.0f;
+
+    // [헤드룸 서보] 앱 시작 시 config.txt 에 남은 이전 세션의 서보값을 지운다.
+    //   프리앰프는 곡 단위 상태라 세션을 넘어 유지되면 안 된다 — 안 지우면
+    //   다음 재생의 첫 곡이 이전 세션 마지막 곡의 감쇠를 물려받는다.
+    //   Filter 줄은 건드리지 않고 Preamp 줄만 교체한다.
+    bool  ResetPreampToDefault();
+
     void  SetPreampDb(float db) { m_preampDb.store(db); }
     float GetPreampDb() const   { return m_preampDb.load(); }
 
@@ -77,7 +86,7 @@ private:
     bool        m_initialized = false;
 
     // [헤드룸 서보] 실측 개입률로 정해지는 프리앰프. 기본 -1.0dB.
-    std::atomic<float> m_preampDb{-1.0f};
+    std::atomic<float> m_preampDb{kDefaultPreampDb};
 
     // [최종] SHM read-only 매핑 — limiterActiveFlag polling 전용.
     void*       m_shmHandle = nullptr;  // HANDLE; void* 로 두어 windows.h 의존 줄임
