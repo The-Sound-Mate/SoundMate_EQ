@@ -1042,6 +1042,17 @@ void MainWindow::Render() {
     }
   }
 
+  // ── [헤드룸 서보] 실측 리미터 개입률로 정해진 프리앰프 반영 ──
+  //   곡 안에서는 내려가기만 하므로 재적용 횟수가 곡당 최대 10회(-1 -> -6,
+  //   0.5dB 스텝)로 묶인다. 적응 델타 재적용과 같은 경로를 탄다.
+  {
+    float newPreamp = 0.f;
+    if (m_eqCtrl && m_adaptive.TryTakePreamp(newPreamp)) {
+      m_eqCtrl->SetPreampDb(newPreamp);
+      ApplyEQNoSave();
+    }
+  }
+
   // ── 예약된 EQ 업데이트 처리 (메인 스레드 안전) ──
   if (m_pendingEQUpdate.exchange(false)) {
     std::vector<float> target;

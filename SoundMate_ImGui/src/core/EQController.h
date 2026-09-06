@@ -1,6 +1,7 @@
 // src/core/EQController.h
 // Python의 core/eq_controller.py 를 C++로 이식
 #pragma once
+#include <atomic>
 #include <string>
 #include <vector>
 #include <windows.h>
@@ -50,6 +51,12 @@ public:
     //   SHM 매핑 실패 / Controller 미실행 시 false (안전 default).
     bool IsLimiterActive();
 
+    // [헤드룸 서보] 프리앰프(dB). AdaptiveEngine 이 실측 리미터 개입률을 보고
+    //   곡마다 정한다. 다음 ApplyEQ 때 config.txt 에 반영된다.
+    //   atomic 인 이유: UI 스레드가 쓰고 ApplyEQ 가 다른 경로에서도 불린다.
+    void  SetPreampDb(float db) { m_preampDb.store(db); }
+    float GetPreampDb() const   { return m_preampDb.load(); }
+
 private:
     // HKLM\SOFTWARE\SoundMateAPO 의 InstallPath/ConfigPath 탐색 (없으면 폴백)
     std::string GetRealConfigDir();
@@ -68,6 +75,9 @@ private:
     std::string m_officialFilePath;    // 정식 APO 설치 경로의 ai_eq_config.txt
     bool        m_isRestored = false;
     bool        m_initialized = false;
+
+    // [헤드룸 서보] 실측 개입률로 정해지는 프리앰프. 기본 -1.0dB.
+    std::atomic<float> m_preampDb{-1.0f};
 
     // [최종] SHM read-only 매핑 — limiterActiveFlag polling 전용.
     void*       m_shmHandle = nullptr;  // HANDLE; void* 로 두어 windows.h 의존 줄임

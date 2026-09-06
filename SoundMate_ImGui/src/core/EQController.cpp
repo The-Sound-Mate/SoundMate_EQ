@@ -152,7 +152,11 @@ bool EQController::ApplyEQ(const std::vector<float> &gains,
   // 권하는 이유다. 이 1 dB 가 그 몫이다.
   //
   // 청감 비용은 사실상 0 (1 dB 는 A/B 비교 없이는 구분되지 않는다).
-  float preamp = -1.0f;
+  // [v0.1.0 헤드룸 서보] 고정값이 아니라 AdaptiveEngine 이 실측한 리미터
+  //   개입률로 곡마다 정한 값을 쓴다. 서보가 안 돌면 -1.0 그대로다.
+  //   실측 근거: aespa(peak -0.31)는 -1dB 에서 개입률 93.9% 였다. 고정값으로
+  //   덮을 수 있는 문제가 아니었다.
+  float preamp = m_preampDb.load();
 
   std::ostringstream oss;
   oss << "Preamp: " << std::fixed << std::setprecision(1) << preamp << " dB\n";

@@ -41,6 +41,19 @@ public:
   //   영원히 반영되지 않는다.
   static constexpr float kDeadbandDb = 0.25f;
 
+  // ── [헤드룸 서보] ────────────────────────────────────────────────────────
+  // 대리 지표(crest, peak)로는 리미터 개입을 예측할 수 없다는 것이 실측으로
+  // 확인됐다: aespa(peak -0.31) 93.9% vs 야생화(peak -0.32) 2.5% — peak 이
+  // 0.01dB 차이인데 개입률이 91%p 벌어졌다. 그래서 추정하지 않고 **실측한
+  // 개입률 자체**에 서보를 건다.
+  //
+  // 곡 안에서는 **내리기만** 한다(래칫). 올렸다 내렸다 하면 매크로 컴프레서가
+  // 되어 클라이맥스의 폭발력을 깎는다. 곡이 바뀌면 시작값으로 되돌린다.
+  static constexpr float kLimiterTargetPct = 5.0f;   // 이 이상이면 한 스텝 인하
+  static constexpr float kPreampStartDb    = -1.0f;  // 캐시 없을 때 시작값
+  static constexpr float kPreampStepDb     = 0.5f;
+  static constexpr float kPreampMinDb      = -6.0f;  // 폭주 방지 하한
+
   enum class State {
     Idle,         // 곡 없음 / 분석 대기 아님
     NoTap,        // 오디오 탭을 못 엶 (구버전 APO 이거나 재생 중이 아님)
@@ -79,6 +92,10 @@ public:
   // outIsFirst: 이 곡에서 처음 적용되는 델타인가 (상태 표시 억제용).
   bool TryTakeDelta(std::vector<float>& out, bool* outIsFirst = nullptr);
 
+  // 헤드룸 서보가 프리앰프를 내렸으면 true 를 반환하고 out 을 채운다.
+  // 호출부가 EQController::SetPreampDb + 재적용을 담당한다.
+  bool TryTakePreamp(float& outDb);
+
   State GetState() const { return m_state.load(); }
 
   // 진단용 — 마지막 측정의 대역 레벨(dB). 비어 있을 수 있다.
@@ -92,12 +109,20 @@ private:
   void WorkerLoop();
   // [측정 단계] 무드 지표 계산 + 로그. EQ 에는 영향 없음.
   void LogMood(class SpectrumAnalyzer& analyzer,
-               const std::vector<float>& levels, const char* phase);
+               const std::vector<float>& levels, const char* phase,
+               double limPct);
+  void ApplyHeadroomServo(double limPct);
+
+  // 헤드룸 서보 상태 (워커 스레드 소유, 수거만 뮤텍스로 보호)
+  float m_preampDb = kPreampStartDb;
+  bool  m_preampDirty = false;
 
   std::function<bool()> m_limiterProbe;  // Start() 전에만 쓰기
   // 워커 스레드 전용 — 동기화 불필요.
   size_t m_limPolls = 0;
   size_t m_limActive = 0;
+  // 카운터를 읽고 창을 비운다. 측정 없으면 음수.
+  double TakeLimiterPct();
 
   std::thread       m_thread;
   std::atomic<bool> m_running{false};

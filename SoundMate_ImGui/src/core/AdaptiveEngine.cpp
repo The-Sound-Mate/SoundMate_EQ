@@ -41,6 +41,9 @@ void AdaptiveEngine::OnSongChanged(const std::string& title,
     std::lock_guard<std::mutex> lk(m_mutex);
     m_songTitle = title;
     m_songArtist = artist;
+    // 헤드룸 서보는 곡마다 처음부터. 이전 곡의 -6dB 를 물려받으면 안 된다.
+    m_preampDb = kPreampStartDb;
+    m_preampDirty = true;
     m_delta.clear();
     m_lastLevels.clear();
     // 새 곡의 첫 델타는 Deadband 없이 무조건 적용돼야 한다. 기준점을 비운다.
@@ -54,6 +57,15 @@ void AdaptiveEngine::SetEnabled(bool enabled) {
   m_enabled.store(enabled);
   if (!enabled)
     m_state.store(State::Idle);
+}
+
+bool AdaptiveEngine::TryTakePreamp(float& outDb) {
+  std::lock_guard<std::mutex> lk(m_mutex);
+  if (!m_preampDirty)
+    return false;
+  m_preampDirty = false;
+  outDb = m_preampDb;
+  return true;
 }
 
 bool AdaptiveEngine::TryTakeDelta(std::vector<float>& out, bool* outIsFirst) {
@@ -92,19 +104,23 @@ std::vector<float> AdaptiveEngine::LiveLevelsDb() const {
 
 // [측정 단계] 무드 지표를 계산해 로그에 한 줄 남긴다. EQ 에는 영향이 없다.
 //   목적은 "발라드와 EDM 이 실제로 다른 숫자를 내는가" 확인 하나뿐이다.
+// 리미터 개입률 카운터를 읽고 창을 비운다. 측정이 없었으면 음수.
+double AdaptiveEngine::TakeLimiterPct() {
+  const double pct =
+      m_limPolls ? (100.0 * (double)m_limActive / (double)m_limPolls) : -1.0;
+  m_limPolls = 0;
+  m_limActive = 0;
+  return pct;
+}
+
 void AdaptiveEngine::LogMood(SpectrumAnalyzer& analyzer,
                              const std::vector<float>& levels,
-                             const char* phase) {
+                             const char* phase, double limPct) {
   double peak = 0.0, rms = 0.0;
   if (!analyzer.TakeTimeStats(&peak, &rms))
     return;
   const MoodFeatures mf = ComputeMoodFeatures(levels, analyzer.BandUsable(),
                                               AIClient::F31, peak, rms);
-  // 무음 등으로 무효면 카운터도 버린다 — 다음 창에 섞이면 안 된다.
-  const double limPct =
-      m_limPolls ? (100.0 * (double)m_limActive / (double)m_limPolls) : -1.0;
-  m_limPolls = 0;
-  m_limActive = 0;
   if (!mf.valid)
     return;
   std::string t, a;
@@ -114,6 +130,28 @@ void AdaptiveEngine::LogMood(SpectrumAnalyzer& analyzer,
     a = m_songArtist;
   }
   AppendMoodLog(mf.ToJson(t, a, phase, levels, limPct));
+}
+
+// [헤드룸 서보] 실측 개입률이 목표를 넘으면 프리앰프를 한 스텝 내린다.
+//
+// **내리기만 한다.** 올렸다 내렸다 하면 매크로 컴프레서가 되어 클라이맥스의
+// 폭발력을 깎는다(야생화 후반 같은 구간). 곡이 바뀔 때만 시작값으로 복귀.
+//
+// 대리 지표를 쓰지 않는 이유: crest 도 peak 도 개입률을 예측하지 못했다.
+// aespa(peak -0.31) 93.9% vs 야생화(peak -0.32) 2.5% — peak 0.01dB 차이에
+// 91%p 격차. 반면 여기서 보는 값은 우리가 통제하려는 양 그 자체다.
+void AdaptiveEngine::ApplyHeadroomServo(double limPct) {
+  if (limPct < 0.0)
+    return;  // 이 창에 측정이 없었다
+  if (limPct <= (double)kLimiterTargetPct)
+    return;
+  std::lock_guard<std::mutex> lk(m_mutex);
+  if (m_preampDb <= kPreampMinDb)
+    return;  // 하한 — 더 깎아도 리미터가 안 잡히는 상황이면 리미터에 맡긴다
+  m_preampDb -= kPreampStepDb;
+  if (m_preampDb < kPreampMinDb)
+    m_preampDb = kPreampMinDb;
+  m_preampDirty = true;
 }
 
 void AdaptiveEngine::SetLimiterProbe(std::function<bool()> probe) {
@@ -262,7 +300,9 @@ void AdaptiveEngine::WorkerLoop() {
     // ── 최초 델타: 고정 창(10~30초) 적분값으로 산출 ──────────────────────
     if (!firstDone && integrated >= intTarget) {
       const std::vector<float> levels = analyzer.BandLevelsDb();
-      LogMood(analyzer, levels, "first");
+      const double limPct = TakeLimiterPct();
+      ApplyHeadroomServo(limPct);
+      LogMood(analyzer, levels, "first", limPct);
       const std::vector<float> delta = AdaptiveCurve::ComputeDelta(
           levels, analyzer.BandUsable(), AIClient::F31);
       {
@@ -289,7 +329,9 @@ void AdaptiveEngine::WorkerLoop() {
     const std::vector<float> levels = analyzer.SlowLevelsDb();
     if (levels.empty())
       continue;
-    LogMood(analyzer, levels, "track");
+    const double limPct = TakeLimiterPct();
+    ApplyHeadroomServo(limPct);
+    LogMood(analyzer, levels, "track", limPct);
     const std::vector<float> delta = AdaptiveCurve::ComputeDelta(
         levels, analyzer.BandUsable(), AIClient::F31);
 
