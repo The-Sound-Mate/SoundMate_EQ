@@ -100,6 +100,11 @@ void AdaptiveEngine::LogMood(SpectrumAnalyzer& analyzer,
     return;
   const MoodFeatures mf = ComputeMoodFeatures(levels, analyzer.BandUsable(),
                                               AIClient::F31, peak, rms);
+  // 무음 등으로 무효면 카운터도 버린다 — 다음 창에 섞이면 안 된다.
+  const double limPct =
+      m_limPolls ? (100.0 * (double)m_limActive / (double)m_limPolls) : -1.0;
+  m_limPolls = 0;
+  m_limActive = 0;
   if (!mf.valid)
     return;
   std::string t, a;
@@ -108,7 +113,11 @@ void AdaptiveEngine::LogMood(SpectrumAnalyzer& analyzer,
     t = m_songTitle;
     a = m_songArtist;
   }
-  AppendMoodLog(mf.ToJson(t, a, phase, levels));
+  AppendMoodLog(mf.ToJson(t, a, phase, levels, limPct));
+}
+
+void AdaptiveEngine::SetLimiterProbe(std::function<bool()> probe) {
+  m_limiterProbe = std::move(probe);
 }
 
 void AdaptiveEngine::WorkerLoop() {
@@ -237,6 +246,18 @@ void AdaptiveEngine::WorkerLoop() {
 
     if (!collecting)
       continue;
+
+    // [D 측정] 리미터 개입률.
+    // [주의] limiterActiveFlag 는 감쇠 후 200ms 동안 1 을 유지하는 sticky
+    //   플래그다. 50ms 폴링으로 재면 한 번의 개입이 4번 잡히므로 실제
+    //   "감쇠된 샘플 비율" 보다 **과대** 집계된다. 곡 간 비교와 상한
+    //   판정에는 그대로 쓸 수 있다 (낮게 나오면 진짜로 낮다).
+    // 인트로 스킵 구간은 제외해 crest/peak 창과 구간을 맞춘다.
+    if (skipped >= skipTarget && m_limiterProbe) {
+      ++m_limPolls;
+      if (m_limiterProbe())
+        ++m_limActive;
+    }
 
     // ── 최초 델타: 고정 창(10~30초) 적분값으로 산출 ──────────────────────
     if (!firstDone && integrated >= intTarget) {

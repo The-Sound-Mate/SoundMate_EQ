@@ -16,6 +16,7 @@
 #pragma once
 
 #include <atomic>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -55,6 +56,11 @@ public:
   AdaptiveEngine(const AdaptiveEngine&) = delete;
   AdaptiveEngine& operator=(const AdaptiveEngine&) = delete;
 
+  // [D 측정] 리미터 개입률 측정용 프로브. Start() **이전**에 설정해야 한다
+  //   (워커 스레드가 동기화 없이 읽는다). EQController::IsLimiterActive 를
+  //   넘긴다. 설정하지 않으면 측정하지 않는다.
+  void SetLimiterProbe(std::function<bool()> probe);
+
   void Start();
   void Stop();
 
@@ -87,6 +93,11 @@ private:
   // [측정 단계] 무드 지표 계산 + 로그. EQ 에는 영향 없음.
   void LogMood(class SpectrumAnalyzer& analyzer,
                const std::vector<float>& levels, const char* phase);
+
+  std::function<bool()> m_limiterProbe;  // Start() 전에만 쓰기
+  // 워커 스레드 전용 — 동기화 불필요.
+  size_t m_limPolls = 0;
+  size_t m_limActive = 0;
 
   std::thread       m_thread;
   std::atomic<bool> m_running{false};

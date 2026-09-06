@@ -48,9 +48,10 @@ struct MoodFeatures {
   // 남기면 지표 정의를 고칠 때마다 곡을 다시 틀어야 한다 — 청취 세션이 가장
   // 비싼 자원이므로 원시값을 남겨 오프라인 재계산이 가능하게 한다.
   // (centroid 정의 실패를 이 로그 없이 재현하려면 8곡을 다시 틀어야 했다.)
+  // limiterPct: 이 창에서 리미터가 활성이던 폴링 비율(%). 측정 불가면 음수.
   std::string ToJson(const std::string& title, const std::string& artist,
-                     const char* phase,
-                     const std::vector<float>& levelsDb) const;
+                     const char* phase, const std::vector<float>& levelsDb,
+                     double limiterPct) const;
 };
 
 // levelsDb  : SpectrumAnalyzer 의 밴드 레벨 (BandLevelsDb / SlowLevelsDb)

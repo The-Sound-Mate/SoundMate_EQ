@@ -101,6 +101,9 @@ void MainWindow::Initialize(EQController *eq, AIClient *ai,
   // [곡별 적응 보정] 오디오 탭 분석 워커 기동. 탭이 없으면(구버전 APO 이거나
   //   재생 중이 아니면) State::NoTap 으로 조용히 대기만 하므로, 실패해도
   //   기존 동작에 영향이 없다.
+  // [D 측정] 리미터 개입률 프로브. Start() 전에 설정해야 한다.
+  //   eq 는 main.cpp 소유로 MainWindow 보다 오래 살므로 raw 포인터 캡처가 안전.
+  m_adaptive.SetLimiterProbe([eq]() { return eq && eq->IsLimiterActive(); });
   m_adaptive.Start();
 
   std::thread([this]() { CheckForUpdates(); }).detach();

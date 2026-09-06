@@ -141,7 +141,8 @@ MoodFeatures ComputeMoodFeatures(const std::vector<float>& levelsDb,
 
 std::string MoodFeatures::ToJson(const std::string& title,
                                  const std::string& artist, const char* phase,
-                                 const std::vector<float>& levelsDb) const {
+                                 const std::vector<float>& levelsDb,
+                                 double limiterPct) const {
   char buf[768];
   std::snprintf(
       buf, sizeof(buf),
@@ -150,6 +151,9 @@ std::string MoodFeatures::ToJson(const std::string& title,
       "\"brightness\":%.3f,\"warmth\":%.3f,\"energy\":%.3f,\"density\":%.3f",
       phase ? phase : "?", tiltDb, warmthDb, centroidHz, rmsDb, peakDb, crestDb,
       brightness, warmth, energy, density);
+
+  char lim[48];
+  std::snprintf(lim, sizeof(lim), ",\"limiterPct\":%.1f", limiterPct);
 
   // 31밴드 원시 레벨. 지표 정의를 바꿔도 곡을 다시 틀 필요가 없게 한다.
   std::string bands = ",\"bands\":[";
@@ -162,7 +166,7 @@ std::string MoodFeatures::ToJson(const std::string& title,
   }
   bands += ']';
 
-  return std::string(buf) + bands + ",\"title\":\"" + Esc(title) +
+  return std::string(buf) + lim + bands + ",\"title\":\"" + Esc(title) +
          "\",\"artist\":\"" + Esc(artist) + "\"}";
 }
 
