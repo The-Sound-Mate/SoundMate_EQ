@@ -16,8 +16,8 @@ constexpr double kMaxFreqRatio = 0.45;
 } // namespace
 
 SpectrumAnalyzer::SpectrumAnalyzer()
-    : m_sampleRate(0.0), m_samples(0), m_slowSamples(0), m_fastAlpha(0.0),
-      m_slowAlpha(0.0) {}
+    : m_sampleRate(0.0), m_samples(0), m_slowSamples(0), m_winPeak(0.0),
+      m_winSumSq(0.0), m_winSamples(0), m_fastAlpha(0.0), m_slowAlpha(0.0) {}
 
 void SpectrumAnalyzer::Configure(double sampleRate,
                                  const std::vector<int>& freqs) {
@@ -29,6 +29,9 @@ void SpectrumAnalyzer::Configure(double sampleRate,
   m_usable.assign(freqs.size(), false);
   m_samples = 0;
   m_slowSamples = 0;
+  m_winPeak = 0.0;
+  m_winSumSq = 0.0;
+  m_winSamples = 0;
 
   if (sampleRate <= 0.0)
     return;
@@ -73,6 +76,9 @@ void SpectrumAnalyzer::Reset() {
   // 느린 EMA 는 곡이 바뀌면 반드시 비워야 한다 — 25초 시상수라 안 비우면
   // 이전 곡의 스펙트럼이 한참 섞인다. 워밍업 카운터도 같이 초기화.
   m_slowSamples = 0;
+  m_winPeak = 0.0;
+  m_winSumSq = 0.0;
+  m_winSamples = 0;
   // m_fastSq 는 일부러 비우지 않는다 — 시각화는 곡 경계에서도 끊기지 않아야
   // 자연스럽다. 어차피 120ms 시상수라 곧 새 곡 값으로 수렴한다.
 }
@@ -95,6 +101,15 @@ void SpectrumAnalyzer::Process(const float* mono, size_t count,
   const double as = m_slowAlpha;
   for (size_t k = 0; k < count; ++k) {
     const double x = (double)mono[k];
+    // 시간영역 통계는 LTAS 와 같은 창(accumulate)에서만 모은다. 인트로
+    // 스킵 구간의 조용한 피아노가 크레스트에 섞이면 곡 전체를 오판한다.
+    if (accumulate) {
+      const double ax = (x < 0.0) ? -x : x;
+      if (ax > m_winPeak)
+        m_winPeak = ax;
+      m_winSumSq += x * x;
+      ++m_winSamples;
+    }
     for (size_t i = 0; i < n; ++i) {
       if (!m_usable[i])
         continue;
@@ -111,6 +126,21 @@ void SpectrumAnalyzer::Process(const float* mono, size_t count,
     m_samples += count;
     m_slowSamples += count;
   }
+}
+
+// [무드 벡터] 크레스트 팩터용 시간영역 통계. 읽으면 창을 비운다.
+bool SpectrumAnalyzer::TakeTimeStats(double* outPeak, double* outRms) {
+  if (m_winSamples == 0)
+    return false;
+  const double rms = std::sqrt(m_winSumSq / (double)m_winSamples);
+  if (outPeak)
+    *outPeak = m_winPeak;
+  if (outRms)
+    *outRms = rms;
+  m_winPeak = 0.0;
+  m_winSumSq = 0.0;
+  m_winSamples = 0;
+  return true;
 }
 
 std::vector<float> SpectrumAnalyzer::SlowLevelsDb() const {

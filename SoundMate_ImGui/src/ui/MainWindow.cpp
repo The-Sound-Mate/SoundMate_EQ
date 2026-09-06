@@ -1134,7 +1134,7 @@ void MainWindow::Render() {
         std::lock_guard<std::mutex> lk(m_adaptiveMutex);
         m_adaptiveDelta.clear();
       }
-      m_adaptive.OnSongChanged();
+      m_adaptive.OnSongChanged(title, artist);
 
       // ── 프리셋 모드 활성 중: AI/캐시 건너뛰고 프리셋 EQ 고정 재적용 ──
       if (m_presetModeActive && m_selectedPresetIdx >= 0 &&

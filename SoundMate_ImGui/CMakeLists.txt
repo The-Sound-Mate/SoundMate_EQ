@@ -60,6 +60,8 @@ set(APP_SOURCES
     src/core/AIClient.h
     src/core/LocalCurve.cpp
     src/core/LocalCurve.h
+    src/core/MoodFeatures.cpp
+    src/core/MoodFeatures.h
     src/core/AudioTapReader.cpp
     src/core/AudioTapReader.h
     src/core/SpectrumAnalyzer.cpp

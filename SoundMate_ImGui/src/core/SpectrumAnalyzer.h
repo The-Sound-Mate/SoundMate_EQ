@@ -68,6 +68,19 @@ public:
   // 나이퀴스트에 너무 가까워 측정에서 제외된 밴드는 false.
   const std::vector<bool>& BandUsable() const { return m_usable; }
 
+  // [무드 벡터] 시간영역 Peak / RMS 를 꺼내고 창을 비운다.
+  //
+  // 크레스트 팩터(Peak/RMS)를 내려면 필터뱅크가 아니라 **원신호**의 통계가
+  // 필요하다. 밴드별 제곱합을 더해도 필터 통과대역이 겹쳐 원신호 RMS 와
+  // 다르고, 피크는 애초에 대역 분해로 복원되지 않는다.
+  //
+  // 읽으면 창이 리셋되므로 "마지막 호출 이후" 구간의 통계다. 최초 델타
+  // 시점에는 적분 창 전체(20초), 연속 보정에서는 직전 5초가 된다.
+  // accumulate=false 인 구간(인트로 스킵)은 누적하지 않는다.
+  //
+  // 반환: 샘플이 없었으면 false (peak/rms 는 건드리지 않음).
+  bool TakeTimeStats(double* outPeak, double* outRms);
+
 private:
   struct Biquad {
     // 계수/상태 모두 double — 위 주석 참조.
@@ -91,6 +104,11 @@ private:
   std::vector<bool>   m_usable;
   size_t              m_samples;
   size_t              m_slowSamples;  // 느린 EMA 가 받은 총 샘플 수 (워밍업 판정)
+
+  // 시간영역 통계 (TakeTimeStats 로 수거하면 리셋되는 창)
+  double              m_winPeak;      // 창 내 max|x|
+  double              m_winSumSq;     // 창 내 sum(x^2)
+  size_t              m_winSamples;
   double              m_fastAlpha;    // 샘플당 감쇠 계수 (빠름)
   double              m_slowAlpha;    // 샘플당 감쇠 계수 (느림)
 };

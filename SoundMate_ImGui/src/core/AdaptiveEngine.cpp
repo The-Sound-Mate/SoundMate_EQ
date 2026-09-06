@@ -4,6 +4,7 @@
 #include "AIClient.h"  // F31 — 분석 축을 EQ 축과 동일하게 유지
 #include "AdaptiveCurve.h"
 #include "AudioTapReader.h"
+#include "MoodFeatures.h"
 #include "SpectrumAnalyzer.h"
 
 #include <windows.h>
@@ -34,9 +35,12 @@ void AdaptiveEngine::Stop() {
     m_thread.join();
 }
 
-void AdaptiveEngine::OnSongChanged() {
+void AdaptiveEngine::OnSongChanged(const std::string& title,
+                                   const std::string& artist) {
   {
     std::lock_guard<std::mutex> lk(m_mutex);
+    m_songTitle = title;
+    m_songArtist = artist;
     m_delta.clear();
     m_lastLevels.clear();
     // 새 곡의 첫 델타는 Deadband 없이 무조건 적용돼야 한다. 기준점을 비운다.
@@ -83,6 +87,28 @@ std::vector<float> AdaptiveEngine::LiveLevelsDb() const {
     return {};
   std::lock_guard<std::mutex> lk(m_mutex);
   return m_liveLevels;
+}
+
+
+// [측정 단계] 무드 지표를 계산해 로그에 한 줄 남긴다. EQ 에는 영향이 없다.
+//   목적은 "발라드와 EDM 이 실제로 다른 숫자를 내는가" 확인 하나뿐이다.
+void AdaptiveEngine::LogMood(SpectrumAnalyzer& analyzer,
+                             const std::vector<float>& levels,
+                             const char* phase) {
+  double peak = 0.0, rms = 0.0;
+  if (!analyzer.TakeTimeStats(&peak, &rms))
+    return;
+  const MoodFeatures mf = ComputeMoodFeatures(levels, analyzer.BandUsable(),
+                                              AIClient::F31, peak, rms);
+  if (!mf.valid)
+    return;
+  std::string t, a;
+  {
+    std::lock_guard<std::mutex> lk(m_mutex);
+    t = m_songTitle;
+    a = m_songArtist;
+  }
+  AppendMoodLog(mf.ToJson(t, a, phase));
 }
 
 void AdaptiveEngine::WorkerLoop() {
@@ -215,6 +241,7 @@ void AdaptiveEngine::WorkerLoop() {
     // ── 최초 델타: 고정 창(10~30초) 적분값으로 산출 ──────────────────────
     if (!firstDone && integrated >= intTarget) {
       const std::vector<float> levels = analyzer.BandLevelsDb();
+      LogMood(analyzer, levels, "first");
       const std::vector<float> delta = AdaptiveCurve::ComputeDelta(
           levels, analyzer.BandUsable(), AIClient::F31);
       {
@@ -241,6 +268,7 @@ void AdaptiveEngine::WorkerLoop() {
     const std::vector<float> levels = analyzer.SlowLevelsDb();
     if (levels.empty())
       continue;
+    LogMood(analyzer, levels, "track");
     const std::vector<float> delta = AdaptiveCurve::ComputeDelta(
         levels, analyzer.BandUsable(), AIClient::F31);
 

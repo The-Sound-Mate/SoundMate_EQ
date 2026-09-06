@@ -59,7 +59,9 @@ public:
   void Stop();
 
   // 곡이 바뀌었을 때. 누적을 버리고 스킵 구간부터 다시 시작한다.
-  void OnSongChanged();
+  // label 은 무드 지표 로그에만 쓰인다 (분석 로직에는 영향 없음).
+  void OnSongChanged(const std::string& title = "",
+                     const std::string& artist = "");
 
   // 분석을 아예 돌리지 않는다 (설정 OFF / Bypass 등). 끄면 audiodg 도
   // 복사를 멈춘다 (consumerActive=0).
@@ -82,6 +84,9 @@ public:
 
 private:
   void WorkerLoop();
+  // [측정 단계] 무드 지표 계산 + 로그. EQ 에는 영향 없음.
+  void LogMood(class SpectrumAnalyzer& analyzer,
+               const std::vector<float>& levels, const char* phase);
 
   std::thread       m_thread;
   std::atomic<bool> m_running{false};
@@ -93,6 +98,8 @@ private:
   std::vector<float> m_delta;        // 수거 대기 중인 델타
   std::vector<float> m_lastApplied;  // 마지막으로 수거된 델타 (Deadband 기준)
   std::vector<float> m_lastLevels;
+  std::string        m_songTitle;   // 무드 로그 라벨
+  std::string        m_songArtist;
   std::vector<float> m_liveLevels;
   bool               m_deltaIsFirst = false;  // 이 곡의 첫 델타인가
   // 마지막으로 오디오가 들어온 시각(GetTickCount). 오래되면 시각화를 끈다.
