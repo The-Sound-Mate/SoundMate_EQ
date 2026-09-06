@@ -22,7 +22,13 @@ struct MoodFeatures {
   bool valid = false;
 
   // ── 원시값 (판단은 이 숫자로 한다) ──────────────────────────────────────
-  float centroidHz = 0.0f;  // 스펙트럼 중심 주파수 (로그축 가중평균)
+  // [1차 실측 결과] centroidHz 는 밝기 지표로 **실패**했다. 8곡에서 57~307Hz
+  //   범위에 뭉쳤고 순서까지 역전됐다(EDM 69Hz < 첼로 248Hz). 원인은 파워
+  //   가중 x 로그축 조합이다 — 음악 스펙트럼은 에너지 대부분이 최저역에
+  //   있어서 결국 "베이스가 얼마나 센가"를 재게 된다.
+  //   그래서 밝기 대표값을 tiltDb 로 옮기고 centroidHz 는 진단용으로만 남긴다.
+  float centroidHz = 0.0f;  // 스펙트럼 중심 (로그축 가중평균) — 참고용
+  float tiltDb = 0.0f;      // 고역(2k~16k) / 저역(100~800) 에너지 비 (dB) = 밝기
   float warmthDb = 0.0f;    // 중저역(160~630Hz) 대비 전대역 에너지 비 (dB)
   float rmsDb = 0.0f;       // 시간영역 RMS (dBFS)
   float peakDb = 0.0f;      // 시간영역 샘플 피크 (dBFS)
@@ -31,14 +37,20 @@ struct MoodFeatures {
   // ── 0~1 정규화 (브리프의 무드 벡터 형식) ────────────────────────────────
   // [주의] 정규화 범위는 아직 근거 없는 임시값이다. 실측 로그를 보고
   //   조정해야 한다. 판단은 위 원시값으로 하고 이 값은 참고만.
-  float brightness = 0.0f;  // dark 0 <-> 1 bright
+  float brightness = 0.0f;  // dark 0 <-> 1 bright (tiltDb 기반)
   float warmth = 0.0f;      // cold 0 <-> 1 warm
   float energy = 0.0f;      // calm 0 <-> 1 intense
   float density = 0.0f;     // dynamic 0 <-> 1 compressed
 
   // 진단 로그 한 줄(JSON). AdaptiveEngine 이 파일에 append 한다.
+  //
+  // levelsDb 를 같이 받아 **31밴드 원시 레벨을 그대로 적는다.** 파생값만
+  // 남기면 지표 정의를 고칠 때마다 곡을 다시 틀어야 한다 — 청취 세션이 가장
+  // 비싼 자원이므로 원시값을 남겨 오프라인 재계산이 가능하게 한다.
+  // (centroid 정의 실패를 이 로그 없이 재현하려면 8곡을 다시 틀어야 했다.)
   std::string ToJson(const std::string& title, const std::string& artist,
-                     const char* phase) const;
+                     const char* phase,
+                     const std::vector<float>& levelsDb) const;
 };
 
 // levelsDb  : SpectrumAnalyzer 의 밴드 레벨 (BandLevelsDb / SlowLevelsDb)

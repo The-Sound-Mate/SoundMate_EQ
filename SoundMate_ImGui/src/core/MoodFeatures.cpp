@@ -56,6 +56,13 @@ MoodFeatures ComputeMoodFeatures(const std::vector<float>& levelsDb,
       levelsDb.empty())
     return m;
 
+  // [무음 차단] 재생이 멈춘 구간에도 탭은 0 샘플을 흘린다. 그대로 기록하면
+  //   rmsDb=-200 / crestDb=0 인 쓰레기 줄이 남는다 — 1차 실측에서 180줄 중
+  //   29줄(16%)이 이것이었다. -90dBFS 는 사실상 디지털 무음/디더 수준이라
+  //   조용한 클래식 패시지(실측 -33dBFS)를 자르지 않는다.
+  if (rmsLin < 3.16e-5)
+    return m;
+
   // ── 1) 스펙트럼 중심 (Brightness) ────────────────────────────────────────
   // [왜 로그축 가중평균인가] 선형 Hz 로 중심을 구하면 20kHz 밴드 하나가
   //   저역 30개를 압도해 사실상 "초고역이 있나"만 재게 된다. 사람의 음정
@@ -89,6 +96,28 @@ MoodFeatures ComputeMoodFeatures(const std::vector<float>& levelsDb,
   const double ratio = lowMid / wsum;
   m.warmthDb = (float)(10.0 * std::log10(ratio > 1e-12 ? ratio : 1e-12));
 
+  // ── 2-b) 스펙트럼 기울기 (Brightness) ────────────────────────────────────
+  // 고역(2k~16k) 대 저역(100~800) 에너지 비. centroid 를 대신하는 밝기 지표.
+  //
+  // [왜 이 경계인가]
+  //   2k~16k : 하이햇/심벌/치찰음/현의 마찰음 — 밝다고 느끼는 성분.
+  //   100~800: 베이스와 대부분 악기의 기본음.
+  //   100Hz 아래는 뺀다 — 서브베이스는 밝기와 무관한 독립 축이고, 넣으면
+  //     centroid 가 실패한 것과 같은 저역 지배가 재현된다.
+  //   16k 위도 뺀다 — 코덱이 잘라내는 경우가 많아 곡이 아니라 인코딩을 잰다.
+  double hi = 0.0, lo = 0.0;
+  for (size_t i = 0; i < freqs.size(); ++i) {
+    if (!usable[i] || levelsDb[i] <= -190.0f)
+      continue;
+    const double w = DbToPower(levelsDb[i]);
+    if (freqs[i] >= 2000 && freqs[i] <= 16000)
+      hi += w;
+    else if (freqs[i] >= 100 && freqs[i] <= 800)
+      lo += w;
+  }
+  const double tilt = (lo > 1e-20) ? (hi / lo) : 0.0;
+  m.tiltDb = (float)(10.0 * std::log10(tilt > 1e-9 ? tilt : 1e-9));
+
   // ── 3) 시간영역 레벨 / 크레스트 ──────────────────────────────────────────
   m.rmsDb = (rmsLin > 1e-12) ? (float)(20.0 * std::log10(rmsLin)) : -200.0f;
   m.peakDb = (peakLin > 1e-12) ? (float)(20.0 * std::log10(peakLin)) : -200.0f;
@@ -97,8 +126,9 @@ MoodFeatures ComputeMoodFeatures(const std::vector<float>& levelsDb,
   // ── 4) 0~1 정규화 ────────────────────────────────────────────────────────
   // [임시 범위] 아래 상수는 실측 전의 추정치다. 로그를 모아 실제 분포를 보고
   //   다시 잡아야 한다. 지금 단계의 판단 근거는 위 원시값이다.
-  m.brightness = Clamp01((centroidLog2 - std::log2(200.0)) /
-                         (std::log2(4000.0) - std::log2(200.0)));
+  // 밝기는 tiltDb 기반. -30dB(첼로처럼 고역이 거의 없음) ~ 0dB(고역이 저역과
+  // 맞먹음) 를 임시 범위로 둔다. 실측 분포를 보고 다시 잡을 것.
+  m.brightness = Clamp01(((double)m.tiltDb - (-30.0)) / (0.0 - (-30.0)));
   m.warmth = Clamp01(((double)m.warmthDb - (-12.0)) / ((-3.0) - (-12.0)));
   m.energy = Clamp01(((double)m.rmsDb - (-40.0)) / ((-12.0) - (-40.0)));
   // 크레스트가 클수록 다이내믹 -> density 는 낮다. 압축된 현대 마스터는
@@ -110,18 +140,30 @@ MoodFeatures ComputeMoodFeatures(const std::vector<float>& levelsDb,
 }
 
 std::string MoodFeatures::ToJson(const std::string& title,
-                                 const std::string& artist,
-                                 const char* phase) const {
-  char buf[640];
+                                 const std::string& artist, const char* phase,
+                                 const std::vector<float>& levelsDb) const {
+  char buf[768];
   std::snprintf(
       buf, sizeof(buf),
-      "{\"phase\":\"%s\",\"centroidHz\":%.1f,\"warmthDb\":%.2f,"
-      "\"rmsDb\":%.2f,\"peakDb\":%.2f,\"crestDb\":%.2f,"
+      "{\"phase\":\"%s\",\"tiltDb\":%.2f,\"warmthDb\":%.2f,"
+      "\"centroidHz\":%.1f,\"rmsDb\":%.2f,\"peakDb\":%.2f,\"crestDb\":%.2f,"
       "\"brightness\":%.3f,\"warmth\":%.3f,\"energy\":%.3f,\"density\":%.3f",
-      phase ? phase : "?", centroidHz, warmthDb, rmsDb, peakDb, crestDb,
+      phase ? phase : "?", tiltDb, warmthDb, centroidHz, rmsDb, peakDb, crestDb,
       brightness, warmth, energy, density);
-  return std::string(buf) + ",\"title\":\"" + Esc(title) + "\",\"artist\":\"" +
-         Esc(artist) + "\"}";
+
+  // 31밴드 원시 레벨. 지표 정의를 바꿔도 곡을 다시 틀 필요가 없게 한다.
+  std::string bands = ",\"bands\":[";
+  for (size_t i = 0; i < levelsDb.size(); ++i) {
+    char b[16];
+    std::snprintf(b, sizeof(b), "%.1f", levelsDb[i]);
+    if (i)
+      bands += ',';
+    bands += b;
+  }
+  bands += ']';
+
+  return std::string(buf) + bands + ",\"title\":\"" + Esc(title) +
+         "\",\"artist\":\"" + Esc(artist) + "\"}";
 }
 
 std::string MoodLogPath() {

@@ -108,7 +108,7 @@ void AdaptiveEngine::LogMood(SpectrumAnalyzer& analyzer,
     t = m_songTitle;
     a = m_songArtist;
   }
-  AppendMoodLog(mf.ToJson(t, a, phase));
+  AppendMoodLog(mf.ToJson(t, a, phase, levels));
 }
 
 void AdaptiveEngine::WorkerLoop() {
