@@ -80,7 +80,10 @@ public:
   static constexpr double kPctMid = 20.0;
   static constexpr float kPreampStartDb    = -1.0f;  // 캐시 없을 때 시작값
   static constexpr float kPreampStepDb     = 0.5f;
-  static constexpr float kPreampMinDb      = -6.0f;  // 폭주 방지 하한
+  // [하한] 커브가 더 이상 에너지를 더하지 않게 됐으므로 서보는 평소에 미동도
+  //   하지 않아야 한다. -3dB 에 닿았다면 그 곡이 비정상이거나 커브가 여전히
+  //   과하다는 경고다. 예전 -6dB 는 원인(커브)을 안 고친 채 증상만 눌렀다.
+  static constexpr float kPreampMinDb      = -3.0f;
 
   enum class State {
     Idle,         // 곡 없음 / 분석 대기 아님

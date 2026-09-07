@@ -19,7 +19,8 @@ export const F31 = [
   2000, 2500, 3150, 4000, 5000, 6300, 8000, 10000, 12500, 16000, 20000,
 ];
 
-export const CURVE_VERSION = 1;
+// 2: 에너지 보존 중립화 + 과도 부스트 소프트니 (1 은 가중평균 중립화)
+export const CURVE_VERSION = 2;
 
 const CLAMP_DB = 12.0;
 
@@ -43,14 +44,58 @@ function evalShape(f: number, s: Shape): number {
   return evalShelf(f, s, s.k === "low");
 }
 
-// 라우드니스 가중치. 단순 산술평균으로 중립화하면 로그 간격 31밴드에서 저역
-// 부스트가 과도하게 상쇄된다 — 20~60Hz 는 실제 프로그램 에너지가 적은데도
-// 밴드 개수는 중역과 같아 평균을 크게 끌어올리기 때문이다. 그 결과 "저음 강조"
-// 선택이 중역을 몇 dB 씩 깎아내는 부작용이 생긴다.
-function loudnessWeight(f: number): number {
-  const lo = f / 200.0;
-  const hi = f / 8000.0;
-  return (lo * lo / (1.0 + lo * lo)) * (1.0 / (1.0 + hi * hi));
+// [v0.1.0 재설계] 실측 기준 스펙트럼 — 31밴드 상대 파워 (총합 1).
+//
+// [왜 가중평균을 버렸나]
+//   이전 판은 200Hz~8kHz 밴드패스 가중평균을 0dB 로 맞췄다. 그 기준에서
+//   40Hz 가중치는 1kHz 대비 -13.9dB 라, 40Hz 에 +8dB 를 얹어도 평균이 거의
+//   안 움직인다. 실측 결과 "가중평균 0dB" 를 지키면서도 실제 음악에 걸었을 때
+//   에너지가 **+3.74dB** 늘었다(설문 bass_heavy). 그 3.74dB 가 피크 -0.3dBFS
+//   마스터를 리미터에 처박아 개입률 94% 를 만들었고, 샘플피크 리미터는
+//   광대역 감쇠라 킥마다 보컬이 눌리는 먹먹함이 됐다.
+//
+// [왜 K-weighting 도 아닌가]
+//   K-weighting 은 사람이 얼마나 크게 느끼는지의 척도다. 리미터가 무는 것은
+//   느낌이 아니라 전기적 에너지가 결정한다. 실측 음악은 40Hz 가 1kHz 보다
+//   5.3dB 강한데 K-weighting 은 -6.3dB 로 본다. 여전히 11.6dB 어긋난다.
+//
+// [출처] mood_log.jsonl 실측. 창 수가 곡마다 12배까지 차이나므로 곡별 평균을
+//   먼저 낸 뒤 곡끼리 평균했다.
+// [잠정치] 표본 4곡(발라드/재즈/K-pop/첼로). 클래식·메탈·EDM 이 빠져 있다.
+//   LocalCurve.cpp 의 kRefSpectrum 과 **반드시 같은 값**이어야 한다 —
+//   서버 커브와 폴백 커브가 달라지면 안 된다.
+const REF_SPECTRUM = [
+  3.833e-3, 8.431e-3, 2.528e-2, 8.391e-2, 5.447e-2, 4.655e-2,
+  5.762e-2, 7.529e-2, 7.213e-2, 9.195e-2, 1.089e-1, 6.389e-2,
+  5.295e-2, 6.215e-2, 4.103e-2, 3.245e-2, 2.901e-2, 2.182e-2,
+  1.622e-2, 1.326e-2, 9.527e-3, 6.629e-3, 5.424e-3, 4.083e-3,
+  3.553e-3, 2.969e-3, 2.863e-3, 2.058e-3, 1.203e-3, 4.476e-4,
+  5.526e-5,
+];
+
+// 기준 스펙트럼에 이 커브를 걸었을 때의 총에너지 변화(dB).
+function energyChangeDb(gains: number[]): number {
+  let p0 = 0, p1 = 0;
+  for (let i = 0; i < gains.length && i < REF_SPECTRUM.length; ++i) {
+    p0 += REF_SPECTRUM[i];
+    p1 += REF_SPECTRUM[i] * Math.pow(10, gains[i] / 10);
+  }
+  return p0 > 0 ? 10 * Math.log10(p1 / p0) : 0;
+}
+
+// [과도 부스트 캡] SOFT_KNEE_DB 를 넘는 부스트를 완만히 포화시킨다.
+//
+// 주파수 경계를 두지 않는다. "200Hz 미만만 캡" 같은 규칙은 160Hz 와 200Hz
+// 사이에 수 dB 단차를 만들고, Q=4.32 바이쿼드가 그것을 그대로 구현하면 그
+// 지점에 공진성 굴곡이 생긴다. 전 대역에 같은 규칙을 걸면 경계가 없다.
+// 실제로 +3dB 를 넘는 것은 저역뿐이므로 효과는 저역 캡과 같고, 고음 강조
+// 설문에서 고역이 과해져도 같은 규칙이 자동 적용된다.
+const SOFT_KNEE_DB = 3.0;
+const SOFT_KNEE_RANGE_DB = 3.0;
+function softKnee(g: number): number {
+  if (g <= SOFT_KNEE_DB) return g;
+  return SOFT_KNEE_DB +
+         SOFT_KNEE_RANGE_DB * Math.tanh((g - SOFT_KNEE_DB) / SOFT_KNEE_RANGE_DB);
 }
 
 // ── 장르 커브 ────────────────────────────────────────────────────────────────
@@ -225,19 +270,19 @@ export function generateCurve(genre: string, tendency: string): number[] {
     return Math.max(-CLAMP_DB, Math.min(CLAMP_DB, sum));
   });
 
-  // 라우드니스 중립화 — 가중평균을 0dB 로. 부스트 총량이 곧 음량 증가로
-  // 이어지는 것을 막아 헤드룸과 리미터 여유를 보존한다.
-  let acc = 0, wsum = 0;
-  for (let i = 0; i < F31.length; ++i) {
-    const w = loudnessWeight(F31[i]);
-    acc += gains[i] * w;
-    wsum += w;
-  }
-  if (wsum > 1e-6) {
-    const mean = acc / wsum;
-    for (let i = 0; i < gains.length; ++i) {
-      gains[i] = Math.max(-CLAMP_DB, Math.min(CLAMP_DB, gains[i] - mean));
-    }
+  // 과도 부스트 캡 — 세 축(설문 저역 + 볼륨 성향 + 장르)이 선형 합산되어
+  // 20Hz 에서 +8.6dB 까지 치솟는 것을 막는다.
+  for (let i = 0; i < gains.length; ++i) gains[i] = softKnee(gains[i]);
+
+  // 에너지 보존 중립화 — 기준 스펙트럼에 걸었을 때 총에너지가 변하지 않도록
+  // 전역 오프셋을 뺀다. 전역 오프셋이라 커브 **모양은 바뀌지 않는다**.
+  // 저역과 중역의 상대 관계는 그대로고 전체가 내려갈 뿐이다. "저음을 올리면
+  // 그만큼 나머지가 내려간다"는 것은 0dBFS 천장 아래에서 저음을 얻는 대가다.
+  // 곡마다 스펙트럼이 다른 데서 오는 잔차(실측 +-4dB)는 클라이언트의 헤드룸
+  // 서보가 메운다. 여기에 적응형 중립화를 또 붙이면 제어 루프가 둘이 된다.
+  const d = energyChangeDb(gains);
+  for (let i = 0; i < gains.length; ++i) {
+    gains[i] = Math.max(-CLAMP_DB, Math.min(CLAMP_DB, gains[i] - d));
   }
 
   return gains.map((v) => Math.round(v * 100) / 100);

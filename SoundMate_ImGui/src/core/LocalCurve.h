@@ -26,6 +26,11 @@ constexpr float kBandClampDb = 12.0f;
 // 착시를 막고 헤드룸을 보존한다. FilterEngine 의 리미터 개입 빈도도 낮아짐.
 constexpr bool kLoudnessNeutral = true;
 
+// [과도 부스트 캡] 이 값을 넘는 부스트는 tanh 로 완만히 포화시킨다.
+// curve.ts 와 반드시 같아야 한다.
+constexpr float kSoftKneeDb = 3.0f;
+constexpr float kSoftKneeRangeDb = 3.0f;  // 포화 폭 (최대 kSoftKneeDb + 이 값)
+
 // genre    : GenreManager(iTunes) 가 준 장르 문자열. 빈 문자열/미상 허용.
 // tendency : RecordManager::GetUserTendency() 반환값.
 //            ", " 로 연결된 5개 항목 [베이스, 보컬, 공간감, 고음, 청취목적].
