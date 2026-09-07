@@ -485,14 +485,20 @@ void MainWindow::ApplyEQNoSave() {
     // [EQ on/off 음량 일치] 실측 스펙트럼으로 잰 체감음량 변화를 전 밴드에서
     //   뺀다. 전역 오프셋이라 음색(커브 모양)은 전혀 안 바뀌고 숫자만
     //   평행이동한다. 프리앰프는 0 고정이므로 음량 조정은 여기서만 일어난다.
-    const float off = m_adaptiveLoudnessOffset;
-    for (size_t i = 0; i < master31.size(); ++i) {
-      float v = master31[i] - off;
-      if (m_adaptiveDelta.size() == master31.size())
-        v += m_adaptiveDelta[i];
+    if (m_adaptiveDelta.size() == master31.size())
+      for (size_t i = 0; i < master31.size(); ++i)
+        master31[i] += m_adaptiveDelta[i];
+
+    // [재생용 정규화] 그 곡의 실측 스펙트럼으로 중역을 0dB 에 맞추고
+    //   (EQ on/off 음량 일치), 총에너지가 예산을 넘으면 편차를 줄인다
+    //   (리미터 개입 방지). 측정 전이면 아무것도 하지 않는다.
+    AdaptiveCurve::NormalizeForPlayback(master31, m_adaptiveLevels,
+                                        m_adaptiveUsable, AIClient::F31);
+
+    for (float& v : master31) {
       // 엔진 상한과 동일하게 제한 (FilterConfiguration 이 ±24dB 를 넘기면
       // Controller 단에서 잘리므로 여기서 미리 맞춘다).
-      master31[i] = (v < -24.f) ? -24.f : ((v > 24.f) ? 24.f : v);
+      v = (v < -24.f) ? -24.f : ((v > 24.f) ? 24.f : v);
     }
   }
 
@@ -1030,22 +1036,16 @@ void MainWindow::Render() {
     std::vector<float> newDelta;
     bool isFirst = false;
     if (m_adaptive.TryTakeDelta(newDelta, &isFirst)) {
-      // 음량 오프셋은 델타를 받는 이 시점에만 다시 잡는다. 매 프레임 새로
-      //   계산하면 실측 스펙트럼이 흔들릴 때마다 음량이 따라 흔들려 펌핑이
+      // 실측 스펙트럼 스냅샷은 델타를 받는 이 시점에만 갱신한다. 매 프레임
+      //   새로 잡으면 스펙트럼이 흔들릴 때마다 음량이 따라 흔들려 펌핑이
       //   된다. 델타의 5초 주기 + 데드밴드를 그대로 물려받게 한다.
-      const std::vector<float> levels = m_adaptive.LastLevelsDb();
-      float off = 0.f;
-      if (levels.size() == m_eqGains31Master.size()) {
-        std::vector<float> probe = m_eqGains31Master;
-        if (newDelta.size() == probe.size())
-          for (size_t i = 0; i < probe.size(); ++i) probe[i] += newDelta[i];
-        off = AdaptiveCurve::LoudnessOffsetDb(probe, levels,
-                                              m_adaptive.LastUsable());
-      }
+      std::vector<float> levels = m_adaptive.LastLevelsDb();
+      std::vector<bool> usable = m_adaptive.LastUsable();
       {
         std::lock_guard<std::mutex> lk(m_adaptiveMutex);
         m_adaptiveDelta = newDelta;
-        m_adaptiveLoudnessOffset = off;
+        m_adaptiveLevels = std::move(levels);
+        m_adaptiveUsable = std::move(usable);
       }
       // 상태 메시지는 곡당 첫 적용에만 띄운다. 연속 보정은 5초마다 갱신될 수
       // 있어서 매번 띄우면 상태바가 계속 깜빡이는 소음이 된다.
@@ -1157,7 +1157,9 @@ void MainWindow::Render() {
       {
         std::lock_guard<std::mutex> lk(m_adaptiveMutex);
         m_adaptiveDelta.clear();
-        m_adaptiveLoudnessOffset = 0.f;  // 이전 곡의 음량 보정을 물려받지 않는다
+        // 이전 곡의 스펙트럼으로 정규화하지 않도록 스냅샷도 비운다.
+        m_adaptiveLevels.clear();
+        m_adaptiveUsable.clear();
       }
       m_adaptive.OnSongChanged(title, artist);
 

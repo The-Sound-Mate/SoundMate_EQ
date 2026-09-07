@@ -61,22 +61,31 @@ constexpr float kFloorRangeDb = 40.0f;
 //   클램프 때문에 한쪽으로 치우칠 수 있다. 치우치면 곡이 바뀔 때마다 음량이
 //   미묘하게 오르내린다. 보정의 '모양'은 그대로 두고 공통 오프셋만 빼므로
 //   부작용이 없다. LocalCurve 의 중립화와 같은 가중치를 쓴다.
-// [EQ on/off 음량 일치] 이 커브를 그 곡에 걸면 체감음량이 얼마나 변하는가(dB).
+// [에너지 예산] EQ 가 원곡에 더해도 되는 총에너지 상한(dB).
 //
-// 반환값을 전 밴드에서 빼면 EQ 를 켜도 음량이 그대로다. 전역 오프셋이므로
-// 커브 모양(음색)은 전혀 바뀌지 않는다 — 숫자만 평행이동한다.
+// 리미터 개입을 통제하는 유일한 실질 변수다. 실측: 커브가 +3.74dB 를 더했을
+// 때 개입률 94% 였고, 샘플피크 리미터는 광대역 감쇠라 킥마다 보컬이 눌리는
+// 먹먹함이 됐다. 예산을 두면 그 곡의 스펙트럼에 맞춰 자동으로 조절된다.
+constexpr float kEnergyBudgetDb = 1.5f;
+
+// [재생용 정규화] 그 곡의 실측 스펙트럼을 기준으로 커브를 다듬는다 (in-place).
 //
-// [왜 K-weighting 인가] 음량은 에너지가 아니라 청감이다. 음악 에너지는 저역이
-//   지배하므로(실측: 40Hz 가 1kHz 보다 5.3dB 강함) 에너지 기준으로 맞추면
-//   저음을 올릴 때 전체가 과하게 내려가 체감상 조용해진다.
+//   1) 중역(200Hz~4kHz)을 0dB 로 정렬 -> EQ on/off 음량이 같아진다.
+//      전대역 K 가중으로 재면 저역을 올린 만큼 중역이 내려가도 지표가 상쇄해
+//      "음량 같음"으로 판정한다. 실측에서 전대역K -0.03dB 인데 중역만 보면
+//      -5.14dB 였고, 사용자가 들은 것은 후자였다. 사람은 중역으로 음량을
+//      느끼므로 기준선은 중역이어야 한다.
 //
-// [왜 실측 스펙트럼인가] 곡마다 스펙트럼이 달라 고정 기준으로는 -1.6~+2.8dB
-//   어긋난다. 그 곡을 실제로 재서 맞춰야 "음량이 같다" 가 성립한다.
+//   2) 총에너지가 kEnergyBudgetDb 를 넘으면 중역 기준 편차를 축소한다.
+//      저역을 올리면 에너지가 늘고, 늘면 리미터가 문다. 저역 강조를 얼마나
+//      허용할지는 결국 이 예산이 정한다 — 실측 aespa 기준 예산 1.5dB 에서
+//      저역 +1.8 / 중역 -0.09 가 된다.
 //
-// measuredDb 가 비었거나 크기가 안 맞으면 0 을 반환한다(보정 안 함).
-float LoudnessOffsetDb(const std::vector<float>& gains,
-                       const std::vector<float>& measuredDb,
-                       const std::vector<bool>& usable);
+// 크기가 안 맞거나 측정이 없으면 아무것도 하지 않는다.
+void NormalizeForPlayback(std::vector<float>& gains,
+                          const std::vector<float>& measuredDb,
+                          const std::vector<bool>& usable,
+                          const std::vector<int>& freqs);
 
 std::vector<float> ComputeDelta(const std::vector<float>& measuredDb,
                                 const std::vector<bool>&  usable,
