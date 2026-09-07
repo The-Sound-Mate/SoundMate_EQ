@@ -198,6 +198,39 @@ std::vector<float> ComputeDelta(const std::vector<float>& measuredDb,
     corrected[i] = true;
   }
 
+  // 5-b) 델타 자체를 이웃 밴드와 평활한다 — 고립 스파이크 제거.
+  //
+  //  [왜 필요한가] 한 밴드만 이웃과 뚝 떨어져 튀는 현상이 실제로 보였다.
+  //  원인이 두 가지 있다.
+  //    (1) active 판정: measuredDb[i] > median-40dB 를 못 넘긴 밴드는 델타가
+  //        0 으로 남는다. 이웃들은 -1.5 인데 그 밴드만 0 이면 계단이 된다.
+  //    (2) 아래 6단계는 corrected 밴드만 mean 을 빼므로, 보정 안 된 밴드와의
+  //        간격이 mean 만큼 더 벌어진다.
+  //  둘 다 "이웃과 어긋난 한 점"으로 나타난다.
+  //
+  //  [왜 평활이 옳은가] 이 계층의 목적은 **완만한 스펙트럼 경향** 보정이다.
+  //  좁은 노치/피크는 녹음이나 방 특성이지 곡의 음색 성향이 아니고, Q=4.32
+  //  필터 한 개로 쫓아가면 위상만 흔들고 이득이 없다.
+  //  가장자리는 여전히 건드리지 않는다(추세를 신뢰할 수 없는 구간).
+  {
+    const int lo = firstActive + kSmoothHalfWidth;
+    const int hi = lastActive - kSmoothHalfWidth;
+    if (hi > lo) {
+      std::vector<float> sm = delta;
+      for (int i = lo; i <= hi; ++i) {
+        float sum = 0.f;
+        int   cnt = 0;
+        for (int k = std::max(lo, i - 1); k <= std::min(hi, i + 1); ++k) {
+          sum += delta[k];
+          ++cnt;
+        }
+        sm[i] = sum / (float)cnt;
+        corrected[i] = true;  // 평활 후에는 이 구간 전체가 보정 대상이다
+      }
+      delta.swap(sm);
+    }
+  }
+
   // 6) 라우드니스 중립화 — 이 계층이 전체 음량을 바꾸지 않도록 보장한다.
   //    실제로 보정한 밴드만 대상으로 가중평균을 빼고 다시 클램프한다.
   if (freqs.size() == n) {
