@@ -159,6 +159,14 @@ private:
   //   AdaptiveCurve::NormalizeForPlayback 의 입력.
   std::vector<float> m_adaptiveLevels;
   std::vector<bool>  m_adaptiveUsable;
+
+  // [분석 결과 표시 전용] 실제로 엔진에 나간 31밴드 값
+  //   (밑그림 + 델타 - 음량보정). m_adaptiveMutex 로 보호.
+  //
+  //   **SSOT 가 아니다.** 저장(SaveInteraction)·복원(m_aiOriginalGains31)·
+  //   프리셋은 계속 m_eqGains31Master(밑그림)를 쓴다. 여기에 델타가 섞인 값을
+  //   저장하면 다음 재생 때 캐시에서 꺼낸 값에 델타가 또 얹혀 누적된다.
+  std::vector<float> m_eqDisplay31;
   std::atomic<EqOrigin> m_eqOrigin{EqOrigin::None}; // 현재 EQ 출처
   int         m_currentDuration = 0;       // 총 재생 시간 (초)
   std::string m_displayTitle; // UI에 보이는 원본 제목 (마키용)

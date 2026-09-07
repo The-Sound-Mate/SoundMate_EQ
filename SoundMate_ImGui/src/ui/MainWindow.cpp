@@ -492,14 +492,23 @@ void MainWindow::ApplyEQNoSave() {
     // [재생용 정규화] 그 곡의 실측 스펙트럼으로 중역을 0dB 에 맞추고
     //   (EQ on/off 음량 일치), 총에너지가 예산을 넘으면 편차를 줄인다
     //   (리미터 개입 방지). 측정 전이면 아무것도 하지 않는다.
-    AdaptiveCurve::NormalizeForPlayback(master31, m_adaptiveLevels,
-                                        m_adaptiveUsable, AIClient::F31);
+    //
+    // [수동 조작은 건드리지 않는다] 사용자가 슬라이더를 직접 움직였거나
+    //   프리셋을 고른 경우는 "정확히 이 값을 원한다"는 뜻이다. 여기서
+    //   중역을 0 으로 재정렬하면 올린 밴드가 도로 내려가 슬라이더가 고장난
+    //   것처럼 느껴진다. 자동 경로(AI/캐시/프롬프트)에서만 적용한다.
+    const EqOrigin origin = m_eqOrigin.load();
+    if (origin != EqOrigin::Manual && origin != EqOrigin::Preset) {
+      AdaptiveCurve::NormalizeForPlayback(master31, m_adaptiveLevels,
+                                          m_adaptiveUsable, AIClient::F31);
+    }
 
     for (float& v : master31) {
       // 엔진 상한과 동일하게 제한 (FilterConfiguration 이 ±24dB 를 넘기면
       // Controller 단에서 잘리므로 여기서 미리 맞춘다).
       v = (v < -24.f) ? -24.f : ((v > 24.f) ? 24.f : v);
     }
+    m_eqDisplay31 = master31;  // 슬라이더 표시용 (SSOT 아님)
   }
 
   // 뷰 모드별로 N개 필터를 송신 — 엔진이 옥타브 폭에 맞는 Q 로 처리.
@@ -2062,6 +2071,29 @@ void MainWindow::RenderEQPanel() {
   // 건드리지 않고 31밴드 화면이 좁을 때만 15밴드로 표시. 창이 넓어지면 자동 복귀.
   std::vector<int>   viewBandsCopy;
   std::vector<float> viewGainsCopy;
+  // [분석 결과 표시] 자동 경로에서는 실제로 나간 값을 슬라이더에 보여준다.
+  //   m_eqGains31Master(밑그림/SSOT)는 건드리지 않는다 — 저장·복원이 밑그림
+  //   기준이어야 델타가 누적되지 않는다.
+  //   드래그 중이거나 트랜지션 중에는 건너뛴다(사용자 조작과 싸우지 않도록).
+  if (m_transitionProgress >= 1.0f && !ImGui::IsAnyItemActive()) {
+    const EqOrigin o = m_eqOrigin.load();
+    if (o != EqOrigin::Manual && o != EqOrigin::Preset) {
+      std::vector<float> disp;
+      {
+        std::lock_guard<std::mutex> lk(m_adaptiveMutex);
+        disp = m_eqDisplay31;
+      }
+      if (disp.size() == 31 && !m_currentBands.empty()) {
+        std::vector<float> view =
+            (m_currentBands.size() == 31)
+                ? disp
+                : DownsampleTo(disp, (int)m_currentBands.size());
+        if (view.size() == m_eqGains.size())
+          m_eqGains = view;
+      }
+    }
+  }
+
   std::vector<int>*   pBands = &m_currentBands;
   std::vector<float>* pGains = &m_eqGains;
   bool transientDowngrade = false;
@@ -2121,6 +2153,18 @@ void MainWindow::RenderEQPanel() {
     bool isActive = ImGui::IsItemActive();
 
     if (changed && !transientDowngrade) {
+      // [수동 인계] 보이던 값(밑그림 + 델타 - 음량보정)을 그대로 밑그림으로
+      //   확정한다. 안 그러면 화면은 보정값인데 master 는 밑그림이라 드래그
+      //   순간 다른 밴드들이 튄다. 이후로는 델타/정규화가 멈추므로(위 가드)
+      //   누적 위험이 없다.
+      if (m_eqOrigin.load() != EqOrigin::Manual) {
+        std::lock_guard<std::mutex> lk(m_adaptiveMutex);
+        if (m_eqDisplay31.size() == 31) {
+          EnsureMaster31();
+          if (m_eqGains31Master.size() == 31)
+            m_eqGains31Master = m_eqDisplay31;
+        }
+      }
       m_eqOrigin = EqOrigin::Manual;
       m_hasManualChanges = true;
 
