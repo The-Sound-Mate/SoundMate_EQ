@@ -177,14 +177,30 @@ private:
   //   보정 전 커브(저역 +3.2 / 중역 -3.1)가 그대로 나가 먹먹하게 들린다.
   //   정규화가 쓰는 값은 전대역 집계(중역 오프셋 / 총에너지)라 120ms EMA
   //   로도 충분히 안정적이다. 1초마다만 갱신해 흔들림을 더 줄인다.
+  //   [왜 스냅샷이 아니라 누적 평균인가] LiveLevelsDb 는 120ms EMA 라
+  //   1초마다 찍으면 매번 다른 값이 나오고, 그때마다 정규화 오프셋이 바뀌어
+  //   슬라이더가 계속 바쁘게 움직인다. 누적 평균은 표본이 쌓일수록 저절로
+  //   수렴해 조용해지고, LTAS(10~30초 적분)와도 가까워져 30초 전환 시
+  //   점프가 작아진다.
+  std::vector<double> m_earlyAccum;  // 대역별 파워 합
+  int   m_earlyCount = 0;
   std::vector<float> m_earlyLevels;
-  float m_earlyTimer = 0.0f;
-  static constexpr float kEarlyRefreshSec = 1.0f;
+  float m_earlySampleTimer = 0.0f;
+  float m_earlyApplyTimer = 0.0f;
+  static constexpr float kEarlySampleSec = 0.2f;  // 누적 표본 간격
+  static constexpr float kEarlyApplySec = 1.0f;   // 재적용 간격 (파일 I/O 억제)
 
   std::vector<float> m_eqTarget31;
   float m_eqSmoothTimer = 0.0f;
-  // 시상수(초). 약 3배 시간에 95% 도달 -> 2초쯤에 거의 수렴.
-  static constexpr float kEqSmoothTau = 0.7f;
+  // 시상수(초). 약 3배 시간에 95% 도달 -> 9초쯤에 수렴.
+  //
+  // [왜 이렇게 느린가] 30초 시점의 첫 델타는 밴드당 최대 ±3dB 가 한꺼번에
+  //   들어오는 **한 번뿐인 큰 변화**다. 짧은 시상수로는 그 순간이 "확 바뀐다"
+  //   로 들린다. 200ms 간격 한 스텝이 남은 거리의 6.5% 라, 3dB 변화의 첫
+  //   스텝이 0.2dB — 들리지 않는다.
+  //   이후 5초마다의 갱신은 0.25dB 데드밴드를 넘을 때만 오므로 대부분
+  //   건너뛴다. 느린 시상수 때문에 재적용이 계속 도는 일은 없다.
+  static constexpr float kEqSmoothTau = 3.0f;
   std::atomic<EqOrigin> m_eqOrigin{EqOrigin::None}; // 현재 EQ 출처
   int         m_currentDuration = 0;       // 총 재생 시간 (초)
   std::string m_displayTitle; // UI에 보이는 원본 제목 (마키용)

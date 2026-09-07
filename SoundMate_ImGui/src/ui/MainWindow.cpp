@@ -1010,14 +1010,35 @@ void MainWindow::Render() {
   // ── [초반 30초] 빠른 레벨 스냅샷 갱신 ──
   //   LTAS 가 준비되면 더 이상 필요 없다.
   if (m_adaptiveLevels.size() != AIClient::F31.size()) {
-    m_earlyTimer += m_deltaTime;
-    if (m_earlyTimer >= kEarlyRefreshSec) {
-      m_earlyTimer = 0.0f;
+    const size_t n = AIClient::F31.size();
+    m_earlySampleTimer += m_deltaTime;
+    if (m_earlySampleTimer >= kEarlySampleSec) {
+      m_earlySampleTimer = 0.0f;
       std::vector<float> live = m_adaptive.LiveLevelsDb();
-      if (live.size() == AIClient::F31.size()) {
-        m_earlyLevels = std::move(live);
-        ApplyEQNoSave();  // 목표 갱신 — 실제 반영은 평활이 맡는다
+      if (live.size() == n) {
+        if (m_earlyAccum.size() != n) {
+          m_earlyAccum.assign(n, 0.0);
+          m_earlyCount = 0;
+        }
+        for (size_t i = 0; i < n; ++i) {
+          // 파워 도메인에서 누적한다 — dB 를 그냥 평균하면 큰 값이 과소평가된다.
+          if (live[i] > -190.f)
+            m_earlyAccum[i] += std::pow(10.0, (double)live[i] / 10.0);
+        }
+        ++m_earlyCount;
       }
+    }
+    m_earlyApplyTimer += m_deltaTime;
+    if (m_earlyApplyTimer >= kEarlyApplySec && m_earlyCount > 0 &&
+        m_earlyAccum.size() == n) {
+      m_earlyApplyTimer = 0.0f;
+      std::vector<float> lv(n, -200.f);
+      for (size_t i = 0; i < n; ++i) {
+        const double p = m_earlyAccum[i] / (double)m_earlyCount;
+        lv[i] = (p > 1e-20) ? (float)(10.0 * std::log10(p)) : -200.f;
+      }
+      m_earlyLevels = std::move(lv);
+      ApplyEQNoSave();  // 목표 갱신 — 실제 반영은 평활이 맡는다
     }
   }
 
@@ -1230,6 +1251,8 @@ void MainWindow::Render() {
         m_adaptiveLevels.clear();
         m_adaptiveUsable.clear();
         m_earlyLevels.clear();
+        m_earlyAccum.clear();
+        m_earlyCount = 0;
       }
       m_adaptive.OnSongChanged(title, artist);
 
