@@ -132,6 +132,10 @@ public:
   // 진단용 — 마지막 측정의 대역 레벨(dB). 비어 있을 수 있다.
   std::vector<float> LastLevelsDb() const;
 
+  // 마지막 측정의 밴드 유효 마스크 (나이퀴스트 제외 밴드는 false).
+  //   LastLevelsDb 와 짝으로 쓴다.
+  std::vector<bool> LastUsable() const;
+
   // 시각화용 순간 대역 레벨(dB). 적분 창 밖에서도 계속 갱신된다.
   // 오디오가 없거나 탭이 없으면 빈 벡터 — 호출부가 폴백을 판단할 수 있다.
   std::vector<float> LiveLevelsDb() const;
@@ -170,6 +174,7 @@ private:
   std::vector<float> m_delta;        // 수거 대기 중인 델타
   std::vector<float> m_lastApplied;  // 마지막으로 수거된 델타 (Deadband 기준)
   std::vector<float> m_lastLevels;
+  std::vector<bool>  m_lastUsable;
   std::string        m_songTitle;   // 무드 로그 라벨
   std::string        m_songArtist;
   std::vector<float> m_liveLevels;

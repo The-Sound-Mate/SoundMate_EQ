@@ -17,6 +17,36 @@ float LoudnessWeight(float f) {
 }
 } // namespace
 
+// ITU-R BS.1770 K-weighting 의 파워 가중을 31밴드 중심주파수에서 미리 계산한 값.
+const float kKWeight[31] = {
+    4.7040e-2f, 9.1353e-2f, 1.6009e-1f, 2.7753e-1f, 4.0420e-1f, 5.4151e-1f,
+    6.7115e-1f, 7.7028e-1f, 8.4571e-1f, 9.0469e-1f, 9.4083e-1f, 9.6540e-1f,
+    9.8288e-1f, 9.9660e-1f, 1.0098e+0f, 1.0314e+0f, 1.0783e+0f, 1.1743e+0f,
+    1.3620e+0f, 1.6945e+0f, 2.0283e+0f, 2.2802e+0f, 2.4256e+0f, 2.4934e+0f,
+    2.5196e+0f, 2.5305e+0f, 2.5348e+0f, 2.5362e+0f, 2.5367e+0f, 2.5369e+0f,
+    2.5369e+0f};
+
+float LoudnessOffsetDb(const std::vector<float>& gains,
+                       const std::vector<float>& measuredDb,
+                       const std::vector<bool>& usable) {
+  if (gains.size() != measuredDb.size() || gains.size() != usable.size() ||
+      gains.size() != 31)
+    return 0.f;
+  double p0 = 0.0, p1 = 0.0;
+  for (size_t b = 0; b < 31; ++b) {
+    if (!usable[b] || measuredDb[b] <= -190.f)
+      continue;
+    // 그 곡의 실측 대역 파워 x K 가중 = 체감음량 기여분.
+    const double w =
+        std::pow(10.0, (double)measuredDb[b] / 10.0) * (double)kKWeight[b];
+    p0 += w;
+    p1 += w * std::pow(10.0, (double)gains[b] / 10.0);
+  }
+  if (p0 <= 1e-30 || p1 <= 1e-30)
+    return 0.f;
+  return (float)(10.0 * std::log10(p1 / p0));
+}
+
 std::vector<float> ComputeDelta(const std::vector<float>& measuredDb,
                                 const std::vector<bool>&  usable,
                                 const std::vector<int>&   freqs,

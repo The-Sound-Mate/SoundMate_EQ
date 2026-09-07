@@ -21,6 +21,7 @@
 #pragma comment(lib, "propsys.lib")
 #include "../core/FeatureFlags.h"
 #include "../core/GenreManager.h"
+#include "../core/AdaptiveCurve.h"
 #include "../core/LocalCurve.h"
 #include "../core/RecordManager.h"
 #include <curl/curl.h>
@@ -481,13 +482,17 @@ void MainWindow::ApplyEQNoSave() {
   std::vector<float> master31 = m_eqGains31Master;
   {
     std::lock_guard<std::mutex> lk(m_adaptiveMutex);
-    if (m_adaptiveDelta.size() == master31.size()) {
-      for (size_t i = 0; i < master31.size(); ++i) {
-        float v = master31[i] + m_adaptiveDelta[i];
-        // 엔진 상한과 동일하게 제한 (FilterConfiguration 이 ±24dB 를 넘기면
-        // Controller 단에서 잘리므로 여기서 미리 맞춘다).
-        master31[i] = (v < -24.f) ? -24.f : ((v > 24.f) ? 24.f : v);
-      }
+    // [EQ on/off 음량 일치] 실측 스펙트럼으로 잰 체감음량 변화를 전 밴드에서
+    //   뺀다. 전역 오프셋이라 음색(커브 모양)은 전혀 안 바뀌고 숫자만
+    //   평행이동한다. 프리앰프는 0 고정이므로 음량 조정은 여기서만 일어난다.
+    const float off = m_adaptiveLoudnessOffset;
+    for (size_t i = 0; i < master31.size(); ++i) {
+      float v = master31[i] - off;
+      if (m_adaptiveDelta.size() == master31.size())
+        v += m_adaptiveDelta[i];
+      // 엔진 상한과 동일하게 제한 (FilterConfiguration 이 ±24dB 를 넘기면
+      // Controller 단에서 잘리므로 여기서 미리 맞춘다).
+      master31[i] = (v < -24.f) ? -24.f : ((v > 24.f) ? 24.f : v);
     }
   }
 
@@ -1025,9 +1030,22 @@ void MainWindow::Render() {
     std::vector<float> newDelta;
     bool isFirst = false;
     if (m_adaptive.TryTakeDelta(newDelta, &isFirst)) {
+      // 음량 오프셋은 델타를 받는 이 시점에만 다시 잡는다. 매 프레임 새로
+      //   계산하면 실측 스펙트럼이 흔들릴 때마다 음량이 따라 흔들려 펌핑이
+      //   된다. 델타의 5초 주기 + 데드밴드를 그대로 물려받게 한다.
+      const std::vector<float> levels = m_adaptive.LastLevelsDb();
+      float off = 0.f;
+      if (levels.size() == m_eqGains31Master.size()) {
+        std::vector<float> probe = m_eqGains31Master;
+        if (newDelta.size() == probe.size())
+          for (size_t i = 0; i < probe.size(); ++i) probe[i] += newDelta[i];
+        off = AdaptiveCurve::LoudnessOffsetDb(probe, levels,
+                                              m_adaptive.LastUsable());
+      }
       {
         std::lock_guard<std::mutex> lk(m_adaptiveMutex);
         m_adaptiveDelta = newDelta;
+        m_adaptiveLoudnessOffset = off;
       }
       // 상태 메시지는 곡당 첫 적용에만 띄운다. 연속 보정은 5초마다 갱신될 수
       // 있어서 매번 띄우면 상태바가 계속 깜빡이는 소음이 된다.
@@ -1044,16 +1062,6 @@ void MainWindow::Render() {
     }
   }
 
-  // ── [헤드룸 서보] 실측 리미터 개입률로 정해진 프리앰프 반영 ──
-  //   곡 안에서는 내려가기만 하므로 재적용 횟수가 곡당 최대 10회(-1 -> -6,
-  //   0.5dB 스텝)로 묶인다. 적응 델타 재적용과 같은 경로를 탄다.
-  {
-    float newPreamp = 0.f;
-    if (m_eqCtrl && m_adaptive.TryTakePreamp(newPreamp)) {
-      m_eqCtrl->SetPreampDb(newPreamp);
-      ApplyEQNoSave();
-    }
-  }
 
   // ── 예약된 EQ 업데이트 처리 (메인 스레드 안전) ──
   if (m_pendingEQUpdate.exchange(false)) {
@@ -1149,6 +1157,7 @@ void MainWindow::Render() {
       {
         std::lock_guard<std::mutex> lk(m_adaptiveMutex);
         m_adaptiveDelta.clear();
+        m_adaptiveLoudnessOffset = 0.f;  // 이전 곡의 음량 보정을 물려받지 않는다
       }
       m_adaptive.OnSongChanged(title, artist);
 

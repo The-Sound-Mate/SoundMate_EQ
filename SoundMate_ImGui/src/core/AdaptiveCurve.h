@@ -61,6 +61,23 @@ constexpr float kFloorRangeDb = 40.0f;
 //   클램프 때문에 한쪽으로 치우칠 수 있다. 치우치면 곡이 바뀔 때마다 음량이
 //   미묘하게 오르내린다. 보정의 '모양'은 그대로 두고 공통 오프셋만 빼므로
 //   부작용이 없다. LocalCurve 의 중립화와 같은 가중치를 쓴다.
+// [EQ on/off 음량 일치] 이 커브를 그 곡에 걸면 체감음량이 얼마나 변하는가(dB).
+//
+// 반환값을 전 밴드에서 빼면 EQ 를 켜도 음량이 그대로다. 전역 오프셋이므로
+// 커브 모양(음색)은 전혀 바뀌지 않는다 — 숫자만 평행이동한다.
+//
+// [왜 K-weighting 인가] 음량은 에너지가 아니라 청감이다. 음악 에너지는 저역이
+//   지배하므로(실측: 40Hz 가 1kHz 보다 5.3dB 강함) 에너지 기준으로 맞추면
+//   저음을 올릴 때 전체가 과하게 내려가 체감상 조용해진다.
+//
+// [왜 실측 스펙트럼인가] 곡마다 스펙트럼이 달라 고정 기준으로는 -1.6~+2.8dB
+//   어긋난다. 그 곡을 실제로 재서 맞춰야 "음량이 같다" 가 성립한다.
+//
+// measuredDb 가 비었거나 크기가 안 맞으면 0 을 반환한다(보정 안 함).
+float LoudnessOffsetDb(const std::vector<float>& gains,
+                       const std::vector<float>& measuredDb,
+                       const std::vector<bool>& usable);
+
 std::vector<float> ComputeDelta(const std::vector<float>& measuredDb,
                                 const std::vector<bool>&  usable,
                                 const std::vector<int>&   freqs,

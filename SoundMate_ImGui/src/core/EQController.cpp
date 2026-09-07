@@ -136,27 +136,11 @@ bool EQController::ApplyEQ(const std::vector<float> &gains,
 
   float q = CalculateQ((int)freqs.size());
 
-  // [헤드룸] 고정 -1 dB.
-  //
-  // 실측 근거 (Charlie Puth, 60Hz +7dB 커브, 재생 피크 -6.5 dBFS):
-  //   preamp  0 dB -> 리미터 개입 3.3%
-  //   preamp -1 dB -> 0.0%
-  // 같은 커브를 -1 dBFS 짜리 합성 신호로 재면 0dB 에서 100% 가 나온다. 즉
-  // 개입률은 재생 볼륨에 좌우되므로 어떤 고정값도 완벽할 수 없다. -1 dB 는
-  // "지금 필요해서"가 아니라 볼륨을 키우는 사용자에게 주는 마진이다.
-  //
-  // 그리고 리미터가 대신할 수 없는 일을 한다: 우리 리미터는 **샘플 피크**
-  // 브릭월이라 샘플 사이에서 생기는 인터샘플 피크(True Peak)를 원리적으로
-  // 잡지 못한다. 손실 압축(AAC/Opus) 디코딩 결과는 0 dBFS 를 +0.5~1 dB 넘는
-  // 인터샘플 피크를 흔히 만든다 — 스트리밍 마스터링 가이드가 -1 dBTP 헤드룸을
-  // 권하는 이유다. 이 1 dB 가 그 몫이다.
-  //
-  // 청감 비용은 사실상 0 (1 dB 는 A/B 비교 없이는 구분되지 않는다).
-  // [v0.1.0 헤드룸 서보] 고정값이 아니라 AdaptiveEngine 이 실측한 리미터
-  //   개입률로 곡마다 정한 값을 쓴다. 서보가 안 돌면 -1.0 그대로다.
-  //   실측 근거: aespa(peak -0.31)는 -1dB 에서 개입률 93.9% 였다. 고정값으로
-  //   덮을 수 있는 문제가 아니었다.
-  float preamp = m_preampDb.load();
+  // [프리앰프 0 고정] 음량은 프리앰프가 아니라 **EQ 밴드 게인**으로 맞춘다.
+  //   AdaptiveCurve::LoudnessOffsetDb 가 그 곡을 실제로 재서 밴드 게인에
+  //   전역 오프셋을 넣으므로, EQ 를 켜도 껐을 때와 음량이 같다.
+  //   프리앰프를 따로 깎으면 그만큼 EQ on 이 더 조용해질 뿐이다.
+  const float preamp = 0.0f;
 
   std::ostringstream oss;
   oss << "Preamp: " << std::fixed << std::setprecision(1) << preamp << " dB\n";

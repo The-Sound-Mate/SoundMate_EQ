@@ -47,6 +47,7 @@ void AdaptiveEngine::OnSongChanged(const std::string& title,
     m_preampDirty = true;
     m_delta.clear();
     m_lastLevels.clear();
+    m_lastUsable.clear();
     // 새 곡의 첫 델타는 Deadband 없이 무조건 적용돼야 한다. 기준점을 비운다.
     m_lastApplied.clear();
     m_deltaIsFirst = true;
@@ -89,6 +90,11 @@ bool AdaptiveEngine::TryTakeDelta(std::vector<float>& out, bool* outIsFirst) {
 std::vector<float> AdaptiveEngine::LastLevelsDb() const {
   std::lock_guard<std::mutex> lk(m_mutex);
   return m_lastLevels;
+}
+
+std::vector<bool> AdaptiveEngine::LastUsable() const {
+  std::lock_guard<std::mutex> lk(m_mutex);
+  return m_lastUsable;
 }
 
 std::vector<float> AdaptiveEngine::LiveLevelsDb() const {
@@ -320,8 +326,7 @@ void AdaptiveEngine::WorkerLoop() {
           const double pct =
               servoPolls ? (100.0 * (double)servoActive / (double)servoPolls)
                          : -1.0;
-          if (ApplyHeadroomServo(pct))
-            servoSettle = (uint64_t)(kServoSettleSeconds * configuredRate);
+          (void)pct;  // [진단] 서보는 제거됐다. 개입률은 로그로만 남긴다.
           servoSamples = 0;
           servoPolls = 0;
           servoActive = 0;
@@ -394,6 +399,7 @@ void AdaptiveEngine::WorkerLoop() {
       {
         std::lock_guard<std::mutex> lk(m_mutex);
         m_lastLevels = levels;
+        m_lastUsable = analyzer.BandUsable();
         m_delta = delta;
         m_deltaIsFirst = true;
       }
@@ -422,6 +428,7 @@ void AdaptiveEngine::WorkerLoop() {
     {
       std::lock_guard<std::mutex> lk(m_mutex);
       m_lastLevels = levels;
+      m_lastUsable = analyzer.BandUsable();
 
       // Deadband — 마지막으로 **적용된** 값과 비교한다. 직전 계산값과 비교하면
       // 느린 드리프트가 영원히 반영되지 않는다.
