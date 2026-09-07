@@ -508,7 +508,18 @@ void MainWindow::ApplyEQNoSave() {
       // Controller 단에서 잘리므로 여기서 미리 맞춘다).
       v = (v < -24.f) ? -24.f : ((v > 24.f) ? 24.f : v);
     }
-    m_eqDisplay31 = master31;  // 슬라이더 표시용 (SSOT 아님)
+
+    // [부드러운 반영] 목표는 방금 계산한 값이고, 실제로 내보내는 것은 그쪽으로
+    //   서서히 따라가는 m_eqDisplay31 이다. 프레임 루프가 평활을 진행하며
+    //   200ms 마다 이 함수를 다시 부른다.
+    //   수동/프리셋은 사용자가 방금 정한 값이므로 즉시 반영한다.
+    m_eqTarget31 = master31;
+    const bool instant = (origin == EqOrigin::Manual ||
+                          origin == EqOrigin::Preset ||
+                          m_eqDisplay31.size() != master31.size());
+    if (instant)
+      m_eqDisplay31 = master31;
+    master31 = m_eqDisplay31;
   }
 
   // 뷰 모드별로 N개 필터를 송신 — 엔진이 옥타브 폭에 맞는 Q 로 처리.
@@ -984,6 +995,32 @@ void MainWindow::Render() {
     if (m_transitionProgress >= 1.0f) {
       ApplyEQNoSave(); // 최종 값 보장
       m_transitionApplyTimer = 0.0f;
+    }
+  }
+
+  // ── [부드러운 반영] EQ 평활 진행 ──
+  //   지수 평활이라 목표가 5초마다 조금씩 바뀌어도 계단이 생기지 않는다.
+  //   0.02dB 안에 들어오면 목표에 스냅하고 멈춘다(무한 재적용 방지).
+  if (m_eqTarget31.size() == 31 && m_eqDisplay31.size() == 31 &&
+      m_transitionProgress >= 1.0f) {
+    float maxDiff = 0.f;
+    for (size_t i = 0; i < 31; ++i) {
+      const float d = std::fabs(m_eqTarget31[i] - m_eqDisplay31[i]);
+      if (d > maxDiff) maxDiff = d;
+    }
+    if (maxDiff > 0.02f) {
+      const float a = 1.0f - std::exp(-m_deltaTime / kEqSmoothTau);
+      for (size_t i = 0; i < 31; ++i)
+        m_eqDisplay31[i] += (m_eqTarget31[i] - m_eqDisplay31[i]) * a;
+      m_eqSmoothTimer += m_deltaTime;
+      if (m_eqSmoothTimer >= kTransitionApplyInterval) {
+        ApplyEQNoSave();
+        m_eqSmoothTimer = 0.0f;
+      }
+    } else if (maxDiff > 0.0f) {
+      m_eqDisplay31 = m_eqTarget31;  // 마지막 잔차 스냅
+      ApplyEQNoSave();
+      m_eqSmoothTimer = 0.0f;
     }
   }
 

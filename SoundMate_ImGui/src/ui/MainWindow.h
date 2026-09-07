@@ -167,6 +167,15 @@ private:
   //   프리셋은 계속 m_eqGains31Master(밑그림)를 쓴다. 여기에 델타가 섞인 값을
   //   저장하면 다음 재생 때 캐시에서 꺼낸 값에 델타가 또 얹혀 누적된다.
   std::vector<float> m_eqDisplay31;
+
+  // [부드러운 반영] 분석 결과가 30초 시점과 5초마다 한 번에 튀지 않도록
+  //   목표값(m_eqTarget31)을 두고 지수 평활로 따라간다. 엔진에 나가는 것도,
+  //   슬라이더에 보이는 것도 평활된 값(m_eqDisplay31)이라 소리와 화면이 같이
+  //   부드러워진다. 수동 조작은 평활 없이 즉시 반영한다.
+  std::vector<float> m_eqTarget31;
+  float m_eqSmoothTimer = 0.0f;
+  // 시상수(초). 약 3배 시간에 95% 도달 -> 2초쯤에 거의 수렴.
+  static constexpr float kEqSmoothTau = 0.7f;
   std::atomic<EqOrigin> m_eqOrigin{EqOrigin::None}; // 현재 EQ 출처
   int         m_currentDuration = 0;       // 총 재생 시간 (초)
   std::string m_displayTitle; // UI에 보이는 원본 제목 (마키용)
