@@ -499,8 +499,17 @@ void MainWindow::ApplyEQNoSave() {
     //   것처럼 느껴진다. 자동 경로(AI/캐시/프롬프트)에서만 적용한다.
     const EqOrigin origin = m_eqOrigin.load();
     if (origin != EqOrigin::Manual && origin != EqOrigin::Preset) {
-      AdaptiveCurve::NormalizeForPlayback(master31, m_adaptiveLevels,
-                                          m_adaptiveUsable, AIClient::F31);
+      // LTAS 측정 전(첫 30초)에는 빠른 레벨로 대신한다. 안 그러면 그 구간만
+      //   정규화가 꺼져 보정 전 커브가 나가 먹먹하게 들린다.
+      const bool haveLtas = (m_adaptiveLevels.size() == AIClient::F31.size());
+      const std::vector<float>& lv =
+          haveLtas ? m_adaptiveLevels : m_earlyLevels;
+      // 빠른 레벨에는 usable 마스크가 없다. NormalizeForPlayback 이 -190dB
+      //   이하를 자체적으로 걸러내므로 전부 true 로 넘겨도 안전하다.
+      const std::vector<bool> uv =
+          haveLtas ? m_adaptiveUsable
+                   : std::vector<bool>(lv.size(), true);
+      AdaptiveCurve::NormalizeForPlayback(master31, lv, uv, AIClient::F31);
     }
 
     for (float& v : master31) {
@@ -998,6 +1007,20 @@ void MainWindow::Render() {
     }
   }
 
+  // ── [초반 30초] 빠른 레벨 스냅샷 갱신 ──
+  //   LTAS 가 준비되면 더 이상 필요 없다.
+  if (m_adaptiveLevels.size() != AIClient::F31.size()) {
+    m_earlyTimer += m_deltaTime;
+    if (m_earlyTimer >= kEarlyRefreshSec) {
+      m_earlyTimer = 0.0f;
+      std::vector<float> live = m_adaptive.LiveLevelsDb();
+      if (live.size() == AIClient::F31.size()) {
+        m_earlyLevels = std::move(live);
+        ApplyEQNoSave();  // 목표 갱신 — 실제 반영은 평활이 맡는다
+      }
+    }
+  }
+
   // ── [부드러운 반영] EQ 평활 진행 ──
   //   지수 평활이라 목표가 5초마다 조금씩 바뀌어도 계단이 생기지 않는다.
   //   0.02dB 안에 들어오면 목표에 스냅하고 멈춘다(무한 재적용 방지).
@@ -1206,6 +1229,7 @@ void MainWindow::Render() {
         // 이전 곡의 스펙트럼으로 정규화하지 않도록 스냅샷도 비운다.
         m_adaptiveLevels.clear();
         m_adaptiveUsable.clear();
+        m_earlyLevels.clear();
       }
       m_adaptive.OnSongChanged(title, artist);
 

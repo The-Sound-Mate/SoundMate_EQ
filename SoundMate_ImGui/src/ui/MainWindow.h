@@ -172,6 +172,15 @@ private:
   //   목표값(m_eqTarget31)을 두고 지수 평활로 따라간다. 엔진에 나가는 것도,
   //   슬라이더에 보이는 것도 평활된 값(m_eqDisplay31)이라 소리와 화면이 같이
   //   부드러워진다. 수동 조작은 평활 없이 즉시 반영한다.
+  // [초반 30초] LTAS 측정(10초 스킵 + 20초 적분)이 끝나기 전까지 쓰는
+  //   빠른 레벨 스냅샷. 이게 없으면 첫 30초 동안 정규화가 통째로 꺼져
+  //   보정 전 커브(저역 +3.2 / 중역 -3.1)가 그대로 나가 먹먹하게 들린다.
+  //   정규화가 쓰는 값은 전대역 집계(중역 오프셋 / 총에너지)라 120ms EMA
+  //   로도 충분히 안정적이다. 1초마다만 갱신해 흔들림을 더 줄인다.
+  std::vector<float> m_earlyLevels;
+  float m_earlyTimer = 0.0f;
+  static constexpr float kEarlyRefreshSec = 1.0f;
+
   std::vector<float> m_eqTarget31;
   float m_eqSmoothTimer = 0.0f;
   // 시상수(초). 약 3배 시간에 95% 도달 -> 2초쯤에 거의 수렴.
