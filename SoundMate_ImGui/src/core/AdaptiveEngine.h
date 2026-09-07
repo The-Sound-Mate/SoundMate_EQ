@@ -56,6 +56,28 @@ public:
   //   연속 2창이면 aespa(91.8/88.1/91.0/91.0)는 5초만 늦어질 뿐이고,
   //   야생화의 단발 스파이크(6.2% 1회)는 걸러진다.
   static constexpr int   kOverWindowsToStep = 2;
+
+  // [서보 독립 창] 서보를 스펙트럼 분석 일정에서 분리한다.
+  //   10초 스킵 + 20초 적분은 **음색 분석**을 위한 것이다 — 잔잔한 인트로를
+  //   재서 "저역 부족"으로 오판하는 걸 막으려는 장치다. 리미터 개입은 그
+  //   이유와 무관하다: 인트로든 후렴이든 물리면 헤드룸이 모자란 사실 그대로다.
+  //   묶어두면 첫 30초를 무조건 -1.0dB 로 버티게 되어(실측 개입률 94%),
+  //   없앨 수 있는 왜곡을 방치하게 된다.
+  static constexpr double kServoWindowSeconds = 2.0;
+
+  // [데드타임] 프리앰프를 내려도 config.txt -> Controller -> APO 전파에
+  //   시간이 걸린다. 다음 창 앞부분이 아직 옛 게인을 재면 개입률이 높게 나와
+  //   또 내리고, 래칫이라 그 과잉 인하는 되돌릴 수 없다. 인하 직후 이만큼은
+  //   세지 않는다.
+  static constexpr double kServoSettleSeconds = 0.5;
+
+  // [비례 스텝] 94% 가 물리는데 0.5dB 씩 더듬을 이유가 없다. 연속 2창
+  //   조건이 앞에서 단발 스파이크를 걸러주므로 큰 스텝이 안전하다.
+  static constexpr float kStepBigDb   = 2.0f;  // 개입률 > 50%
+  static constexpr float kStepMidDb   = 1.0f;  // 개입률 > 20%
+  static constexpr float kStepSmallDb = 0.5f;  // 그 외
+  static constexpr double kPctBig = 50.0;
+  static constexpr double kPctMid = 20.0;
   static constexpr float kPreampStartDb    = -1.0f;  // 캐시 없을 때 시작값
   static constexpr float kPreampStepDb     = 0.5f;
   static constexpr float kPreampMinDb      = -6.0f;  // 폭주 방지 하한
@@ -117,7 +139,10 @@ private:
   void LogMood(class SpectrumAnalyzer& analyzer,
                const std::vector<float>& levels, const char* phase,
                double limPct);
-  void ApplyHeadroomServo(double limPct);
+  // 인하했으면 true (호출부가 정착 시간을 건다).
+  bool ApplyHeadroomServo(double limPct);
+  // 링버퍼 추월을 독립 이벤트 줄로 남긴다 (서보 인하와의 상관 확인용).
+  void LogLostEvent();
 
   // 헤드룸 서보 상태 (워커 스레드 소유, 수거만 뮤텍스로 보호)
   float m_preampDb = kPreampStartDb;
@@ -126,8 +151,9 @@ private:
 
   std::function<bool()> m_limiterProbe;  // Start() 전에만 쓰기
   // 워커 스레드 전용 — 동기화 불필요.
-  size_t m_limPolls = 0;
+  size_t m_limPolls = 0;   // 로그용 창 (스펙트럼 일정과 동일)
   size_t m_limActive = 0;
+  size_t m_lostCount = 0;  // 링버퍼 추월 누적
   // 카운터를 읽고 창을 비운다. 측정 없으면 음수.
   double TakeLimiterPct();
 

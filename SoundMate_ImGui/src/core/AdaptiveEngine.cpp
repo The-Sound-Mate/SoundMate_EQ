@@ -10,6 +10,7 @@
 #include <windows.h>
 
 #include <cmath>
+#include <cstdio>
 
 namespace {
 // 워커 주기. 링버퍼가 48kHz 기준 약 1.37초를 담으므로 50ms 는 27배 여유.
@@ -105,6 +106,33 @@ std::vector<float> AdaptiveEngine::LiveLevelsDb() const {
 // [측정 단계] 무드 지표를 계산해 로그에 한 줄 남긴다. EQ 에는 영향이 없다.
 //   목적은 "발라드와 EDM 이 실제로 다른 숫자를 내는가" 확인 하나뿐이다.
 // 리미터 개입률 카운터를 읽고 창을 비운다. 측정이 없었으면 음수.
+// [진단] 링버퍼 추월. 정상 상태에서는 절대 나면 안 된다 — 링버퍼 65536프레임
+//   (1.37초)에 50ms 마다 2400프레임이 들어오고 12000프레임을 퍼내므로,
+//   추월했다는 것은 워커가 1.4초 이상 굶었다는 뜻이다. 파라미터 문제가
+//   아니므로 시점을 남겨 원인(서보 인하의 파일 I/O 등)과 대조한다.
+void AdaptiveEngine::LogLostEvent() {
+  float pre = 0.f;
+  std::string t;
+  {
+    std::lock_guard<std::mutex> lk(m_mutex);
+    pre = m_preampDb;
+    t = m_songTitle;
+  }
+  char buf[256];
+  std::snprintf(buf, sizeof(buf),
+                "{\"event\":\"lost\",\"tick\":%lu,\"lostCount\":%zu,"
+                "\"preampDb\":%.1f,\"title\":\"",
+                (unsigned long)GetTickCount(), m_lostCount, pre);
+  std::string line = buf;
+  for (char c : t) {
+    if (c == 0x22 || c == 0x5C)
+      line += 0x5C;
+    line += c;
+  }
+  line += "\"}";
+  AppendMoodLog(line);
+}
+
 double AdaptiveEngine::TakeLimiterPct() {
   const double pct =
       m_limPolls ? (100.0 * (double)m_limActive / (double)m_limPolls) : -1.0;
@@ -129,7 +157,19 @@ void AdaptiveEngine::LogMood(SpectrumAnalyzer& analyzer,
     t = m_songTitle;
     a = m_songArtist;
   }
-  AppendMoodLog(mf.ToJson(t, a, phase, levels, limPct));
+  float pre = 0.f;
+  {
+    std::lock_guard<std::mutex> lk(m_mutex);
+    pre = m_preampDb;
+  }
+  std::string line = mf.ToJson(t, a, phase, levels, limPct);
+  // 서보 상태를 같은 줄에 덧붙인다 — 로그만 보고 거동을 재구성할 수 있어야 한다.
+  char ex[64];
+  std::snprintf(ex, sizeof(ex), ",\"preampDb\":%.1f,\"tick\":%lu}", pre,
+                (unsigned long)GetTickCount());
+  if (!line.empty() && line.back() == 0x7D)
+    line.pop_back();
+  AppendMoodLog(line + ex);
 }
 
 // [헤드룸 서보] 실측 개입률이 목표를 넘으면 프리앰프를 한 스텝 내린다.
@@ -140,23 +180,30 @@ void AdaptiveEngine::LogMood(SpectrumAnalyzer& analyzer,
 // 대리 지표를 쓰지 않는 이유: crest 도 peak 도 개입률을 예측하지 못했다.
 // aespa(peak -0.31) 93.9% vs 야생화(peak -0.32) 2.5% — peak 0.01dB 차이에
 // 91%p 격차. 반면 여기서 보는 값은 우리가 통제하려는 양 그 자체다.
-void AdaptiveEngine::ApplyHeadroomServo(double limPct) {
+bool AdaptiveEngine::ApplyHeadroomServo(double limPct) {
   if (limPct < 0.0)
-    return;  // 이 창에 측정이 없었다
+    return false;  // 이 창에 측정이 없었다
   if (limPct <= (double)kLimiterTargetPct) {
     m_limOverStreak = 0;
-    return;
+    return false;
   }
   if (++m_limOverStreak < kOverWindowsToStep)
-    return;  // 아직 단발 — 다음 창에서 한 번 더 확인한다
+    return false;  // 아직 단발 — 다음 창에서 한 번 더 확인한다
   m_limOverStreak = 0;
+
+  // 개입률이 클수록 크게 내린다. 얼마나 모자란지는 개입률이 말해준다.
+  const float step = (limPct > kPctBig)   ? kStepBigDb
+                   : (limPct > kPctMid)   ? kStepMidDb
+                                          : kStepSmallDb;
+
   std::lock_guard<std::mutex> lk(m_mutex);
   if (m_preampDb <= kPreampMinDb)
-    return;  // 하한 — 더 깎아도 리미터가 안 잡히는 상황이면 리미터에 맡긴다
-  m_preampDb -= kPreampStepDb;
+    return false;  // 하한 — 더 깎아도 안 잡히면 리미터에 맡긴다
+  m_preampDb -= step;
   if (m_preampDb < kPreampMinDb)
     m_preampDb = kPreampMinDb;
   m_preampDirty = true;
+  return true;
 }
 
 void AdaptiveEngine::SetLimiterProbe(std::function<bool()> probe) {
@@ -175,8 +222,13 @@ void AdaptiveEngine::WorkerLoop() {
   bool     collecting = false;
   bool     firstDone = false; // 최초 델타를 냈는가
 
+  // 서보 전용 창 (스펙트럼 분석의 스킵/적분과 완전히 독립)
+  uint64_t servoSamples = 0, servoSettle = 0;
+  size_t   servoPolls = 0, servoActive = 0;
+
   auto resetRun = [&]() {
     analyzer.Reset();
+    servoSamples = 0; servoPolls = 0; servoActive = 0; servoSettle = 0;
     // 연속 초과 카운터는 워커 전용 상태다. 곡이 바뀌면 여기서 비운다
     // (OnSongChanged 는 UI 스레드라 거기서 건드리면 레이스가 된다).
     m_limOverStreak = 0;
@@ -239,6 +291,8 @@ void AdaptiveEngine::WorkerLoop() {
     bool lost = false;
     const size_t n = tap.Read(buf.data(), buf.size(), &lost);
     if (lost) {
+      ++m_lostCount;
+      LogLostEvent();
       // 링버퍼가 우리를 추월했다 — 연속성이 깨졌으므로 이번 측정은 버리고
       // 처음부터 다시 시작한다. 끊긴 구간을 이어 붙이면 스펙트럼이 왜곡된다.
       resetRun();
@@ -248,6 +302,32 @@ void AdaptiveEngine::WorkerLoop() {
       continue;
 
     m_lastAudioTick.store(GetTickCount(), std::memory_order_relaxed);
+
+    // ── [헤드룸 서보] 스펙트럼 일정과 무관하게 여기서 독립 동작 ──────────
+    //   스킵/적분 뒤로 미루면 첫 30초를 -1.0dB 로 버티게 된다(실측 개입률
+    //   94%). 리미터 개입은 인트로냐 후렴이냐와 무관한 사실이므로 기다릴
+    //   이유가 없다.
+    if (m_limiterProbe && configuredRate > 0.0) {
+      if (servoSettle > 0) {
+        // 인하 직후 정착 구간 — 전파 전 옛 게인을 재면 과잉 인하가 된다.
+        servoSettle = (servoSettle > (uint64_t)n) ? servoSettle - n : 0;
+      } else {
+        servoSamples += n;
+        ++servoPolls;
+        if (m_limiterProbe())
+          ++servoActive;
+        if (servoSamples >= (uint64_t)(kServoWindowSeconds * configuredRate)) {
+          const double pct =
+              servoPolls ? (100.0 * (double)servoActive / (double)servoPolls)
+                         : -1.0;
+          if (ApplyHeadroomServo(pct))
+            servoSettle = (uint64_t)(kServoSettleSeconds * configuredRate);
+          servoSamples = 0;
+          servoPolls = 0;
+          servoActive = 0;
+        }
+      }
+    }
 
     // 필터뱅크는 **항상** 돌린다. 두 가지 이유:
     //   1) 필터를 멈추면 상태(z1,z2)가 끊겨 재개 시 과도응답이 섞인다.
@@ -308,9 +388,7 @@ void AdaptiveEngine::WorkerLoop() {
     // ── 최초 델타: 고정 창(10~30초) 적분값으로 산출 ──────────────────────
     if (!firstDone && integrated >= intTarget) {
       const std::vector<float> levels = analyzer.BandLevelsDb();
-      const double limPct = TakeLimiterPct();
-      ApplyHeadroomServo(limPct);
-      LogMood(analyzer, levels, "first", limPct);
+      LogMood(analyzer, levels, "first", TakeLimiterPct());
       const std::vector<float> delta = AdaptiveCurve::ComputeDelta(
           levels, analyzer.BandUsable(), AIClient::F31);
       {
@@ -337,9 +415,7 @@ void AdaptiveEngine::WorkerLoop() {
     const std::vector<float> levels = analyzer.SlowLevelsDb();
     if (levels.empty())
       continue;
-    const double limPct = TakeLimiterPct();
-    ApplyHeadroomServo(limPct);
-    LogMood(analyzer, levels, "track", limPct);
+    LogMood(analyzer, levels, "track", TakeLimiterPct());
     const std::vector<float> delta = AdaptiveCurve::ComputeDelta(
         levels, analyzer.BandUsable(), AIClient::F31);
 
