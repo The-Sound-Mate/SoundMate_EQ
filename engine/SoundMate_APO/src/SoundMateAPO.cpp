@@ -18,6 +18,33 @@
 
 using namespace std;
 
+// EQ 를 어느 슬롯에서 걸 것인가. 되돌릴 때는 이 한 줄만 0 으로.
+//
+//   0 = POST(EFX). 믹스 후 한 번. 예전 동작.
+//   1 = PRE(SFX).  스트림마다 한 번. 현재 정책.
+//
+// 왜 PRE 인가 — 실측 근거:
+//   EFX 에서 걸면 디스코드 화면공유/앱공유에 EQ 가 **안 실린다**(친구 확인,
+//   on/off 전부 무변화). 디스코드가 EFX 보다 앞, 즉 프로세스 루프백 단계에서
+//   소리를 뜨기 때문이다. SFX 로 옮긴 뒤 같은 API 로 캡처해 31밴드를 대조하니
+//   설정 커브가 그대로 잡혔고(60Hz +8.9 → +8.9/+9.4 등), 디스코드 실사용에서도
+//   확인됐다.
+//
+//   덕분에 세 가지가 한 번에 풀린다:
+//     - 디스코드 송출에 EQ 가 실린다
+//     - 스트림마다 인스턴스가 도니 앱별 EQ 도 같은 자리에서 된다
+//     - 스피커/OBS 엔드포인트 루프백은 더 뒤라 그대로 유지된다
+//   가상 오디오 드라이버·가상 케이블이 전부 불필요해진다.
+//
+// [따라오는 두 가지 — 아래 APOProcess 에서 처리한다]
+//   1. 탭도 같이 SFX 로 옮겨야 한다. post-mix 에 두면 EQ 가 이미 걸린 소리를
+//      읽어 분석→EQ→분석 폐루프가 된다.
+//   2. 리미터가 engine.process 안에 있으므로, EFX 가 아무것도 안 하면 **믹스
+//      합계를 지켜주는 최종 브릭월이 사라진다.** 스트림마다 −0.3 dBFS 로
+//      눌러도 합치면 넘친다. EFX 는 커브 없이 process 만 돌려 리미터 전용으로
+//      남긴다.
+#define SM_EQ_IN_PREMIX 1
+
 long SoundMateAPO::instCount = 0;
 const CRegAPOProperties<1> SoundMateAPO::regPostMixProperties(SOUNDMATE_POST_MIX_GUID, L"SoundMateAPO",
 	L"Copyright (C) 2025", 1, 0, __uuidof(IAudioProcessingObject),
@@ -43,6 +70,7 @@ SoundMateAPO::SoundMateAPO(IUnknown* pUnkOuter)
 	// 위 base 초기화가 regPostMixProperties 를 쓰기 때문 — 값이 확정되기 전에
 	// 오디오 탭을 잡는 경로는 없다(LockForProcess 에서만 claim).
 	isPostMix = true;
+	myInstanceId = 0;
 	InterlockedIncrement(&instCount);
 	WriteAPOLog("SoundMateAPO v29.1 Constructor");
 }
@@ -191,9 +219,8 @@ HRESULT SoundMateAPO::Initialize(UINT32 cbDataSize, BYTE* pbyData)
 	GUID apoGuid = initStruct->APOInit.clsid;
 	WriteAPOLog("Initialize: clsid read");
 
-	// [오디오 탭] pre-mix(SFX)는 스트림마다 인스턴스가 따로 생겨 여러 개가 동시에
-	// 존재한다. 믹스가 끝난 장치 출력을 봐야 하므로 post-mix 만 탭 소유권을
-	// 시도한다 — 자세한 이유는 SoundMate_AudioTap.h 의 '소유권' 주석 참조.
+	// 이 인스턴스가 SFX(스트림별)인지 EFX(믹스 후)인지 확정한다.
+	//   EQ·탭을 어디서 걸지가 전부 이 값에 달려 있다 (SM_EQ_IN_PREMIX 참고).
 	isPostMix = (apoGuid != SOUNDMATE_PRE_MIX_GUID);
 	{
 		char gl[96];
@@ -404,11 +431,24 @@ HRESULT SoundMateAPO::LockForProcess(
 	unsigned maxInputFrameCount = ppInputConnections[0]->u32MaxFrameCount;
 
 	{
-		char buf[128];
+		// [앱별 EQ 실측용] SFX 인스턴스는 스트림마다 하나씩 생긴다. APO 는
+		//   클라이언트 PID 를 절대 볼 수 없으므로, 사용자 모드가 세션 알림으로
+		//   본 (PID, 활성화 시각) 과 여기 (인스턴스, 시각, 포맷) 를 맞춰야
+		//   신원이 나온다. 그래서 밀리초와 인스턴스 번호를 같이 남긴다.
+		//   frames 는 앱이 쓰는 버퍼 주기라 앱마다 달라 보조 단서가 된다.
+		static volatile LONG s_instanceSeq = 0;
+		const LONG myId = InterlockedIncrement(&s_instanceSeq);
+		myInstanceId = (unsigned)myId;
+		SYSTEMTIME st;
+		GetLocalTime(&st);
+		char buf[192];
 		_snprintf_s(buf, sizeof(buf), _TRUNCATE,
-			"LockForProcess: inCh=%u bps=%u rate=%.0f frames=%u",
+			"LockForProcess: inCh=%u bps=%u rate=%.0f frames=%u"
+			"  [SFXID=%ld post=%d at=%02u:%02u:%02u.%03u]",
 			inFormat.dwSamplesPerFrame, inFormat.dwValidBitsPerSample,
-			inFormat.fFramesPerSecond, maxInputFrameCount);
+			inFormat.fFramesPerSecond, maxInputFrameCount,
+			myId, (int)isPostMix,
+			st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
 		WriteAPOLog(buf);
 	}
 
@@ -459,12 +499,31 @@ HRESULT SoundMateAPO::LockForProcess(
 	engine.initialize(outFormat.fFramesPerSecond, inFormat.dwSamplesPerFrame,
 		realChannelCount, outFormat.dwSamplesPerFrame, channelMask, maxFrameCount);
 
+	// [v3 앱별 EQ] pre-mix(SFX) 인스턴스만 스트림 표에 등록한다.
+	//   SFX 는 스트림마다 하나씩 도니 "이 칸 = 이 앱" 이 성립한다.
+	//   post-mix(EFX) 는 믹스 하나뿐이라 등록할 대상이 없다.
+	//   앱이 세션 활성화 시각과 대조해 신원을 알아내고 커브를 배정해 준다.
+	if (!isPostMix)
+		engine.claimStreamSlot(myInstanceId, maxInputFrameCount);
+
 	// [오디오 탭] 실패해도 무시 — 탭이 없으면 UI 가 장르 커브로 폴백할 뿐이고
 	// 오디오 재생 자체에는 아무 영향이 없다. post-mix 만 소유권을 시도한다.
 	{
+		// [탭 위치] EQ 를 거는 인스턴스가 탭도 뜬다. EQ 직전이 곧 원음이라
+		//   분석→EQ→분석 폐루프가 구조적으로 불가능해진다.
+		//   SM_EQ_IN_PREMIX 면 SFX(스트림별), 아니면 EFX(믹스 후).
+		//
+		//   소유권은 여기서 잡되, **실제로 쓰기 시작하는 것은 자격을 얻은
+		//   뒤**다(FilterEngine::tapEligible). 알림음이 잡아채는 걸 막는다.
+#if SM_EQ_IN_PREMIX
+		const bool wantsTap = !isPostMix;
+#else
+		const bool wantsTap = isPostMix;
+#endif
+		engine.setTapInstanceId(myInstanceId);
 		char tapLog[192];
-		if (!isPostMix) {
-			WriteAPOLog("AudioTap: skipped (pre-mix instance)");
+		if (!wantsTap) {
+			WriteAPOLog("AudioTap: skipped (EQ 를 걸지 않는 인스턴스)");
 		} else if (!audioTap.open(this)) {
 			_snprintf_s(tapLog, sizeof(tapLog), _TRUNCATE,
 				"AudioTap: open FAILED err=%lu size=%zu",
@@ -492,6 +551,10 @@ HRESULT SoundMateAPO::UnlockForProcess()
 	// 소유권을 먼저 놓아, 장치가 바뀌는 동안 다른 인스턴스가 즉시 이어받게 한다.
 	audioTap.close();
 
+	// [v3 앱별 EQ] 스트림이 끝났으니 표에서 칸을 비운다. 안 비우면 표가 금방
+	//   가득 차서 이후 스트림들이 전부 전역 커브로 떨어진다.
+	engine.releaseStreamSlot();
+
 	if (childCfg) {
 		HRESULT hr = childCfg->UnlockForProcess();
 		if (FAILED(hr)) {
@@ -506,6 +569,7 @@ HRESULT SoundMateAPO::UnlockForProcess()
 // IAudioProcessingObjectRT - Real-time processing
 // ============================================================================
 #pragma AVRT_CODE_BEGIN
+
 void SoundMateAPO::APOProcess(
 	UINT32 u32NumInputConnections, APO_CONNECTION_PROPERTY** ppInputConnections,
 	UINT32 u32NumOutputConnections, APO_CONNECTION_PROPERTY** ppOutputConnections)
@@ -536,6 +600,38 @@ void SoundMateAPO::APOProcess(
 	if (flags == BUFFER_SILENT) {
 		memset(inputFrames, 0, frameCount * engine.inChannels * sizeof(float));
 	}
+
+	// EQ 를 거는 인스턴스는 **정확히 하나**여야 한다. 둘 다 걸면 두 번 걸린다.
+	//   (그 버그로 오래 고생했다. 아래 [이중 적용 방지] 주석 참고.)
+#if SM_EQ_IN_PREMIX
+	const bool applyEq = !isPostMix;
+#else
+	const bool applyEq = isPostMix;
+#endif
+
+	// [탭 소유권] 이 인스턴스가 탭을 떠야 하는지 판정하고, 필요하면 소유권을
+	//   가져오거나 놓는다. write() 는 소유권이 있어야만 동작하므로 이 단계를
+	//   빠뜨리면 지목이 아무 효과가 없다.
+	//
+	//   Designated : 앱이 콕 집었다 → 살아 있는 소유자에게서 빼앗는다
+	//   Fallback   : 스스로 자격을 얻었다 → 기존 소유자가 살아 있으면 물러난다
+	//   None       : 쥐고 있었다면 놓는다 (다른 스트림이 이어받을 수 있게)
+	auto acquireTapIfNeeded = [&](bool silent) -> bool {
+		if (!engine.tapEligible(silent, frameCount)) {
+			// 자격을 잃었으면 놓는다. 안 놓으면 다른 스트림이 못 이어받는다.
+			if (audioTap.isClaimed())
+				audioTap.releaseClaim();
+			return false;
+		}
+		if (!audioTap.isClaimed()) {
+			if (!audioTap.tryClaim())
+				return false;  // 살아 있는 소유자가 있으면 물러난다
+			// 소유권을 늦게 가져왔으므로 포맷을 여기서 게시한다.
+			audioTap.publishFormat((uint32_t)engine.sampleRateHz(),
+				(uint32_t)engine.outChannels);
+		}
+		return true;
+	};
 
 	// [이중 적용 방지] EQ 는 post-mix(EFX) 인스턴스에서만 적용한다.
 	//
@@ -594,21 +690,33 @@ void SoundMateAPO::APOProcess(
 		// [오디오 탭] engine.process 직전 = 우리 EQ 가 적용되기 전 신호.
 		//   여기서 떠야 분석→EQ→분석 폐루프가 생기지 않는다. 자식 APO 가 있으면
 		//   실제 입력은 outputFrames 이므로 그쪽을 읽는다.
-		if (isPostMix) {
-			audioTap.write(outputFrames, frameCount, engine.outChannels,
-				flags == BUFFER_SILENT);
+		if (applyEq) {
+			// [탭] engine.process 직전 = 이 앱이 방금 낸 **순수 원음**.
+			//   EQ 를 SFX 로 옮긴 덕에 여기가 진짜 pre-EQ 지점이 됐다.
+			if (acquireTapIfNeeded(flags == BUFFER_SILENT))
+				audioTap.write(outputFrames, frameCount, engine.outChannels,
+					flags == BUFFER_SILENT);
 			engine.updateFromSharedMemory();
+			engine.process(outputFrames, outputFrames, frameCount);
+		} else if (isPostMix) {
+			// [최종 안전 리미터] 커브를 안 읽었으므로 activeBands=0, masterGain=1.
+			//   그래서 이 호출은 리미터 + 하드클램프 + NaN 가드만 수행한다.
+			//   스트림마다 −0.3 dBFS 로 눌러도 **합계는 넘칠 수 있으므로**
+			//   믹스 뒤에 이 한 겹이 반드시 있어야 한다.
 			engine.process(outputFrames, outputFrames, frameCount);
 		}
 	} else {
-		if (isPostMix) {
-			audioTap.write(inputFrames, frameCount, engine.inChannels,
-				flags == BUFFER_SILENT);
+		if (applyEq) {
+			if (acquireTapIfNeeded(flags == BUFFER_SILENT))
+				audioTap.write(inputFrames, frameCount, engine.inChannels,
+					flags == BUFFER_SILENT);
 			engine.updateFromSharedMemory();
 			engine.process(outputFrames, inputFrames, frameCount);
+		} else if (isPostMix) {
+			// 위와 같은 이유 — 믹스 합계에 대한 최종 리미터.
+			engine.process(outputFrames, inputFrames, frameCount);
 		} else {
-			// pre-mix: 우리 EQ 없이 그대로 통과. (자식 APO 가 없는 경로이므로
-			//   입력을 출력으로 복사해야 한다.)
+			// EQ 도 리미터도 안 거는 슬롯: 그대로 통과.
 			if (outputFrames != inputFrames) {
 				memcpy(outputFrames, inputFrames,
 					frameCount * engine.outChannels * sizeof(float));

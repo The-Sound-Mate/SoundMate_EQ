@@ -63,6 +63,13 @@ public:
     //   Filter 줄은 건드리지 않고 Preamp 줄만 교체한다.
     bool  ResetPreampToDefault();
 
+    // [앱별 EQ] 공유 메모리 원시 포인터. AppEqManager 가 스트림 표를 읽고
+    //   profileIndex 를 쓰기 위해 필요하다.
+    //   null 이면 아직 SHM 이 없다는 뜻 — 아무 소리도 안 나는 동안에는
+    //   audiodg 가 APO 를 로드하지 않아 매핑 자체가 존재하지 않는다.
+    //   오류가 아니라 대기 상태이므로 호출자는 조용히 넘어가야 한다.
+    struct SoundMateSettings* SharedMemory();
+
     void  SetPreampDb(float db) { m_preampDb.store(db); }
     float GetPreampDb() const   { return m_preampDb.load(); }
 
@@ -88,7 +95,7 @@ private:
     // [헤드룸 서보] 실측 개입률로 정해지는 프리앰프. 기본 -1.0dB.
     std::atomic<float> m_preampDb{kDefaultPreampDb};
 
-    // [최종] SHM read-only 매핑 — limiterActiveFlag polling 전용.
+    // SHM 매핑 (읽기+쓰기). limiterActiveFlag polling + 앱별 EQ 스트림 표.
     void*       m_shmHandle = nullptr;  // HANDLE; void* 로 두어 windows.h 의존 줄임
     void*       m_shmView   = nullptr;  // SoundMateSettings*
     bool        EnsureShmMapped();

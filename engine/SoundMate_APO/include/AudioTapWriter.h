@@ -132,6 +132,23 @@ public:
     return true;
   }
 
+  // 앱이 "이 스트림을 분석해라" 라고 지목했을 때 쓰는 강제 인계.
+  //   tryClaim 은 살아 있는 소유자를 존중해 물러나므로, 지목을 반영하려면
+  //   빼앗는 경로가 따로 있어야 한다. 지목은 앱이 한 번만 정하므로 서로
+  //   뺏고 뺏기는 경합이 생기지 않는다.
+  bool forceClaim() {
+    if (!p || p->magic != SOUNDMATE_AUDIO_MAGIC)
+      return false;
+    if (claimed)
+      return true;
+    p->ownerId.store(myId, std::memory_order_release);
+    p->ownerHeartbeat.store(GetTickCount(), std::memory_order_relaxed);
+    claimed = true;
+    silentMs = 0;
+    lastTick = GetTickCount();
+    return true;
+  }
+
   void releaseClaim() {
     if (!p || !claimed)
       return;

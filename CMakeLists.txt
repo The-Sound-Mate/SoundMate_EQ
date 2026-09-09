@@ -208,6 +208,7 @@ set(GUI_SOURCES
     ${GUI_SRC_DIR}/src/core/AdaptiveCurve.cpp
     ${GUI_SRC_DIR}/src/core/AdaptiveEngine.cpp
     ${GUI_SRC_DIR}/src/core/MoodFeatures.cpp
+    ${GUI_SRC_DIR}/src/core/AppEqManager.cpp
     "${CMAKE_CURRENT_BINARY_DIR}/resource.rc"
 )
 

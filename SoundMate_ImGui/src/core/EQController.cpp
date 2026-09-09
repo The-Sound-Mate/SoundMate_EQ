@@ -201,13 +201,25 @@ bool EQController::ApplyFlatEQ(const std::vector<int> &freqs,
   return ApplyEQ(flat, freqs, deviceName);
 }
 
-// [최종] SHM read-only 매핑 — APO DLL/Controller 가 이미 만든 SHM 을 open만 함.
-//   매핑 실패 (Controller 미실행, 권한 부족 등) 시 false. 안전 default.
+// SHM 매핑 — APO DLL/Controller 가 이미 만든 SHM 을 open 만 한다.
+//   매핑 실패 (APO 미로드, 권한 부족 등) 시 false. 안전 default.
+//
+// [권한] 읽기+쓰기로 연다. 앱별 EQ 에서 스트림 슬롯의 profileIndex 와
+//   프로파일 커브를 앱이 직접 써야 하기 때문이다.
+//   FILE_MAP_ALL_ACCESS 를 쓰면 안 된다 — SHM 의 DACL 은 대화형 사용자(IU)
+//   에게 GR|GW 만 주므로, 관리자 권한 없이 실행되는 이 앱에서는
+//   ERROR_ACCESS_DENIED(5) 가 난다. 실측으로 확인했다.
+//
+// [SHM 부재는 정상] 아무 소리도 안 나는 동안에는 audiodg 가 APO 를 로드하지
+//   않아 SHM 이 아예 없다 (ERROR_FILE_NOT_FOUND=2). 오류가 아니라 대기 상태로
+//   다뤄야 한다 — 소리가 나기 시작하면 다음 호출에서 열린다.
 bool EQController::EnsureShmMapped() {
   if (m_shmView) return true;
-  HANDLE h = OpenFileMappingW(FILE_MAP_READ, FALSE, SOUNDMATE_SHM_NAME);
+  HANDLE h = OpenFileMappingW(FILE_MAP_READ | FILE_MAP_WRITE, FALSE,
+                              SOUNDMATE_SHM_NAME);
   if (!h) return false;
-  void* view = MapViewOfFile(h, FILE_MAP_READ, 0, 0, sizeof(SoundMateSettings));
+  void* view = MapViewOfFile(h, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0,
+                             sizeof(SoundMateSettings));
   if (!view) {
     CloseHandle(h);
     return false;
@@ -365,3 +377,12 @@ void EQController::EnsureIncludeLinked() {
 }
 
 void EQController::SetRestored(bool restored) { m_isRestored = restored; }
+
+// [앱별 EQ] 공유 메모리 원시 포인터.
+//   아직 열려 있지 않으면 한 번 시도해 본다. 그래도 안 되면 null —
+//   소리가 안 나는 동안에는 SHM 이 아예 없는 게 정상이다.
+SoundMateSettings* EQController::SharedMemory() {
+  if (!EnsureShmMapped())
+    return nullptr;
+  return (SoundMateSettings*)m_shmView;
+}

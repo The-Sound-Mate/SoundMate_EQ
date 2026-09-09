@@ -76,6 +76,9 @@ private:
 	//   post-mix 인스턴스 하나만 소유권을 잡는다 — SoundMate_AudioTap.h 참조.
 	AudioTapWriter audioTap;
 	bool isPostMix;
+	// [v3 앱별 EQ] 이 인스턴스의 일련번호. APO 로그와 공유 메모리 스트림 표를
+	//   같은 번호로 묶어, 문제 생겼을 때 로그만 보고 어느 칸인지 알 수 있게 한다.
+	unsigned myInstanceId;
 	bool allowSilentBufferModification;
 
 	// Child APO chain

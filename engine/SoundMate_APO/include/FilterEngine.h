@@ -563,10 +563,12 @@ public:
   FilterEngine()
       : sampleRate(48000.f), inChannels(2), outChannels(2), masterGain(1.f),
         activeBands(0), hMapFile(NULL), pSettings(nullptr),
-        lastUpdateCounter(~0ULL), pendingReady(0),
+        lastUpdateCounter(~0ULL), lastProfileIndex(-2), myStreamSlot(-1),
+        sustainedFrames(0), myInstanceIdForTap(0), pendingReady(0),
         hDiagLog(INVALID_HANDLE_VALUE), framesSinceLog(0), peakSinceLog(0.f) {}
 
   ~FilterEngine() {
+    releaseStreamSlot();
     if (pSettings) {
       VirtualUnlock(pSettings, sizeof(SoundMateSettings));
       UnmapViewOfFile(pSettings);
@@ -575,6 +577,109 @@ public:
       CloseHandle(hMapFile);
     if (hDiagLog != INVALID_HANDLE_VALUE)
       CloseHandle(hDiagLog);
+  }
+
+  // [v3 앱별 EQ] 이 인스턴스를 공유 메모리의 스트림 표에 등록한다.
+  //
+  //   pre-mix(SFX) 인스턴스만 등록한다. SFX 는 스트림마다 하나씩 도니까
+  //   "이 칸 = 이 앱의 스트림" 이 성립한다. post-mix(EFX) 는 믹스 하나뿐이라
+  //   등록할 의미가 없다.
+  //
+  //   앱은 createdTick 을 자기가 본 세션 활성화 시각과 대조해 신원을 알아내고,
+  //   profileIndex 를 써준다. 여기서는 그 값을 읽기만 한다.
+  //
+  //   자리가 없으면(동시 16개 초과) 그냥 등록을 포기한다. 그 스트림은 전역
+  //   커브로 처리되고 소리는 정상적으로 난다.
+  void claimStreamSlot(unsigned instanceId, unsigned framesPerPacket) {
+    if (!SoundMateHasStreamTable(pSettings))
+      return;
+    for (unsigned i = 0; i < SOUNDMATE_MAX_STREAMS; ++i) {
+      uint32_t expected = 0;
+      if (!pSettings->streams[i].state.compare_exchange_strong(
+              expected, 1u, std::memory_order_acq_rel))
+        continue;
+      StreamSlot &s = pSettings->streams[i];
+      s.instanceId = instanceId;
+      s.createdTick = GetTickCount64();
+      s.sampleRate = (uint32_t)sampleRate;
+      s.channels = outChannels;
+      s.framesPerPacket = framesPerPacket;
+      s.profileIndex.store(-1, std::memory_order_relaxed);  // 미배정 = 전역
+      myStreamSlot = (int)i;
+      pSettings->streamTableEpoch.fetch_add(1, std::memory_order_release);
+      char buf[128];
+      _snprintf_s(buf, sizeof(buf), _TRUNCATE,
+                  "StreamSlot: claimed #%u (instance %u, tick %llu)", i,
+                  instanceId, (unsigned long long)s.createdTick);
+      WriteAPOLog(buf);
+      return;
+    }
+    WriteAPOLog("StreamSlot: table full — 이 스트림은 전역 커브로 처리");
+  }
+
+  // [v4 탭 소유권] 이 인스턴스가 오디오 탭을 떠야 하는가?
+  //
+  //   1순위 — 앱이 지목했으면 그대로 따른다. 앱은 세션 대조로 "지금 음악을
+  //           틀고 있는 스트림" 을 알고 있으니 이게 가장 정확하다.
+  //   2순위 — 미지정이면 엔진이 고른다. **연속으로 소리를 내고 있는 시간**이
+  //           문턱을 넘은 스트림만 자격을 얻는다. 0.2초짜리 알림음은 절대
+  //           탭을 못 뺏는다.
+  //
+  //   RT 스레드에서 불린다. 원자 연산과 정수 산술뿐이라 할당·락이 없다.
+  // 이 인스턴스가 오디오 탭을 뜰 자격이 있는가?
+  //
+  //   [후보 조건] EQ 가 걸리는 스트림만 후보다 (profileIndex == -1).
+  //   앱이 "선택한 앱에만" 모드로 두면 체크 안 된 앱은 평탄 프로파일로
+  //   가므로 자동으로 후보에서 빠진다. 그래서 스펙트럼과 자동 분석이
+  //   **EQ 가 걸리는 소리만** 보게 된다.
+  //
+  //   [왜 인스턴스를 콕 집지 않는가] 앱이 instanceId 하나를 지목하는 방식을
+  //   먼저 시도했는데, 크롬처럼 스트림을 여러 개 여는 앱에서 조용한 쪽을
+  //   집으면 스펙트럼이 통째로 죽는다. 후보만 걸러주고 그 안에서 "오래
+  //   소리를 낸 쪽이 가져간다" 는 기존 규칙을 돌리는 편이 안전하다.
+  bool tapEligible(bool silent, unsigned frames) {
+    if (silent) {
+      sustainedFrames = 0;
+    } else {
+      sustainedFrames += frames;
+      // [v5] 앱이 "이 스트림이 지금 소리를 내는가" 를 알 수 있게 남긴다.
+      //   조용한 스트림을 재생 중인 앱과 짝짓지 않으려면 이 정보가 필요하다.
+      if (myStreamSlot >= 0 && SoundMateHasAudibleTick(pSettings))
+        pSettings->streams[myStreamSlot].lastAudibleTick.store(
+            GetTickCount(), std::memory_order_relaxed);
+    }
+    if (!SoundMateHasStreamTable(pSettings) || myStreamSlot < 0)
+      return false;
+
+    // EQ 가 걸리지 않는 스트림(평탄 프로파일)은 탭 후보가 아니다.
+    //
+    //   후보가 하나도 없으면 아무도 탭을 뜨지 않고, UI 는 실측이 없을 때
+    //   쓰는 기본 애니메이션으로 넘어간다. 그게 맞는 상태다 — EQ 가 어디에도
+    //   안 걸려 있는데 남의 소리를 보여주면 "적용되는 앱만 보인다" 는 규칙이
+    //   깨진다.
+    if (pSettings->streams[myStreamSlot].profileIndex.load(
+            std::memory_order_relaxed) != -1)
+      return false;
+
+    // 후보 중에서는 문턱 이상 연속으로 소리를 낸 쪽이 가져간다.
+    //   짧은 알림음(~0.2초)은 문턱을 못 넘는다.
+    const uint64_t threshold = (uint64_t)(sampleRate * kTapClaimSeconds);
+    return sustainedFrames >= threshold;
+  }
+
+  void setTapInstanceId(unsigned id) { myInstanceIdForTap = id; }
+
+  // 탭 포맷 게시용. outChannels 는 이미 public 이라 짝을 맞춘다.
+  float sampleRateHz() const { return sampleRate; }
+
+  void releaseStreamSlot() {
+    if (myStreamSlot < 0 || !SoundMateHasStreamTable(pSettings))
+      return;
+    pSettings->streams[myStreamSlot].profileIndex.store(
+        -1, std::memory_order_relaxed);
+    pSettings->streams[myStreamSlot].state.store(0u, std::memory_order_release);
+    pSettings->streamTableEpoch.fetch_add(1, std::memory_order_release);
+    myStreamSlot = -1;
   }
 
   // Called from LockForProcess (non-RT). Safe to do anything here.
@@ -645,14 +750,36 @@ public:
     if (pSettings->writeInProgress.load(std::memory_order_acquire) != 0)
       return;
 
+    // [v3 앱별 EQ] 이 인스턴스에 배정된 프로파일이 있으면 그 커브를, 없으면
+    //   전역 커브를 쓴다. 배정은 앱이 언제든 바꿀 수 있으므로 프로파일 번호가
+    //   바뀐 것도 갱신 사유가 된다 (updateCounter 만 보면 놓친다).
+    const BandConfig *srcBands = pSettings->bands;
+    uint32_t srcBandCount = pSettings->bandCount;
+    float srcMasterGain = pSettings->masterGain;
+    int32_t profile = -1;
+    if (myStreamSlot >= 0 && SoundMateHasStreamTable(pSettings)) {
+      profile = pSettings->streams[myStreamSlot].profileIndex.load(
+          std::memory_order_relaxed);
+      if (profile >= 0 && profile < (int32_t)SOUNDMATE_MAX_PROFILES &&
+          pSettings->profiles[profile].inUse) {
+        const EqProfile &p = pSettings->profiles[profile];
+        srcBands = p.bands;
+        srcBandCount = p.bandCount;
+        srcMasterGain = p.masterGain;
+      } else {
+        profile = -1;  // 미배정이거나 빈 프로파일 → 전역으로 폴백
+      }
+    }
+
     uint64_t counter = pSettings->updateCounter.load(std::memory_order_relaxed);
-    if (counter == lastUpdateCounter)
+    if (counter == lastUpdateCounter && profile == lastProfileIndex)
       return;
     lastUpdateCounter = counter;
+    lastProfileIndex = profile;
 
     // Read new settings into pending struct (no alloc, stack-friendly)
     PendingConfig cfg;
-    cfg.masterGain = powf(10.f, pSettings->masterGain / 20.f);
+    cfg.masterGain = powf(10.f, srcMasterGain / 20.f);
     cfg.activeBands = 0;
     // Initialize coefficients for all channels that will be processed:
     // max(inChannels, outChannels) so every output channel gets EQ applied.
@@ -660,9 +787,9 @@ public:
     unsigned maxCh = (inChannels > outChannels) ? inChannels : outChannels;
     cfg.channelCount = (maxCh > 16u) ? 16u : maxCh;
 
-    for (uint32_t i = 0; i < pSettings->bandCount && i < SOUNDMATE_MAX_BANDS;
+    for (uint32_t i = 0; i < srcBandCount && i < SOUNDMATE_MAX_BANDS;
          ++i) {
-      const BandConfig &b = pSettings->bands[i];
+      const BandConfig &b = srcBands[i];
       if (!b.enabled)
         continue;
 
@@ -865,7 +992,9 @@ private:
     if (GetLastError() != ERROR_ALREADY_EXISTS) {
       memset(pSettings, 0, sizeof(SoundMateSettings));
       pSettings->magic = SOUNDMATE_MAGIC;
-      pSettings->version = 1;
+      // [주의] 예전엔 여기에 1 이 박혀 있었다. v3 스트림 표는 version >= 3
+      //   일 때만 켜지므로, 그대로 두면 앱별 EQ 가 영원히 죽어 있다.
+      pSettings->version = SOUNDMATE_VERSION;
       pSettings->masterGain = 0.f; // 0 dB = unity
     }
 
@@ -937,6 +1066,19 @@ private:
   HANDLE hMapFile;
   SoundMateSettings *pSettings;
   uint64_t lastUpdateCounter;
+  // [v3 앱별 EQ] 마지막으로 적용한 프로파일 번호. 전역 커브가 그대로여도
+  //   배정이 바뀌면 계수를 다시 만들어야 하므로 별도로 추적한다.
+  //   -2 = 아직 한 번도 안 읽음 (첫 갱신을 강제하기 위한 초기값).
+  int32_t lastProfileIndex;
+  // 공유 메모리 스트림 표에서 내가 잡은 칸. -1 = 안 잡음(EFX 이거나 자리 없음).
+  int myStreamSlot;
+  // [v4 탭 소유권] 연속으로 소리를 낸 프레임 수. 무음이 오면 0 으로 리셋된다.
+  //   짧은 알림음이 탭을 뺏지 못하게 하는 유일한 장치라 리셋이 중요하다.
+  uint64_t sustainedFrames;
+  unsigned myInstanceIdForTap;
+  // 탭 자격을 얻기까지 필요한 연속 발음 시간. 알림음(~0.2초)·UI 효과음보다
+  //   충분히 길고, 음악을 틀고 분석이 시작되기까지 체감되지 않을 만큼 짧다.
+  static constexpr float kTapClaimSeconds = 2.0f;
 
   // Double-buffer: written by updateFromSharedMemory, read by updatePending
   PendingConfig pending;

@@ -1,5 +1,7 @@
 // src/ui/MainWindow.cpp
 #include "MainWindow.h"
+// 공유 메모리의 실제 밴드를 읽어 필터 응답을 계산한다 (비주얼라이저용).
+#include "../../../engine/SoundMate_APO/include/SoundMate_Shared.h"
 #include "../utils/StringUtils.h"
 #include "Theme.h"
 #include "UIScale.h"
@@ -111,6 +113,22 @@ void MainWindow::Initialize(EQController *eq, AIClient *ai,
   std::thread([this]() { CheckForUpdates(); }).detach();
 
   // [v12.0] 엔진의 config.txt에서 현재 값을 읽어와 슬라이더 동기화
+  // [앱별 EQ] 세션 감시 시작 + 제외 목록 로드. 실패해도 앱은 정상 동작한다
+  //   (앱별 EQ 만 비활성).
+  //
+  //   저장 위치는 %LOCALAPPDATA% — 앱 설정(app_settings.json)과 같은 곳이다.
+  //   Program Files 아래에 두면 권한 없이 못 쓰는 환경에서 저장이 조용히
+  //   실패해, 껐다 켤 때마다 제외 목록이 사라진다.
+  {
+    char base[MAX_PATH] = {0};
+    GetEnvironmentVariableA("LOCALAPPDATA", base, MAX_PATH);
+    const std::string dir = std::string(base) + "\SoundMateEqualizer\record";
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    m_appEq.Load(dir + "\app_eq_excluded.txt");
+  }
+  m_appEq.Start();
+
   if (m_eqCtrl) {
     m_eqCtrl->Initialize();
     // [헤드룸 서보] 이전 세션의 서보값이 config.txt 에 남아 있으면 지운다.
@@ -1078,6 +1096,28 @@ void MainWindow::Render() {
   {
     std::vector<float> live = m_adaptive.LiveLevelsDb();
 
+    // [EQ 적용 후로 보여주기] 오디오 탭은 **EQ 걸리기 직전** 신호를 뜬다.
+    //   분석이 자기가 부스트한 저역을 "원래 큰 소리" 로 오인하는 폐루프를
+    //   막으려고 일부러 그렇게 만들어 뒀다. 그래서 슬라이더를 아무리 만져도
+    //   스펙트럼이 안 변해, 화면이 반응을 안 하는 것처럼 보인다.
+    //
+    //   탭을 옮기는 대신 **화면에만** 필터 응답을 더한다. 분석은 계속 원음을
+    //   보므로 폐루프가 생기지 않는다.
+    //
+    //   [왜 밴드 값을 그냥 더하면 안 되는가] 5밴드 모드에서는 31칸 중 다섯
+    //   칸에만 값이 들어간다. 그대로 더하면 좁은 홈 다섯 개로 보이는데,
+    //   실제 필터는 Q=0.667 로 2옥타브 폭이라 훨씬 넓게 깎인다. 그래서
+    //   **실제 필터의 주파수 응답**을 계산해 더한다. 공유 메모리의 밴드가
+    //   엔진이 실제로 거는 값이므로 밴드 수·Q 와 무관하게 항상 맞는다.
+    if (m_isEqEnabled && m_eqCtrl) {
+      std::vector<float> resp;
+      if (ComputeEqResponseDb(live.size(), resp)) {
+        for (size_t i = 0; i < live.size(); ++i)
+          if (live[i] > -120.f)  // 나이퀴스트 제외 밴드는 건드리지 않는다
+            live[i] += resp[i];
+      }
+    }
+
     // 나이퀴스트 제외 밴드는 -200dB 로 들어온다(예: 44.1kHz 의 20kHz 밴드).
     // 그대로 보간하면 끝에 거대한 골이 생기므로 유효값만 쓴다.
     float peak = -1e9f;
@@ -1229,6 +1269,7 @@ void MainWindow::Render() {
       m_currentArtist = artist;
       m_rawTitle = song.title;
       m_rawArtist = song.artist;
+      m_currentSource = song.source;
       m_displayTitle = song.title + " - " + song.artist;
       m_marqueeOffset = 0.0f;
       // [수동 초기화 복원용] 곡 바뀜 → 이전 곡 원본 스냅샷 무효화.
@@ -1482,6 +1523,18 @@ void MainWindow::Render() {
   // 복원 백업 선택 팝업
   RenderRestorePopup();
 
+  // [앱별 EQ] 새로 뜬 스트림을 세션과 대조해 신원을 확정하고, 제외 목록을
+  //   반영한다. SHM 이 아직 없으면(= 아무 소리도 안 나는 중) 조용히 넘어간다.
+  // [스펙트럼] 지금 곡을 내보내는 앱을 힌트로 준다. 그 앱이 EQ 적용
+  //   대상이면 오디오 탭이 그쪽에 붙어, 스펙트럼과 자동 분석이 **EQ 가
+  //   걸리는 소리만** 보게 된다.
+  if (m_eqCtrl) {
+    m_appEq.SetPreferredTapApp(CurrentSourceProcess());
+    m_appEq.Update(m_eqCtrl->SharedMemory());
+  }
+  if (m_appEqOpen)
+    RenderAppEqWindow();
+
   // G1_2: 진단 패널 (헬스 점 클릭으로 m_diagnosticOpen=true 되면 표시)
   if constexpr (SoundMate::Features::kG1_2_DiagnosticPanel_Effective) {
     if (m_diagnosticOpen)
@@ -1584,12 +1637,35 @@ void MainWindow::RenderTopBar() {
   // ── [우측 영역] 기기, 설정, 전원, 헬스점 ──
   // 가로 너비를 크게 설정하여 상단바를 고급스럽게 꽉 채웁니다.
   float settingsW = UIScale::Px(twoLines ? 90.0f : 110.0f);  // 원래 70.0f / 80.0f 에서 상향
-  float powerW    = UIScale::Px(twoLines ? 100.0f : 130.0f); // 원래 80.0f / 100.0f 에서 상향
   float healthW   = SoundMate::Features::kG1_1_HealthIndicator ? UIScale::Px(24.0f) : 0.0f;
+
+  // [전원 + 톱니] 두 조각이 하나로 보이는 버튼이다. 폭을 고정값으로 두면
+  //   "POWER ON (앱 12)" 같은 긴 라벨이 잘리거나, 짧을 때 헐렁해진다.
+  //   그래서 라벨을 **먼저** 만들고 글자 폭에 맞춰 잡는다.
+  const bool eqPerApp = m_appEq.GetMode() == AppEqManager::Mode::Selected;
+  const size_t eqIncludedCount = eqPerApp ? m_appEq.IncludedApps().size() : 0;
+  char powerLabel[64];
+  if (!m_isEqEnabled)
+    std::snprintf(powerLabel, sizeof(powerLabel), "POWER OFF");
+  else if (eqPerApp)
+    std::snprintf(powerLabel, sizeof(powerLabel), u8"POWER ON (앱 %zu)",
+                  eqIncludedCount);
+  else
+    std::snprintf(powerLabel, sizeof(powerLabel), u8"POWER ON (전체)");
+
+  float powerW = ImGui::CalcTextSize(powerLabel).x + UIScale::Px(24.0f);
+  {
+    const float minW = UIScale::Px(twoLines ? 96.0f : 110.0f);
+    if (powerW < minW)
+      powerW = minW;
+  }
+  // 톱니는 아이콘 하나뿐이라 좌우 여백을 최소로.
+  float gearW = UIScale::Px(twoLines ? 24.0f : 26.0f);
   float spacing   = UIScale::Px(16.0f);                       // 원래 8.0f 패딩에서 16.0f로 2배 증가
 
   // 우측 버튼들의 총 너비 합산 (X버튼 제거됨)
-  float rightButtonsW = settingsW + spacing + powerW + (healthW > 0 ? (spacing + healthW) : 0.0f);
+  float rightButtonsW = settingsW + spacing + powerW + gearW +
+                        (healthW > 0 ? (spacing + healthW) : 0.0f);
 
   // 기기 표시 라벨 가용 너비 계산
   float devW = ImGui::GetContentRegionAvail().x - rightButtonsW - spacing;
@@ -1712,25 +1788,76 @@ void MainWindow::RenderTopBar() {
 
   ImGui::SameLine(0, spacing);
 
-  // 전원 버튼 (POWER ON/OFF)
-  if (m_isEqEnabled) {
-    ImGui::PushStyleColor(ImGuiCol_Button, Theme::ToU32(Theme::ACCENT_COLOR));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Theme::ToU32(Theme::GRAD_START));
-  } else {
-    ImGui::PushStyleColor(ImGuiCol_Button, Theme::ToU32(Theme::BTN_SECONDARY));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Theme::ToU32(Theme::ACCENT_COLOR));
-  }
-  if (ImGui::Button(m_isEqEnabled ? "POWER ON" : "POWER OFF", ImVec2(powerW, 0))) {
-    m_isEqEnabled = !m_isEqEnabled;
-    if (!m_isEqEnabled) {
-      std::string dev = GetSelectedDeviceGuid();
-      m_eqCtrl->ApplyFlatEQ(m_currentBands, dev);
-      SetStatus("System Bypassed.", Theme::TEXT_GRAY);
-    } else {
-      ApplyEQToSystem();
+  // ── 전원 + 앱별 설정 (하나로 보이는 버튼) ──────────────────────────────
+  //
+  //   [ POWER ON (전체)  ⚙ ]
+  //     └─ 누르면 전원      └─ 누르면 앱 설정창
+  //
+  //   보기엔 버튼 하나지만 누르는 곳이 둘이다. ImGui 에는 버튼 중첩도,
+  //   모서리별 라운딩 옵션도 없어서 InvisibleButton 두 개를 간격 0 으로
+  //   붙이고 사각형을 직접 그린다. 맞닿는 쪽 모서리를 각지게 두면 경계가
+  //   사라져 한 덩어리로 보인다.
+  //
+  //   [왜 묶었나] 전원은 "EQ 를 켤 것인가", 괄호 안은 "어디에 걸려 있는가" 다.
+  //   같은 성격이라 상태를 한눈에 읽을 수 있고 상단바 가로도 덜 먹는다.
+  //   EQ 가 꺼져 있으면 괄호를 생략한다 — 범위를 말할 게 없다.
+  {
+    const float h = ImGui::GetFrameHeight();
+    const float rounding = UIScale::Px(6.0f);
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+
+    // 두 조각의 바탕색은 같다. 그래야 하나로 보인다.
+    const ImVec4 baseCol =
+        m_isEqEnabled ? Theme::ACCENT_COLOR : Theme::BTN_SECONDARY;
+    const ImVec4 hoverCol =
+        m_isEqEnabled ? Theme::GRAD_START : Theme::ACCENT_COLOR;
+
+    auto segment = [&](const char *id, float x, float w, ImDrawFlags corners,
+                       const char *text) -> bool {
+      ImGui::SetCursorScreenPos({origin.x + x, origin.y});
+      const bool clicked = ImGui::InvisibleButton(id, ImVec2(w, h));
+      const bool hovered = ImGui::IsItemHovered();
+
+      const ImVec2 p0(origin.x + x, origin.y);
+      const ImVec2 p1(p0.x + w, p0.y + h);
+      dl->AddRectFilled(p0, p1, Theme::ToU32(hovered ? hoverCol : baseCol),
+                        rounding, corners);
+
+      const ImVec2 ts = ImGui::CalcTextSize(text);
+      dl->AddText({p0.x + (w - ts.x) * 0.5f, p0.y + (h - ts.y) * 0.5f},
+                  Theme::ToU32(Theme::TEXT_WHITE), text);
+      return clicked;
+    };
+
+    // 왼쪽 — 전원. 왼쪽 모서리만 둥글게.
+    if (segment("##pw", 0.0f, powerW, ImDrawFlags_RoundCornersLeft,
+                powerLabel)) {
+      m_isEqEnabled = !m_isEqEnabled;
+      if (!m_isEqEnabled) {
+        std::string dev = GetSelectedDeviceGuid();
+        m_eqCtrl->ApplyFlatEQ(m_currentBands, dev);
+        SetStatus("System Bypassed.", Theme::TEXT_GRAY);
+      } else {
+        ApplyEQToSystem();
+      }
     }
+    if (ImGui::IsItemHovered())
+      ImGui::SetTooltip(m_isEqEnabled ? u8"EQ 켜짐 — 누르면 끕니다"
+                                      : u8"EQ 꺼짐 — 누르면 켭니다");
+
+    // 오른쪽 — 앱 설정창. 오른쪽 모서리만 둥글게.
+    if (segment("##appeq", powerW, gearW, ImDrawFlags_RoundCornersRight,
+                u8"⚙"))
+      m_appEqOpen = !m_appEqOpen;
+    if (ImGui::IsItemHovered())
+      ImGui::SetTooltip(u8"앱별 EQ 설정");
+
+    // 다음 위젯(헬스 점)이 이어지도록 커서를 묶음 오른쪽 끝으로 옮긴다.
+    ImGui::SetCursorScreenPos({origin.x + powerW + gearW, origin.y});
+    ImGui::Dummy(ImVec2(0, h));
+    ImGui::SameLine(0, 0);
   }
-  ImGui::PopStyleColor(2);
 
   if constexpr (SoundMate::Features::kG1_1_HealthIndicator) {
     ImGui::SameLine(0, spacing);
@@ -1763,6 +1890,119 @@ void MainWindow::RenderVisualizer() {
                        UIScale::Px(2));
   }
   ImGui::Dummy({w, h});
+}
+
+// 지금 곡을 내보내고 있는 프로세스 이름을 고른다.
+//
+//   [왜 "하나일 때만" 으로는 부족한가] 크롬처럼 스트림을 여러 개 여는 앱이
+//   있다. 그러면 같은 chrome.exe 가 목록에 두 줄 잡혀 "정확히 하나" 조건이
+//   깨지고, 이름이 아예 안 나온다. 실제로 이 때문에 표시가 비어 있었다.
+//
+//   순서:
+//     1. 이름이 전부 같으면 그 이름 (크롬 다중 스트림이 여기서 걸린다)
+//     2. SMTC 가 알려준 앱 이름과 실행 파일 이름이 맞는 것
+//     3. EQ 적용 대상이 하나뿐이면 그것
+//     4. 못 가리면 빈 문자열 — 틀린 이름을 보여주느니 안 보여준다
+std::string MainWindow::CurrentSourceProcess() const {
+  auto playing = m_appEq.PlayingApps();
+  if (playing.empty())
+    return std::string();
+
+  auto lower = [](std::string v) {
+    std::transform(v.begin(), v.end(), v.begin(),
+                   [](unsigned char c) { return (char)std::tolower(c); });
+    return v;
+  };
+
+  // 1) 전부 같은 앱이면 답이 하나다.
+  bool allSame = true;
+  for (const auto &a : playing) {
+    if (lower(a.name) != lower(playing[0].name)) {
+      allSame = false;
+      break;
+    }
+  }
+  if (allSame)
+    return playing[0].name;
+
+  // 2) SMTC 힌트와 대조.
+  const std::string src = lower(m_currentSource);
+  if (!src.empty()) {
+    for (const auto &a : playing) {
+      std::string stem = lower(a.name);
+      const size_t dot = stem.rfind(".exe");
+      if (dot != std::string::npos)
+        stem.erase(dot);
+      if (stem.empty())
+        continue;
+      if (src.find(stem) != std::string::npos ||
+          stem.find(src) != std::string::npos)
+        return a.name;
+    }
+  }
+
+  // 3) EQ 가 걸리는 앱이 하나뿐이면 그것.
+  const std::string *only = nullptr;
+  for (const auto &a : playing) {
+    if (!a.included)
+      continue;
+    if (only && lower(*only) != lower(a.name))
+      return std::string();
+    only = &a.name;
+  }
+  return only ? *only : std::string();
+}
+
+// 지금 엔진에 걸려 있는 필터들의 주파수 응답을 31밴드 축에서 계산한다.
+//
+//   비주얼라이저가 "EQ 적용 후" 모양을 보여주기 위한 것이다. 밴드 게인 값을
+//   그냥 더하면 안 된다 — 5밴드 모드에서는 31칸 중 다섯 칸에만 값이 들어가서
+//   좁은 홈 다섯 개로 보이는데, 실제 필터는 Q=0.667 로 2옥타브 폭이다.
+//
+//   [왜 공유 메모리를 읽는가] 엔진이 실제로 거는 밴드가 거기 있다. UI 쪽
+//   배열을 쓰면 밴드 수 전환·적응 보정 같은 경로마다 어긋난다.
+//
+//   응답식은 아날로그 peaking 프로토타입:
+//       H(s) = (s² + s·A/Q + 1) / (s² + s/(A·Q) + 1),  s = j·(f/f0)
+//   디지털 계수와는 fs/4 위에서 조금 갈리지만, 화면 표시용으로는 충분하다.
+bool MainWindow::ComputeEqResponseDb(size_t bandCount,
+                                     std::vector<float> &out) const {
+  if (bandCount == 0 || AIClient::F31.size() < bandCount)
+    return false;
+  SoundMateSettings *shm = m_eqCtrl->SharedMemory();
+  if (!shm || shm->magic != SOUNDMATE_MAGIC)
+    return false;
+
+  // 표시 전용이라 tearing 이 생겨도 한 프레임 어긋날 뿐이다. 다만 개수는
+  //   반드시 범위 안으로 묶어 잘못된 인덱싱을 막는다.
+  const uint32_t n =
+      (shm->bandCount > SOUNDMATE_MAX_BANDS) ? 0u : shm->bandCount;
+  if (n == 0)
+    return false;
+
+  out.assign(bandCount, 0.0f);
+  for (uint32_t b = 0; b < n; ++b) {
+    const BandConfig &bc = shm->bands[b];
+    if (!bc.enabled || bc.gain == 0.0f)
+      continue;
+    const double f0 = (double)bc.frequency;
+    const double q = (bc.q < 0.01f) ? 0.707 : (double)bc.q;
+    if (f0 <= 0.0)
+      continue;
+    const double A = std::pow(10.0, (double)bc.gain / 40.0);
+
+    for (size_t i = 0; i < bandCount; ++i) {
+      const double f = (double)AIClient::F31[i];
+      const double r = f / f0;
+      const double d = 1.0 - r * r;      // (1 - r²)
+      const double numImag = r * A / q;
+      const double denImag = r / (A * q);
+      const double mag2 = (d * d + numImag * numImag) /
+                          (d * d + denImag * denImag);
+      out[i] += (float)(10.0 * std::log10(mag2 > 1e-12 ? mag2 : 1e-12));
+    }
+  }
+  return true;
 }
 
 // ── 좌측 패널 (이펙트 + 곡 정보) ─────────────────────────────────────────────
@@ -2507,6 +2747,250 @@ void MainWindow::RenderStatusBar() {
     ImGui::TextColored(m_statusColor, "%s", m_statusText.c_str());
   }
   // (Limiter active 인디케이터 출력 안 함)
+
+}
+
+// ── 앱별 EQ 창 ───────────────────────────────────────────────────────────────
+//
+// 두 가지 모드 중 하나를 고른다.
+//
+//   모든 소리에 적용  — 앱별 EQ 가 생기기 전의 동작. 기본값.
+//                       이 모드에서는 아래 목록이 통째로 비활성이다.
+//   선택한 앱에만     — 체크한 앱에만 걸고 나머지는 원음.
+//
+// [왜 기본이 "모든 소리"인가] 이 창을 한 번도 안 여는 사용자에게는 아무것도
+//   바뀌지 않아야 한다. "선택한 앱에만" 이 기본이면 처음 켰을 때 어디에도
+//   EQ 가 안 걸려 고장으로 읽힌다.
+//
+// [왜 앱이 안 보일 수 있는가] 신원은 시각 대조로 맞춘다. 세션이 Active 로
+//   바뀌는 순간과 SFX 스트림이 생기는 순간이 붙어 있어야 대응되는데, 두 앱이
+//   동시에(15ms 이내) 시작하면 구분이 안 돼 배정하지 않는다. 그 스트림은
+//   원음으로 남는다 — 소리가 죽는 실패가 아니다.
+void MainWindow::RenderAppEqWindow() {
+  ImGui::SetNextWindowSize(UIScale::V(460, 500), ImGuiCond_FirstUseEver);
+  ImGui::SetNextWindowSizeConstraints(UIScale::V(380, 340),
+                                      ImVec2(FLT_MAX, FLT_MAX));
+
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, UIScale::V(18, 16));
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, UIScale::Px(10.0f));
+  ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, UIScale::Px(8.0f));
+  ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, UIScale::Px(6.0f));
+
+  const bool open = ImGui::Begin(u8"앱별 EQ##app_eq", &m_appEqOpen,
+                                 ImGuiWindowFlags_NoCollapse);
+  if (!open) {
+    ImGui::End();
+    ImGui::PopStyleVar(4);
+    return;
+  }
+
+  if (!m_appEq.Available()) {
+    ImGui::TextColored(Theme::TEXT_GRAY, u8"오디오 세션을 감시할 수 없습니다.");
+    ImGui::Spacing();
+    ImGui::TextWrapped(u8"앱을 다시 시작하면 복구될 수 있습니다.");
+    ImGui::End();
+    ImGui::PopStyleVar(4);
+    return;
+  }
+
+  const auto mode = m_appEq.GetMode();
+  const bool perApp = (mode == AppEqManager::Mode::Selected);
+  auto playing = m_appEq.PlayingApps();
+  auto included = m_appEq.IncludedApps();
+
+  // ── 모드 선택 ──────────────────────────────────────────────────────────
+  ImGui::TextColored(Theme::TEXT_WHITE, u8"EQ 를 어디에 걸까요");
+  ImGui::Spacing();
+
+  {
+    const float avail = ImGui::GetContentRegionAvail().x;
+    const float gap = UIScale::Px(8.0f);
+    const float bw = (avail - gap) * 0.5f;
+    const ImVec2 sz(bw, UIScale::Px(36.0f));
+
+    auto modeButton = [&](const char *label, bool active,
+                          AppEqManager::Mode target) {
+      ImGui::PushStyleColor(ImGuiCol_Button,
+                            Theme::ToU32(active ? Theme::ACCENT_COLOR
+                                                : Theme::BTN_SECONDARY));
+      ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
+                            Theme::ToU32(active ? Theme::ACCENT_COLOR
+                                                : Theme::GRAD_START));
+      ImGui::PushStyleColor(ImGuiCol_Text,
+                            Theme::ToU32(active ? Theme::TEXT_WHITE
+                                                : Theme::TEXT_GRAY));
+      if (ImGui::Button(label, sz))
+        m_appEq.SetMode(target);
+      ImGui::PopStyleColor(3);
+    };
+
+    modeButton(u8"모든 소리에", !perApp, AppEqManager::Mode::All);
+    ImGui::SameLine(0, gap);
+    modeButton(u8"선택한 앱에만", perApp, AppEqManager::Mode::Selected);
+  }
+
+  ImGui::Spacing();
+  ImGui::TextColored(Theme::TEXT_GRAY,
+                     perApp
+                         ? u8"체크한 앱에만 걸립니다. 나머지는 원음."
+                         : u8"모든 소리에 걸립니다. 예전과 같은 방식입니다.");
+
+  ImGui::Spacing();
+  ImGui::Spacing();
+
+  // ── 앱 목록 ────────────────────────────────────────────────────────────
+  //   "모든 소리에" 모드에서는 고를 이유가 없으므로 통째로 비활성.
+  ImGui::TextColored(perApp ? Theme::GRAD_START : Theme::TEXT_GRAY,
+                     u8"재생 중");
+  ImGui::Spacing();
+
+  ImGui::BeginDisabled(!perApp);
+  {
+    // [높이 배분] 고정 높이로 두면 창보다 내용이 커져 바깥 스크롤이 생기고
+    //   위아래가 잘린다. 아래 섹션(기억된 앱 + 안내 문구)이 쓸 만큼을 미리
+    //   빼고 남는 전부를 재생 목록에 준다.
+    const float line = ImGui::GetTextLineHeightWithSpacing();
+    const float savedH = UIScale::Px(96.0f);
+    const float reserve = line * 4.0f + savedH + UIScale::Px(24.0f);
+    float h = ImGui::GetContentRegionAvail().y - reserve;
+    if (h < UIScale::Px(90.0f))
+      h = UIScale::Px(90.0f);
+    ImGui::BeginChild("##appeq_playing", ImVec2(0, h), true);
+
+    if (playing.empty()) {
+      ImGui::Spacing();
+      ImGui::Indent(UIScale::Px(6.0f));
+      ImGui::TextColored(Theme::TEXT_GRAY, u8"소리를 내는 앱이 없습니다");
+      ImGui::Spacing();
+      ImGui::TextWrapped(u8"음악이나 영상을 재생하면 여기 나타납니다.");
+      ImGui::Unindent(UIScale::Px(6.0f));
+    } else {
+      for (const auto &a : playing) {
+        ImGui::PushID((int)a.pid);
+
+        // 줄 전체를 클릭 대상으로 삼는다. 작은 네모만 노리는 건 성가시다.
+        const float rowH = ImGui::GetFrameHeight();
+        const ImVec2 rowStart = ImGui::GetCursorScreenPos();
+        const float rowW = ImGui::GetContentRegionAvail().x;
+
+        // "모든 소리에" 모드에서는 전부 걸리는 상태로 보여준다.
+        const bool on = perApp ? a.included : true;
+
+        if (ImGui::InvisibleButton("##row", ImVec2(rowW, rowH)) && perApp)
+          m_appEq.SetIncluded(a.name, !on);
+        const bool hovered = perApp && ImGui::IsItemHovered();
+
+        ImDrawList *dl = ImGui::GetWindowDrawList();
+        if (hovered) {
+          dl->AddRectFilled(rowStart,
+                            ImVec2(rowStart.x + rowW, rowStart.y + rowH),
+                            Theme::ToU32(Theme::BTN_SECONDARY),
+                            UIScale::Px(6.0f));
+        }
+
+        // 비활성일 때는 전체를 흐리게. ImGui 의 BeginDisabled 는 직접 그린
+        //   도형에는 적용되지 않으므로 색을 직접 낮춘다.
+        const float dim = perApp ? 1.0f : 0.45f;
+        auto fade = [&](const ImVec4 &c) {
+          return ImGui::GetColorU32(ImVec4(c.x, c.y, c.z, c.w * dim));
+        };
+
+        const float box = UIScale::Px(16.0f);
+        const ImVec2 bp(rowStart.x + UIScale::Px(8.0f),
+                        rowStart.y + (rowH - box) * 0.5f);
+        if (on) {
+          dl->AddRectFilled(bp, ImVec2(bp.x + box, bp.y + box),
+                            fade(Theme::ACCENT_COLOR), UIScale::Px(4.0f));
+          dl->AddLine(ImVec2(bp.x + box * 0.24f, bp.y + box * 0.52f),
+                      ImVec2(bp.x + box * 0.44f, bp.y + box * 0.72f),
+                      fade(ImVec4(1, 1, 1, 1)), UIScale::Px(2.0f));
+          dl->AddLine(ImVec2(bp.x + box * 0.44f, bp.y + box * 0.72f),
+                      ImVec2(bp.x + box * 0.78f, bp.y + box * 0.28f),
+                      fade(ImVec4(1, 1, 1, 1)), UIScale::Px(2.0f));
+        } else {
+          dl->AddRect(bp, ImVec2(bp.x + box, bp.y + box),
+                      fade(Theme::TEXT_GRAY), UIScale::Px(4.0f), 0,
+                      UIScale::Px(1.5f));
+        }
+
+        const char *shown = a.name.c_str();
+        const ImVec2 tp(bp.x + box + UIScale::Px(12.0f),
+                        rowStart.y + (rowH - ImGui::GetTextLineHeight()) * 0.5f);
+        dl->AddText(tp, fade(on ? Theme::TEXT_WHITE : Theme::TEXT_GRAY), shown);
+
+        const char *badge = on ? u8"EQ 적용" : u8"원음";
+        const ImVec2 bs = ImGui::CalcTextSize(badge);
+        dl->AddText(ImVec2(rowStart.x + rowW - bs.x - UIScale::Px(10.0f), tp.y),
+                    fade(on ? Theme::GRAD_START : Theme::TEXT_GRAY), badge);
+
+        ImGui::PopID();
+        ImGui::Spacing();
+      }
+    }
+    ImGui::EndChild();
+  }
+
+  ImGui::Spacing();
+
+  // ── 기억된 앱 ──────────────────────────────────────────────────────────
+  //   지금 소리를 안 내도 목록에 남는다. 다시 소리를 내면 자동으로 적용된다.
+  ImGui::TextColored(perApp ? Theme::GRAD_START : Theme::TEXT_GRAY,
+                     u8"기억된 앱");
+  ImGui::SameLine();
+  ImGui::TextColored(Theme::TEXT_GRAY, u8"— 다시 켜면 자동 적용");
+  ImGui::Spacing();
+
+  {
+    ImGui::BeginChild("##appeq_saved", ImVec2(0, UIScale::Px(96.0f)), true);
+    if (included.empty()) {
+      ImGui::Spacing();
+      ImGui::Indent(UIScale::Px(6.0f));
+      ImGui::TextColored(Theme::TEXT_GRAY, u8"없습니다");
+      ImGui::Unindent(UIScale::Px(6.0f));
+    } else {
+      for (const auto &name : included) {
+        ImGui::PushID(name.c_str());
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextColored(Theme::TEXT_WHITE, "%s", name.c_str());
+
+        const float bw = UIScale::Px(46.0f);
+        ImGui::SameLine(ImGui::GetContentRegionAvail().x - bw +
+                        ImGui::GetCursorPosX());
+        ImGui::PushStyleColor(ImGuiCol_Button,
+                              Theme::ToU32(Theme::BTN_SECONDARY));
+        if (ImGui::SmallButton(u8"삭제"))
+          m_appEq.ForgetApp(name);
+        ImGui::PopStyleColor();
+        ImGui::PopID();
+      }
+    }
+    ImGui::EndChild();
+  }
+  ImGui::EndDisabled();
+
+  ImGui::Spacing();
+  ImGui::TextColored(Theme::TEXT_GRAY,
+                     u8"앱이 안 보이면 곡을 넘기거나 멈췄다 재생해 보세요.");
+
+  // [진단] 앱이 목록에 안 뜰 때 어느 단계에서 끊겼는지 보여준다.
+  //   SHM   : 공유 메모리 연결 + 버전 (스트림 표는 3 이상)
+  //   스트림 : APO 가 등록한 칸 수 — 0 이면 DLL 이 옛 버전이거나 미배포
+  //   알림   : 받은 세션 알림 누적 — 0 이면 WASAPI 알림이 안 오는 것
+  //   대기   : 아직 스트림과 대응 안 된 알림
+  //   대응   : 신원 확정된 앱 수
+  {
+    const auto d = m_appEq.GetDiagnostics();
+    ImGui::Spacing();
+    ImGui::TextColored(Theme::TEXT_GRAY,
+                       u8"진단  SHM %s(v%u)  스트림 %d  알림 %lu  대기 %d  대응 %d",
+                       d.shmMapped ? "O" : "X", d.shmVersion, d.activeSlots,
+                       d.sessionEvents, d.pendingEvents, d.matched);
+    ImGui::TextColored(Theme::TEXT_GRAY, u8"      미확인 %d  재생세션 %d",
+                       d.unidentified, d.freeSessions);
+  }
+
+  ImGui::End();
+  ImGui::PopStyleVar(4);
 }
 
 // ── 백업 스캔 ────────────────────────────────────────────────────────────────

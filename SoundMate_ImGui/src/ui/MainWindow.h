@@ -4,6 +4,7 @@
 #include "../core/AIClient.h"
 #include "../core/EQController.h"
 #include "../core/AdaptiveEngine.h"
+#include "../core/AppEqManager.h"
 #include "../core/EngineHealthMonitor.h"
 #include "../core/MediaMonitor.h"
 #include "SettingsWindow.h"
@@ -54,6 +55,16 @@ private:
   // ── 엔진 헬스 (G1_1 / G1_2 / G1_3) — FeatureFlags.h 로 ON/OFF ─
   void RenderHealthDot();       // G1_1: 타이틀바 컬러 점 + 호버 툴팁
   void RenderDiagnosticPanel(); // G1_2: 점 클릭 시 모달 (Phase 1 stub)
+
+  // [앱별 EQ] 재생 중인 앱 목록 + 제외 체크박스. 별도 창으로 띄운다.
+  //   메인 레이아웃(좌측 패널 240~320px, 우측 EQ 31밴드)은 이미 꽉 차 있고,
+  //   여기 목록은 앱이 소리를 낼 때마다 실시간으로 바뀌어서 끼워 넣으면
+  //   레이아웃이 흔들린다. "엔진 진단" 창과 같은 패턴을 따른다.
+  void RenderAppEqWindow();
+
+  // 지금 엔진에 걸려 있는 필터들의 주파수 응답(31밴드 축, dB).
+  //   비주얼라이저가 "EQ 적용 후" 모양을 그리는 데 쓴다.
+  bool ComputeEqResponseDb(size_t bandCount, std::vector<float> &out) const;
   bool IsPhaseWarningTriggered(int bandIdx) const; // G1_3: 위상 왜곡 임계
 
   // ── EQ 슬라이더 관련 ─────────────────────────────────────────
@@ -434,6 +445,15 @@ private:
   SoundMate::EngineHealthMonitor::Report m_healthReport;
   float m_healthCheckTimer = 999.f; // 첫 프레임에 즉시 검사하도록 큰 값
   bool m_diagnosticOpen = false;    // G1_2 모달 열림 상태
+
+  // [앱별 EQ] 세션 감시 + 신원 대조 + 제외 목록. 실패해도 앱은 정상 동작한다.
+  AppEqManager m_appEq;
+  // SMTC 가 알려주는 재생 앱 이름 (Chrome, Spotify 등). 곡 제목 옆에
+  //   프로세스 이름을 붙일 때 후보를 좁히는 데 쓴다.
+  std::string m_currentSource;
+  // 지금 곡을 내보내고 있는 프로세스 이름. 못 정하면 빈 문자열.
+  std::string CurrentSourceProcess() const;
+  bool m_appEqOpen = false;
 
   SettingsWindow m_settingsWin;
   SurveyWindow m_surveyWin;
