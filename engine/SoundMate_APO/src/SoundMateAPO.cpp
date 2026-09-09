@@ -537,6 +537,32 @@ void SoundMateAPO::APOProcess(
 		memset(inputFrames, 0, frameCount * engine.inChannels * sizeof(float));
 	}
 
+	// [이중 적용 방지] EQ 는 post-mix(EFX) 인스턴스에서만 적용한다.
+	//
+	// 우리 APO 는 PRE(SFX/MultiSFX)와 POST(EFX/MultiEFX) 양쪽에 등록돼 있고,
+	// 예전에는 isPostMix 가 **오디오 탭만** 게이트했다. 그래서 같은 31밴드
+	// 필터와 리미터가 스트림 단계와 엔드포인트 단계에서 두 번 걸렸다.
+	//
+	// 실측(고정 시드 노이즈 + WASAPI 루프백, EQ on/off 비교):
+	//   모양 상관계수 r = 0.943   설정 커브와 거의 일치
+	//   적용 비율     1.78배      2배에서 리미터가 누른 만큼 못 미침
+	// 즉 +8.6dB 저역 부스트가 실제로는 +17dB 로 걸리고 리미터가 그것을
+	// 광대역으로 눌러 "먹먹함"과 "음량 저하"를 만들고 있었다.
+	//
+	// 게다가 탭이 post-mix 에 있으므로, 탭이 읽던 "EQ 적용 전 신호"는 실은
+	// **PRE 에서 이미 한 번 EQ 가 걸린 신호**였다. 피하려던 분석→EQ→분석
+	// 폐루프가 다른 경로로 생겨 있었던 것이다. 이 수정으로 탭이 비로소
+	// 진짜 원음을 읽는다.
+	//
+	// [POST 를 남기는 이유]
+	//   - WASAPI 엔드포인트 루프백이 EFX 이후를 뜨므로 OBS/디스코드 전체화면
+	//     송출에 EQ 가 실린다 (실측 확인).
+	//   - EFX 는 믹스 후 1회, SFX 는 스트림마다 N회 → CPU 유리.
+	//   - APO 는 클라이언트 PID 를 볼 수 없어 SFX 로 앱별 EQ 를 할 수 없다.
+	//
+	// [주의] EFX 가 로드되지 않는 환경에서는 EQ 가 통째로 빠진다. 진단은
+	//   APO 로그의 "Initialize: isPostMix=" 줄로 한다.
+	//
 	// Run child APO first (if chained), then apply our EQ.
 	//
 	// SEH guard around child->APOProcess: if a third-party child (Realtek,
@@ -568,15 +594,26 @@ void SoundMateAPO::APOProcess(
 		// [오디오 탭] engine.process 직전 = 우리 EQ 가 적용되기 전 신호.
 		//   여기서 떠야 분석→EQ→분석 폐루프가 생기지 않는다. 자식 APO 가 있으면
 		//   실제 입력은 outputFrames 이므로 그쪽을 읽는다.
-		audioTap.write(outputFrames, frameCount, engine.outChannels,
-			flags == BUFFER_SILENT);
-		engine.updateFromSharedMemory();
-		engine.process(outputFrames, outputFrames, frameCount);
+		if (isPostMix) {
+			audioTap.write(outputFrames, frameCount, engine.outChannels,
+				flags == BUFFER_SILENT);
+			engine.updateFromSharedMemory();
+			engine.process(outputFrames, outputFrames, frameCount);
+		}
 	} else {
-		audioTap.write(inputFrames, frameCount, engine.inChannels,
-			flags == BUFFER_SILENT);
-		engine.updateFromSharedMemory();
-		engine.process(outputFrames, inputFrames, frameCount);
+		if (isPostMix) {
+			audioTap.write(inputFrames, frameCount, engine.inChannels,
+				flags == BUFFER_SILENT);
+			engine.updateFromSharedMemory();
+			engine.process(outputFrames, inputFrames, frameCount);
+		} else {
+			// pre-mix: 우리 EQ 없이 그대로 통과. (자식 APO 가 없는 경로이므로
+			//   입력을 출력으로 복사해야 한다.)
+			if (outputFrames != inputFrames) {
+				memcpy(outputFrames, inputFrames,
+					frameCount * engine.outChannels * sizeof(float));
+			}
+		}
 	}
 
 	ppOutputConnections[0]->u32ValidFrameCount = frameCount;
