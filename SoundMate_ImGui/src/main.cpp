@@ -530,6 +530,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
   }
 
 cleanup:
+  // [종료 시 EQ 해제] 앱이 완전히 꺼지면 소리도 원래대로 돌아와야 한다.
+  //   APO 는 config.txt 만 보고 계속 동작하므로, 끄지 않으면 앱이 없는데도
+  //   마지막 커브가 영원히 걸린 채로 남는다. POWER OFF 와 같은 동작이다.
+  //   트레이로 숨기는 경로는 여기까지 오지 않으므로 EQ 가 유지된다.
+  eqCtrl.ApplyBypass();
+
   // [2-B] 종료 시 네트워크 동기화 강제 수행 (네트워크 지연 대비 최대 3초 타임아웃 제한)
   g_recordManager.ProcessBatchSync(true, 3);
 

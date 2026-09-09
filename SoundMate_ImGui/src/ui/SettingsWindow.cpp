@@ -307,8 +307,8 @@ void SettingsWindow::Render() {
     };
     static const ModeOption kOptions[] = {
         {EqMode::Off, u8"OFF"},
-        {EqMode::AutoOnce, u8"곡마다 한 번"},
-        {EqMode::AutoTrack, u8"곡 안에서 계속"},
+        {EqMode::AutoOnce, u8"1회"},
+        {EqMode::AutoTrack, u8"실시간"},
     };
     constexpr int kModeCount = (int)(sizeof(kOptions) / sizeof(kOptions[0]));
 
