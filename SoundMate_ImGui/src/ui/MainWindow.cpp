@@ -1692,6 +1692,13 @@ void MainWindow::RenderTopBar() {
                       g_recordManager.UploadAudioPreferences(parts[0], parts[1], parts[3], parts[2], parts[4]);
                     }
                   }).detach();
+                  // [설문 즉시 반영] m_serverCurve31 은 곡 시작 시점의
+                  //   설문으로 받아온 값이다. 비우지 않으면 TriggerAIGeneration
+                  //   이 그 옛 커브를 그대로 재사용해 설문 변경이 먹지 않는다.
+                  //   비우면 LocalCurve 가 새 설문으로 즉시 산출한다 —
+                  //   서버 curve.ts 와 같은 알고리즘이라 결과가 동일하다
+                  //   (하네스 대조 최대 오차 0.000 dB).
+                  m_serverCurve31.clear();
                   if (!m_currentTitle.empty() && g_recordManager.IsAIEligible()) TriggerAIGeneration();
                 },
                 existing);
