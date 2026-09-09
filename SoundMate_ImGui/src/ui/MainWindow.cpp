@@ -105,6 +105,7 @@ void MainWindow::Initialize(EQController *eq, AIClient *ai,
   // [D 측정] 리미터 개입률 프로브. Start() 전에 설정해야 한다.
   //   eq 는 main.cpp 소유로 MainWindow 보다 오래 살므로 raw 포인터 캡처가 안전.
   m_adaptive.SetLimiterProbe([eq]() { return eq && eq->IsLimiterActive(); });
+  m_adaptive.SetTrackWithinSong(m_settings.eqMode == EqMode::AutoTrack);
   m_adaptive.Start();
 
   std::thread([this]() { CheckForUpdates(); }).detach();
@@ -1389,7 +1390,7 @@ void MainWindow::Render() {
             SetStatus(
                 u8"음원 정보를 찾을 수 없어 EQ를 평탄(Flat)으로 설정합니다.",
                 Theme::COLOR_YELLOW);
-          } else if (mode == EqMode::AiAuto && m_ai) {
+          } else if (mode != EqMode::Off && m_ai) {
             TriggerAIGeneration();
           }
         }
@@ -1630,7 +1631,11 @@ void MainWindow::RenderTopBar() {
     m_settingsWin.Open(
         names, [this](int bIdx) { ChangeBands(bIdx); },
         [this]() { if (m_onLogout) m_onLogout(); },
-        [this](const AppSettings &s) { m_settings = s; },
+        [this](const AppSettings &s) {
+          m_settings = s;
+          // 모드 변경을 즉시 반영한다 — 앱 재시작을 요구하지 않는다.
+          m_adaptive.SetTrackWithinSong(s.eqMode == EqMode::AutoTrack);
+        },
         [this]() {
             std::thread([this]() {
               char exeP[MAX_PATH];

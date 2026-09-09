@@ -35,15 +35,17 @@ AppSettings LoadSettings() {
       const int m = j["eq_mode"].get<int>();
       // [v0.1.0] 1 = 옛 GlobalAverage. 그 모드는 장르 평균이 영원히 비어 있어
       //   실제로는 아무 EQ 도 걸리지 않았다 -> 자동 EQ 의도로 보고 AiAuto 로.
-      s.eqMode = (m == (int)EqMode::Off) ? EqMode::Off : EqMode::AiAuto;
+      s.eqMode = (m == (int)EqMode::Off)        ? EqMode::Off
+                 : (m == (int)EqMode::AutoOnce) ? EqMode::AutoOnce
+                                                : EqMode::AutoTrack;
     } else {
       // 옛 두 bool 에서 마이그레이션. global_average 만 켜져 있던 사용자도
       // "자동 EQ 를 원한다"는 의도이므로 AiAuto 로 올린다.
       const bool oldAuto = j.value("auto_analyze", true);
       const bool oldGlobal = j.value("global_average", false);
-      s.eqMode = (oldAuto || oldGlobal) ? EqMode::AiAuto : EqMode::Off;
+      s.eqMode = (oldAuto || oldGlobal) ? EqMode::AutoTrack : EqMode::Off;
     }
-    s.autoAnalyze = (s.eqMode == EqMode::AiAuto);
+    s.autoAnalyze = (s.eqMode != EqMode::Off);
   } catch (...) {
   }
   return s;
@@ -62,7 +64,7 @@ void SaveSettings(const AppSettings &s) {
         {"minimize_to_tray", s.minimizeToTray},
         {"language", s.language},
         {"eq_mode", (int)s.eqMode},
-        {"auto_analyze", s.eqMode == EqMode::AiAuto},
+        {"auto_analyze", s.eqMode != EqMode::Off},
     };
     std::ofstream f(path);
     f << j.dump(4);
@@ -305,8 +307,10 @@ void SettingsWindow::Render() {
     };
     static const ModeOption kOptions[] = {
         {EqMode::Off, u8"OFF"},
-        {EqMode::AiAuto, u8"AI 자동"},
+        {EqMode::AutoOnce, u8"곡마다 한 번"},
+        {EqMode::AutoTrack, u8"곡 안에서 계속"},
     };
+    constexpr int kModeCount = (int)(sizeof(kOptions) / sizeof(kOptions[0]));
 
     float segMaxW = 0.0f;
     for (auto &o : kOptions)
@@ -315,12 +319,12 @@ void SettingsWindow::Render() {
     // [PR-2D fix] 4px 간격(SameLine(0, 4))과 동일하게 폭 계산. ItemSpacing.x
     // (기본 8)로 계산하면 실제 우측 끝이 4px 안쪽으로 들어와 어긋남.
     const float kSegGap = UIScale::Px(4.0f);
-    float segTotal = segW * 2.0f + kSegGap * 1.0f;
+    float segTotal = segW * kModeCount + kSegGap * (kModeCount - 1);
 
     ImGui::SameLine(kRightEdge - segTotal);
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, UIScale::Px(8.0f));
     ImGui::BeginDisabled(!eligible);
-    for (int i = 0; i < 2; ++i) {
+    for (int i = 0; i < kModeCount; ++i) {
       if (i > 0)
         ImGui::SameLine(0, kSegGap);
       bool selected = (m_settings.eqMode == kOptions[i].mode);
@@ -338,7 +342,7 @@ void SettingsWindow::Render() {
       }
       if (ImGui::Button(kOptions[i].label, ImVec2(segW, UIScale::Px(28)))) {
         m_settings.eqMode = kOptions[i].mode;
-        m_settings.autoAnalyze = (m_settings.eqMode == EqMode::AiAuto);
+        m_settings.autoAnalyze = (m_settings.eqMode != EqMode::Off);
         SaveSettings(m_settings);
         if (m_onChanged)
           m_onChanged(m_settings);

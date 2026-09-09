@@ -115,6 +115,11 @@ public:
 
   // 분석을 아예 돌리지 않는다 (설정 OFF / Bypass 등). 끄면 audiodg 도
   // 복사를 멈춘다 (consumerActive=0).
+  // [곡마다 한 번] true 면 최초 델타 하나만 내고 곡이 끝날 때까지 재산출을
+  //   멈춘다. 곡 안에서 EQ 가 계속 움직이는 게 거슬리는 사용자를 위한 모드.
+  //   측정 자체는 계속 돌아 무드 로그와 시각화는 유지된다.
+  void SetTrackWithinSong(bool on) { m_trackWithinSong.store(on); }
+
   void SetEnabled(bool enabled);
   bool IsEnabled() const { return m_enabled.load(); }
 
@@ -167,6 +172,7 @@ private:
   std::thread       m_thread;
   std::atomic<bool> m_running{false};
   std::atomic<bool> m_enabled{true};
+  std::atomic<bool> m_trackWithinSong{true};
   std::atomic<bool> m_restart{false};   // OnSongChanged 신호
   std::atomic<State> m_state{State::Idle};
 

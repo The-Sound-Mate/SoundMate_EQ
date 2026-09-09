@@ -413,6 +413,10 @@ void AdaptiveEngine::WorkerLoop() {
     if (!firstDone)
       continue;
 
+    // [곡마다 한 번] 최초 델타로 끝. 측정은 계속 돌아 로그/시각화는 살아 있다.
+    if (!m_trackWithinSong.load(std::memory_order_relaxed))
+      continue;
+
     const uint64_t refreshTarget = (uint64_t)(kRefreshSeconds * configuredRate);
     if (sinceRefresh < refreshTarget || !analyzer.SlowReady())
       continue;

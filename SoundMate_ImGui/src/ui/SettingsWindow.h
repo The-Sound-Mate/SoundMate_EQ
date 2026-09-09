@@ -6,14 +6,15 @@
 #include <functional>
 #include <nlohmann/json.hpp>
 
-// [PR-2C] EQ 자동 적용 모드.
-//   Off    : 자동 EQ 변환 없음 (사용자가 마지막 설정한 값 유지)
-//   AiAuto : 곡 변경 시 자동 EQ — v0.1.0 부터 서버 커브(resolve-track) 기반.
-// [v0.1.0] GlobalAverage(=1) 제거. 장르 평균을 채우는 코드가 어디에도 없어
-//   track_average/genre_average 가 영원히 0행이었고, UI 에 노출된 적도 없다.
-//   설정 파일에 남은 값 1 은 로드 시 AiAuto 로 승격한다 (기존엔 아무 EQ 도
-//   안 걸리던 상태 -> 정상 동작으로 개선).
-enum class EqMode { Off = 0, AiAuto = 2 };
+// EQ 자동 적용 모드.
+//   Off       : 자동 변환 없음 (사용자가 마지막 설정한 값 유지)
+//   AutoOnce  : 곡마다 한 번만 — 30초 분석 결과를 적용하고 그대로 고정
+//   AutoTrack : 곡 안에서 계속 — 5초마다 재산출해 전개를 따라간다
+//
+// [값 유지] 기존 설정 파일과의 호환을 위해 AutoTrack 은 2 를 유지한다.
+//   1 은 예전 GlobalAverage 자리였고 UI 에 노출된 적이 없으므로 재사용해도
+//   안전하다.
+enum class EqMode { Off = 0, AutoOnce = 1, AutoTrack = 2 };
 
 struct AppSettings {
     std::string defaultDevice;
@@ -23,7 +24,7 @@ struct AppSettings {
     std::string language = "한국어";
 
     // [PR-2C] 새 통합 필드. 기본은 AiAuto.
-    EqMode      eqMode = EqMode::AiAuto;
+    EqMode      eqMode = EqMode::AutoTrack;
 
     // [Deprecated, 마이그레이션 용도로만 유지] 기존 JSON 읽기 호환.
     bool        autoAnalyze   = true;
