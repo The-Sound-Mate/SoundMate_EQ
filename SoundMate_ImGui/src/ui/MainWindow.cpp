@@ -1045,8 +1045,9 @@ void MainWindow::Render() {
   // ── [부드러운 반영] EQ 평활 진행 ──
   //   지수 평활이라 목표가 5초마다 조금씩 바뀌어도 계단이 생기지 않는다.
   //   0.02dB 안에 들어오면 목표에 스냅하고 멈춘다(무한 재적용 방지).
-  if (m_eqTarget31.size() == 31 && m_eqDisplay31.size() == 31 &&
-      m_transitionProgress >= 1.0f) {
+  // 트랜지션 중에도 돈다 — 이제 이것이 슬라이더와 오디오 양쪽의 유일한
+  // 구동원이다. 트랜지션은 master 를 옮기고, 여기서 그 결과를 따라간다.
+  if (m_eqTarget31.size() == 31 && m_eqDisplay31.size() == 31) {
     float maxDiff = 0.f;
     for (size_t i = 0; i < 31; ++i) {
       const float d = std::fabs(m_eqTarget31[i] - m_eqDisplay31[i]);
@@ -2158,8 +2159,14 @@ void MainWindow::RenderEQPanel() {
   // [분석 결과 표시] 자동 경로에서는 실제로 나간 값을 슬라이더에 보여준다.
   //   m_eqGains31Master(밑그림/SSOT)는 건드리지 않는다 — 저장·복원이 밑그림
   //   기준이어야 델타가 누적되지 않는다.
-  //   드래그 중이거나 트랜지션 중에는 건너뛴다(사용자 조작과 싸우지 않도록).
-  if (m_transitionProgress >= 1.0f && !ImGui::IsAnyItemActive()) {
+  //   [단일 출처] 트랜지션 중에도 계속 동기화한다. 곡 변경/캐시 적용 때
+  //   SmoothTransition 이 SyncCurrentFromMaster 로 슬라이더를 **밑그림**에서
+  //   그리는데, 슬라이더는 직전까지 **보정값**을 보여주고 있었다. 그래서
+  //   전환이 시작되는 순간 밑그림으로 툭 튄다. 표시 출처를 보정값 하나로
+  //   통일하면 그 점프가 사라진다 — 트랜지션은 master 를 2초에 걸쳐 옮기고,
+  //   그에 따라 목표가 바뀌면 아래 지수 평활이 보정값을 부드럽게 끌고 간다.
+  //   드래그 중에만 건너뛴다(사용자 조작과 싸우지 않도록).
+  if (!ImGui::IsAnyItemActive()) {
     const EqOrigin o = m_eqOrigin.load();
     if (o != EqOrigin::Manual && o != EqOrigin::Preset) {
       std::vector<float> disp;
