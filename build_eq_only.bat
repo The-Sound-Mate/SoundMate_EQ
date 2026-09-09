@@ -9,14 +9,14 @@ set "CMAKE=C:\Program Files\Microsoft Visual Studio\18\Community\Common7\IDE\Com
 
 cd /d "C:\SoundMate_EQ"
 
-if not exist build md build
+if not exist build-debug md build-debug
 
 echo [1/2] Configuring...
-"%CMAKE%" -S . -B build -G "NMake Makefiles" -DCMAKE_BUILD_TYPE=Debug 2>&1
+"%CMAKE%" -S . -B build-debug -G "NMake Makefiles" -DCMAKE_BUILD_TYPE=Debug 2>&1
 if errorlevel 1 (echo [ERROR] CMake configure FAILED & exit /b 1)
 
 echo [2/2] Building...
-"%CMAKE%" --build build --target SoundMate_EQ 2>&1
+"%CMAKE%" --build build-debug --target SoundMate_EQ 2>&1
 if errorlevel 1 (echo [ERROR] Build FAILED & exit /b 1)
 
 echo [OK] Build complete.

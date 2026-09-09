@@ -72,3 +72,7 @@ test_env/
 
 # Supabase CLI 로컬 상태 (프로젝트 링크 정보 — 공유 대상 아님)
 supabase/.temp/
+
+# 빌드 디렉터리 분리 (Debug/Release 가 서로를 지우지 않도록)
+build-debug/
+build-release/

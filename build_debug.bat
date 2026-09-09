@@ -13,14 +13,14 @@ rem Clear any stale CMake cache so generator conflicts don't block us
 if exist build\CMakeCache.txt del /f build\CMakeCache.txt
 if exist build\CMakeFiles rmdir /s /q build\CMakeFiles
 
-if not exist build md build
+if not exist build-debug md build-debug
 
 echo [1/2] Configuring...
-"%CMAKE%" -S . -B build -G "NMake Makefiles" -DCMAKE_BUILD_TYPE=Debug 2>&1
+"%CMAKE%" -S . -B build-debug -G "NMake Makefiles" -DCMAKE_BUILD_TYPE=Debug 2>&1
 if errorlevel 1 (echo [ERROR] CMake configure FAILED & exit /b 1)
 
 echo [2/2] Building...
-"%CMAKE%" --build build 2>&1
+"%CMAKE%" --build build-debug 2>&1
 if errorlevel 1 (echo [ERROR] Build FAILED & exit /b 1)
 
 echo [OK] Build complete.

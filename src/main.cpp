@@ -409,6 +409,23 @@ static void WaitForServiceRunning(SC_HANDLE hSCM, const wchar_t* name) {
     CloseServiceHandle(h);
 }
 
+// [DLL 잠금 해제] 복사 **전에** 오디오를 내린다.
+//
+// audiodg.exe 가 SoundMate_APO.dll 을 로드하고 있으면 CopyFileW 가
+// 공유 위반으로 실패한다. 예전에는 서비스 재시작이 복사 뒤에 있어서 DLL 만
+// 조용히 갱신되지 않았다 — Controller.exe / reset.exe 는 audiodg 가 잡지
+// 않으므로 정상 복사돼, 겉보기에는 설치가 성공한 것처럼 보였다.
+static void StopAudioServicesSC() {
+    Log("Stopping audio services (unlock APO DLL)...");
+    SC_HANDLE hSCM = OpenSCManagerW(NULL, NULL, SC_MANAGER_ALL_ACCESS);
+    if (!hSCM) { Log("OpenSCManager failed (stop)"); return; }
+    StopServiceSC(hSCM, L"AudioEndpointBuilder");
+    StopServiceSC(hSCM, L"audiosrv");
+    CloseServiceHandle(hSCM);
+    Sleep(1500);  // audiodg 종료까지 대기
+    Log("Audio services stopped.");
+}
+
 static void RestartAudioServicesSC() {
     Log("Restarting audio services...");
     SC_HANDLE hSCM = OpenSCManagerW(NULL, NULL, SC_MANAGER_ALL_ACCESS);
@@ -722,6 +739,9 @@ int main() {
     }
 
     // Step 2: Copy files from the installer's own directory (sibling files)
+    //   audiodg 가 DLL 을 잡고 있으면 복사가 실패하므로 먼저 내린다.
+    //   맨 아래 RestartAudioServicesSC() 가 다시 올린다.
+    StopAudioServicesSC();
     {
         wchar_t selfPath[MAX_PATH] = {};
         GetModuleFileNameW(NULL, selfPath, MAX_PATH);
@@ -729,9 +749,21 @@ int main() {
         wstring dir = selfPath;
 
         CreateDirectoryW(INSTALL_DIR, NULL);
-        CopyFileW((dir + L"\\SoundMate_APO.dll").c_str(),             DLL_DEST,   FALSE);
-        CopyFileW((dir + L"\\SoundMate_Controller.exe").c_str(),      CTRL_DEST,  FALSE);
-        CopyFileW((dir + L"\\SoundMate_reset.exe").c_str(),           RESET_DEST, FALSE);
+
+        // [검증] 예전에는 반환값을 안 보고 무조건 "Files copied" 를 찍어서
+        //   DLL 복사 실패가 완전히 숨겨졌다. 실패는 반드시 로그에 남긴다.
+        auto copyChecked = [&](const wchar_t* name, const wchar_t* dest) {
+            const wstring src = dir + L"\\" + name;
+            if (CopyFileW(src.c_str(), dest, FALSE)) return;
+            char buf[256];
+            _snprintf_s(buf, sizeof(buf), _TRUNCATE,
+                "COPY FAILED: %ws (err=%lu) — 이 파일은 갱신되지 않았습니다",
+                name, GetLastError());
+            Log(buf);
+        };
+        copyChecked(L"SoundMate_APO.dll",        DLL_DEST);
+        copyChecked(L"SoundMate_Controller.exe", CTRL_DEST);
+        copyChecked(L"SoundMate_reset.exe",      RESET_DEST);
 
         // Dynamic CRT runtime DLLs — bundled alongside our APO DLL exactly like
         // Equalizer APO does. Without these, audiodg cannot load our APO when
