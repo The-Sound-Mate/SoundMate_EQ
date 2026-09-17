@@ -544,8 +544,19 @@ begin
   end else if InstallSucceeded and (not NeedsReboot) then begin
     // 정상 완료: 서비스가 이미 setup.exe 에 의해 기동됨. 추가 조치 없음.
   end else if InstallSucceeded and NeedsReboot then begin
-    // PFRO 정상 완료: 재부팅 안내가 표시됨. 서비스 건드리지 않음.
-    // PPL 은 재부팅 후 Windows 기본값으로 자동 복원되므로 별도 처리 불필요.
+    // PFRO 완료: 파일 교체는 재부팅 때 끝난다. 그때까지 오디오 스택을
+    //   멈춘 채로 두면 소리가 아예 안 난다 (audiosrv 가 내려가 있으므로).
+    //   사용자가 재부팅을 미루면 그 상태가 며칠씩 간다. 그래서 여기서
+    //   되살린다 — 구버전 DLL 을 다시 물게 되지만, PendingFileRename 은
+    //   부팅 시 서비스가 뜨기 전에 처리되므로 교체 예약에는 영향이 없다.
+    Exec(ExpandConstant('{cmd}'),
+         '/C net start AudioEndpointBuilder & net start audiosrv',
+         '', SW_HIDE, ewWaitUntilTerminated, Rc);
+
+    // PPL 도 지금 되돌린다. 재부팅까지 audiodg 보호가 꺼진 채로 남는 것을
+    //   막는다 (어차피 부팅 때 원래 값으로 읽힌다).
+    RestorePPL;
+    Log('[DeinitializeSetup] PFRO path — audio services restarted, PPL restored.');
   end;
 end;
 
