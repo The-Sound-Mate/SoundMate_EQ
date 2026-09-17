@@ -18,20 +18,20 @@ const char* const kEn[COUNT] = {
 };
 
 // ---------------------------------------------------------------------------
-// [언어 추가] 아래 두 덩어리를 복사해서 이름만 바꾸면 된다.
+// 한국어 — 번역된 칸만 채운다. 비어 있는 칸은 nullptr 로 남고 T() 가
+// 영어를 내보낸다. 표는 Set() 이 처음 불릴 때 한 번만 채워진다.
 //
-//   const char* kKo[COUNT] = {};          // 전부 nullptr 로 시작
-//   void InitKo() {
-//   #define SM_TR(id, tr) kKo[id] = tr;
-//   #include "Lang_ko.inc"
-//   #undef SM_TR
-//   }
-//
-// 그리고 kLanguages[] 에 한 줄:
-//   { "ko", u8"한국어", kKo, InitKo },
-//
-// 번역이 없는 칸은 nullptr 로 남고, T() 가 영어로 대신 내보낸다.
+// [언어 추가] 아래 세 덩어리를 그대로 복사해서 이름만 바꾸면 끝이다:
+//   표(kKo) / 채우는 함수(InitKo) / kLanguages[] 한 줄.
+//   호출부(.cpp 248곳)는 건드리지 않는다.
 // ---------------------------------------------------------------------------
+const char* kKo[COUNT] = {};  // 전부 nullptr 로 시작
+
+void InitKo() {
+#define SM_TR(id, tr) kKo[id] = tr;
+#include "Lang_ko.inc"
+#undef SM_TR
+}
 
 struct Entry {
     const char*        code;   // 설정 파일에 저장되는 값 ("en")
@@ -40,8 +40,13 @@ struct Entry {
     void             (*init)(); // 표를 채우는 함수 (영어는 필요 없음)
 };
 
+// [순서 고정] 0번은 반드시 init 이 필요 없는 언어여야 한다. g_cur 가 0 으로
+//   시작하는데 번역표는 Set() 이 처음 불릴 때야 채워지므로, 지연 초기화가
+//   필요한 언어를 0번에 두면 Set() 이전의 T() 가 전부 영어로 떨어진다.
+//   기본 표시 언어를 바꾸려면 여기가 아니라 AppSettings::language 를 고친다.
 const Entry kLanguages[] = {
-    { "en", u8"English", kEn, nullptr },
+    { "en", u8"English",  kEn, nullptr },
+    { "ko", u8"한국어", kKo, InitKo },
 };
 
 constexpr int kLangCount = (int)(sizeof(kLanguages) / sizeof(kLanguages[0]));

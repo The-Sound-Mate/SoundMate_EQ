@@ -51,11 +51,12 @@ public:
     //   SHM 매핑 실패 / Controller 미실행 시 false (안전 default).
     bool IsLimiterActive();
 
-    // [헤드룸 서보] 프리앰프(dB). AdaptiveEngine 이 실측 리미터 개입률을 보고
-    //   곡마다 정한다. 다음 ApplyEQ 때 config.txt 에 반영된다.
-    //   atomic 인 이유: UI 스레드가 쓰고 ApplyEQ 가 다른 경로에서도 불린다.
-    // 프리앰프 기본값. AdaptiveEngine::kPreampStartDb 와 같아야 한다.
-    static constexpr float kDefaultPreampDb = -1.0f;
+    // [프리앰프 0 고정] 프리앰프는 0 에서 움직이지 않는다. 음량은 EQ 밴드
+    //   게인으로만 맞춘다 (EQController.cpp 의 preamp 주석 참고).
+    //   예전엔 리미터에 줄 헤드룸으로 -1.0 을 깔아 뒀지만, 리미터를 들어낸
+    //   지금은 전 구간 1 dB 음량 손실일 뿐이다. 0 으로 되돌렸다.
+    //   ResetPreampToDefault() 가 앱 시작 때 config.txt 를 이 값으로 덮는다.
+    static constexpr float kDefaultPreampDb = 0.0f;
 
     // [헤드룸 서보] 앱 시작 시 config.txt 에 남은 이전 세션의 서보값을 지운다.
     //   프리앰프는 곡 단위 상태라 세션을 넘어 유지되면 안 된다 — 안 지우면

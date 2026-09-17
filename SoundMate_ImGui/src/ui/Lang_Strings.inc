@@ -231,3 +231,10 @@ SM_STR(SURVEY_PROGRESS_FMT, u8"Progress: %d / %d")  // 진행률: %d / %d
 SM_STR(SURVEY_DONE, u8"Survey complete!")  // 설문이 완료되었습니다!
 SM_STR(SURVEY_DONE_DESC, u8"We will analyze your answers and build a custom EQ profile.")  // 귀하의 취향을 분석하여 맞춤형 EQ 프롬프트를 생성합니다.
 SM_STR(SURVEY_APPLY_CLOSE, u8"Apply and close")  // 적용 및 닫기
+
+// --- 엔진 버전 불일치 경고 (앱별 EQ 창) ------------------------------------
+// 설치 중 SoundMate_APO.dll 이 audiodg 에 물려 교체되지 못하면 새 EXE 가
+// 구버전 엔진 위에서 돈다. 그때 앱별 EQ 목록이 통째로 비고 스펙트럼도
+// 기본 파형만 나오는데, 아무 설명이 없으면 그냥 고장으로 보인다.
+SM_STR(ENGINE_STALE_TITLE, u8"The audio engine is out of date.")  // 오디오 엔진이 옛 버전입니다.
+SM_STR(ENGINE_STALE_BODY, u8"The engine file could not be replaced during setup, so it is still the old one. Per-app EQ and the live spectrum will not work until it is updated. Restart your PC to finish the replacement, or run the installer again.")  // 설치 때 엔진 파일을 교체하지 못해 이전 버전이 그대로 돌고 있습니다. 교체가 끝나기 전까지는 앱별 EQ 목록과 실시간 주파수 표시가 동작하지 않습니다. PC를 다시 시작해 교체를 마치거나, 설치 파일을 다시 실행해 주세요.

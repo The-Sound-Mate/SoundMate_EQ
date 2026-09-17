@@ -3050,6 +3050,24 @@ void MainWindow::RenderAppEqWindow() {
     return;
   }
 
+  // [엔진 버전 경고] 설치 중 SoundMate_APO.dll 을 교체하지 못하면 (audiodg /
+  //   AudioEndpointBuilder 가 물고 있으면 PFRO 로 밀린다) 새 EXE 가 구버전
+  //   엔진 위에서 돈다. 그러면 스트림 표(v3+)가 없어 아래 목록이 통째로 비고,
+  //   오디오 탭도 없어 스펙트럼이 실제 출력 대신 기본 파형으로 떨어진다.
+  //   증상만 보면 그냥 고장이라, 원인을 여기서 한 번 말해 준다.
+  {
+    const auto engineDiag = m_appEq.GetDiagnostics();
+    if (engineDiag.shmMapped && engineDiag.shmVersion < SOUNDMATE_VERSION) {
+      ImGui::TextColored(Theme::COLOR_ORANGE,
+                         Lang::T(Lang::ENGINE_STALE_TITLE));
+      ImGui::Spacing();
+      ImGui::TextWrapped(Lang::T(Lang::ENGINE_STALE_BODY));
+      ImGui::Spacing();
+      ImGui::Separator();
+      ImGui::Spacing();
+    }
+  }
+
   const auto mode = m_appEq.GetMode();
   const bool perApp = (mode == AppEqManager::Mode::Selected);
   auto playing = m_appEq.PlayingApps();

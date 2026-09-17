@@ -1,4 +1,4 @@
-; ============================================================================
+﻿; ============================================================================
 ; SoundMate_Setup.iss.in — v3.2 Final (Revised) Master Blueprint
 ; Auto-generated from SoundMate_Setup.iss.in by CMake.
 ; 직접 수정하지 마세요. CMakeLists.txt 의 project(... VERSION ...) 이 SoT.
@@ -13,6 +13,20 @@
 
 [Setup]
 AppName=SoundMate Equalizer
+
+; [AppId 고정] 값 자체는 Inno 가 AppName 에서 자동 생성하던 기존 기본값과
+;   완전히 같다. 즉 이미 깔려 있는 v0.0.x 도 그대로 "같은 앱" 으로 인식되어
+;   제거 없이 덮어쓰기 업그레이드가 되고, 프로그램 추가/제거에 줄이 두 개
+;   생기지 않는다. 명시해 두는 이유는 나중에 AppName 을 손대는 순간 업그레이드
+;   경로가 조용히 끊기고 사용자마다 유령 항목이 남기 때문이다.
+AppId=SoundMate Equalizer
+
+; 파일 속성의 버전도 맞춰 둔다 — 설치된 setup.exe 를 나중에 식별할 때 쓴다.
+VersionInfoVersion=@PROJECT_VERSION@
+
+; 이전 설치 폴더를 그대로 따라간다 (다른 드라이브에 깔아 둔 사용자가
+;   업그레이드 때 Program Files 로 끌려가지 않도록).
+UsePreviousAppDir=yes
 AppVersion=@PROJECT_VERSION@
 DefaultDirName={commonpf}\SoundMate Equalizer
 DefaultGroupName=SoundMate Equalizer
@@ -95,6 +109,9 @@ Name: "{commondesktop}\SoundMate Equalizer"; Filename: "{app}\SoundMate Equalize
 
 [InstallDelete]
 Type: filesandordirs; Name: "{app}\logs"
+; 이전 설치가 중간에 죽으면서 남긴 스테이징 잔해. PrepareToInstall 에서도
+;   지우지만, 그쪽이 돌기 전에 [Files] 가 먼저 닿는 경우를 대비해 한 번 더.
+Type: filesandordirs; Name: "{app}\_tmp_install"
 
 ; ============================================================================
 ; [Run] — SoundMate_setup.exe 호출은 [Code] ssPostInstall 로 이동됨.
@@ -152,6 +169,9 @@ var
 
   OrigPPLExists: Boolean;
   OrigPPLValue: Cardinal;
+
+  // InitializeSetup 이 읽어 두는 "이미 깔려 있던 버전". 없으면 빈 문자열.
+  PrevVersion: String;
 
 // ============================================================================
 // [공통] 설치 경로 검증 — 시스템/루트 폴더 차단 (UX 보존)
@@ -215,6 +235,90 @@ begin
 end;
 
 // ============================================================================
+// [공통] 오디오 스택 정지 — APO DLL 잠금 해제의 핵심
+//
+// SoundMate_APO.dll 을 물고 있는 프로세스는 audiodg.exe 하나가 아니다.
+// AudioEndpointBuilder(svchost) 도 엔드포인트 속성을 읽으려고 APO 를
+// CoCreate 하면서 같은 DLL 을 로드한다. audiosrv 만 멈추면 이쪽 핸들이
+// 그대로 남아 ReplaceFileW 가 실패하고, 설치는 조용히 PFRO(재부팅 대기)로
+// 격하된다. 사용자가 "나중에 재시작" 을 누르면 새 EXE + 구버전 DLL 조합으로
+// 계속 돌아간다 — 앱별 EQ 목록이 비고 스펙트럼이 실제 출력 대신 기본
+// 파형으로 나오던 원인이 정확히 이것이다.
+//
+// audiosrv 는 AudioEndpointBuilder 에 의존하므로 /y 하나로 함께 내려간다.
+// 되살리는 순서는 그 반대(audiosrv → AudioEndpointBuilder)이고, 그건
+// SoundMate_setup.exe 의 RestartAudioServicesSC 와 롤백 경로가 담당한다.
+//
+// [순서 주의] 앱을 먼저 죽이고 그 다음 audiodg 를 죽인다. 반대로 하면
+//   실행 중인 SoundMate 의 EngineHealthMonitor 가 audiodg 사망을 "엔진
+//   고장" 으로 보고 APO 등록(CLSID 2개 + HKLM\SOFTWARE\SoundMateAPO +
+//   AudioEngine 신뢰 키)을 스스로 지워 버린다.
+// ============================================================================
+procedure QuiesceAudioStack;
+var
+  Rc, Retry: Integer;
+begin
+  // 1) 앱 먼저 — audiodg 를 건드리기 전에 반드시.
+  Exec(ExpandConstant('{cmd}'),
+       '/C taskkill /F /IM "SoundMate Equalizer.exe" /IM SoundMate_Controller.exe /IM MainController.exe',
+       '', SW_HIDE, ewWaitUntilTerminated, Rc);
+
+  // 2) AudioEndpointBuilder 정지 (/y 로 의존 서비스 audiosrv 까지 함께).
+  Exec(ExpandConstant('{cmd}'),
+       '/C net stop AudioEndpointBuilder /y',
+       '', SW_HIDE, ewWaitUntilTerminated, Rc);
+  // 구성에 따라 위 한 방으로 안 내려가는 경우가 있어 audiosrv 를 한 번 더.
+  Exec(ExpandConstant('{cmd}'),
+       '/C net stop audiosrv /y',
+       '', SW_HIDE, ewWaitUntilTerminated, Rc);
+
+  // 3) audiodg.exe 강제 종료 (Bounded Retry 15회).
+  for Retry := 1 to 15 do begin
+    if Exec(ExpandConstant('{cmd}'),
+            '/C taskkill /F /IM audiodg.exe',
+            '', SW_HIDE, ewWaitUntilTerminated, Rc) then begin
+      if Rc = 0 then begin
+        Log('[QuiesceAudioStack] audiodg.exe killed at retry #' + IntToStr(Retry));
+        Break;
+      end;
+    end;
+    Sleep(200);
+  end;
+
+  // 4) 커널이 실제로 핸들을 놓을 때까지 대기.
+  Sleep(800);
+end;
+
+// ============================================================================
+// [설치] InitializeSetup — 이미 깔려 있는 버전 확인
+//
+// AppId 가 같으므로 제거하지 않고 그대로 덮어쓰기 업그레이드가 된다.
+// 여기서는 막지 않고 기록만 한다 — 업데이트 동작을 보려고 일부러 구버전을
+// 깔아 보는 경우가 있어서, 버전을 되돌리는 것도 막지 않는다.
+// 읽어 둔 값은 PrepareToInstall 의 안내 문구에 쓴다.
+// ============================================================================
+function InitializeSetup(): Boolean;
+var
+  Prev: String;
+begin
+  Result := True;
+  PrevVersion := '';
+
+  if RegQueryStringValue(HKLM,
+       'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\SoundMate Equalizer_is1',
+       'DisplayVersion', Prev) then
+    PrevVersion := Prev;
+
+  if PrevVersion = '' then
+    Log('[InitializeSetup] No previous install found — fresh install.')
+  else if CompareText(PrevVersion, '@PROJECT_VERSION@') = 0 then
+    Log('[InitializeSetup] Reinstalling the same version: ' + PrevVersion)
+  else
+    Log('[InitializeSetup] Replacing installed version ' + PrevVersion +
+        ' with @PROJECT_VERSION@');
+end;
+
+// ============================================================================
 // [설치] 개별 파일 정밀 배포 루틴 — DeployFile
 //
 // 3분기:
@@ -225,6 +329,8 @@ end;
 procedure DeployFile(const FileName: String);
 var
   StagingPath, TargetPath, BackupPath: String;
+  Attempt: Integer;
+  Swapped: Boolean;
 begin
   StagingPath := ExpandConstant('{app}\_tmp_install\' + FileName);
   TargetPath := ExpandConstant('{app}\' + FileName);
@@ -247,17 +353,33 @@ begin
     // ReplaceFileW: 백업 경로를 명시적으로 전달해야 함.
     // 빈 문자열 '' 전달 시 Pascal Script 마샬링이 NULL 대신 L"\0" 을 보내
     // ERROR_INVALID_PARAMETER 를 유발하므로 반드시 .bak 경로를 사용.
-    if ReplaceFileW(TargetPath, StagingPath, BackupPath, 0, 0, 0) then begin
+    //
+    // [재시도] 첫 실패는 대개 멈춰 둔 오디오 스택이 되살아나면서 DLL 을
+    //   다시 문 것이다. 여기서 곧장 PFRO 로 내려버리면 사용자가 재부팅을
+    //   미루는 순간 구버전 엔진으로 계속 돌아간다. 스택을 다시 재우고
+    //   3번까지 다시 시도한 뒤에야 PFRO 로 격하한다.
+    Swapped := False;
+    for Attempt := 1 to 3 do begin
+      if ReplaceFileW(TargetPath, StagingPath, BackupPath, 0, 0, 0) then begin
+        Swapped := True;
+        Break;
+      end;
+      Log('[DeployFile] ReplaceFileW attempt #' + IntToStr(Attempt) +
+          ' failed: ' + FileName + ' — re-quiescing audio stack.');
+      QuiesceAudioStack;
+    end;
+
+    if Swapped then begin
       // 치환 성공 → 백업 파일 즉시 제거
       DeleteFile(BackupPath);
       Log('[DeployFile] ReplaceFileW succeeded: ' + FileName);
     end else begin
-      // 치환 실패 (런타임 잠금 돌발 등) → 안전하게 PFRO 로 격하
+      // 3번 다 실패 → 안전하게 PFRO 로 격하.
       // DeleteFile + RenameFile 같은 비원자적 강제 교체는 절대 시도하지 않는다.
       MoveFileExW(StagingPath, TargetPath,
                   MOVEFILE_DELAY_UNTIL_REBOOT or MOVEFILE_REPLACE_EXISTING);
       NeedsReboot := True;
-      Log('[DeployFile] ReplaceFileW failed, fallback to PFRO: ' + FileName);
+      Log('[DeployFile] ReplaceFileW failed 3x, fallback to PFRO: ' + FileName);
     end;
   end
 
@@ -281,7 +403,6 @@ end;
 function PrepareToInstall(var NeedsRestartParam: Boolean): String;
 var
   Rc: Integer;
-  Retry: Integer;
 begin
   Result := '';
   NeedsReboot := False;
@@ -305,28 +426,17 @@ begin
                      'DisableProtectedAudioDG', 1);
   SystemModified := True;
 
-  // 3) 오디오 서비스 중지
-  WizardForm.PreparingLabel.Caption :=
-    '오디오 서비스를 일시 중지하고 파일을 교체합니다 (5~30초간 음원이 일시 정지될 수 있습니다)';
-  Exec(ExpandConstant('{cmd}'),
-       '/C net stop audiosrv /y',
-       '', SW_HIDE, ewWaitUntilTerminated, Rc);
+  // 3) 오디오 스택 정지 — 앱 종료 → AudioEndpointBuilder/audiosrv 정지 →
+  //    audiodg 강제 종료. APO DLL 핸들을 쥔 쪽을 전부 놓게 만든다.
+  if PrevVersion <> '' then
+    WizardForm.PreparingLabel.Caption :=
+      '기존 버전 ' + PrevVersion + ' 위에 덮어씁니다. 오디오 서비스를 잠시 멈춥니다' +
+      ' (5~30초간 소리가 끊길 수 있습니다)'
+  else
+    WizardForm.PreparingLabel.Caption :=
+      '오디오 서비스를 일시 중지하고 파일을 교체합니다 (5~30초간 음원이 일시 정지될 수 있습니다)';
 
-  // 4) Bounded Retry (15회) — audiodg.exe 강제 종료
-  for Retry := 1 to 15 do begin
-    if Exec(ExpandConstant('{cmd}'),
-            '/C taskkill /F /IM audiodg.exe',
-            '', SW_HIDE, ewWaitUntilTerminated, Rc) then begin
-      if Rc = 0 then begin
-        Log('[PrepareToInstall] audiodg.exe killed at retry #' + IntToStr(Retry));
-        Break;
-      end;
-    end;
-    Sleep(200);
-  end;
-
-  // 5) 파일 핸들 해제 대기
-  Sleep(500);
+  QuiesceAudioStack;
 
   // NeedsReboot 는 여기서 False 로 유지.
   // 실제 잠금 판정은 ssPostInstall 의 DeployFile 에서 ReplaceFileW 결과로 결정.
@@ -379,6 +489,18 @@ begin
       MoveFileExDelete(ExpandConstant('{app}\_tmp_install'), 0,
                        MOVEFILE_DELAY_UNTIL_REBOOT);
       Log('[ssPostInstall] _tmp_install PFRO delete scheduled.');
+
+      // 재부팅 전까지는 구버전 DLL 이 계속 audiodg 에 올라가 있다. Inno 의
+      //   기본 재시작 안내는 "나중에" 를 누르기 쉬워서, 그대로 두면 새 EXE +
+      //   구버전 엔진 조합으로 돌게 된다 (앱별 EQ 목록이 비고 스펙트럼이
+      //   실제 출력 대신 기본 파형으로 나온다). 그래서 따로 알린다.
+      if not WizardSilent then
+        MsgBox('오디오 엔진 파일이 사용 중이라 지금 교체하지 못했습니다.' + #13#10 +
+               '교체는 재부팅할 때 자동으로 끝납니다.' + #13#10#13#10 +
+               '재부팅 전까지는 이전 버전 엔진이 그대로 동작합니다.' + #13#10 +
+               '이 상태에서는 앱별 EQ 목록과 실시간 주파수 표시가' + #13#10 +
+               '정상 동작하지 않습니다.',
+               mbInformation, MB_OK);
       InstallSucceeded := True;
     end;
   end;
@@ -461,7 +583,6 @@ end;
 procedure CurUninstallStepChanged(CurStep: TUninstallStep);
 var
   Rc: Integer;
-  Retry: Integer;
 begin
   if CurStep = usUninstall then begin
     UninstallSystemModified := False;
@@ -500,21 +621,9 @@ begin
                        'DisableProtectedAudioDG', 1);
     UninstallSystemModified := True;
 
-    // 오디오 서비스 중지
-    Exec(ExpandConstant('{cmd}'),
-         '/C net stop audiosrv /y',
-         '', SW_HIDE, ewWaitUntilTerminated, Rc);
-
-    // Bounded Retry — audiodg.exe 강제 종료
-    for Retry := 1 to 15 do begin
-      Exec(ExpandConstant('{cmd}'),
-           '/C taskkill /F /IM audiodg.exe',
-           '', SW_HIDE, ewWaitUntilTerminated, Rc);
-      if Rc = 0 then Break;
-      Sleep(200);
-    end;
-
-    Sleep(500);
+    // 오디오 스택 정지 — 설치 때와 같은 이유로 AudioEndpointBuilder 까지
+    //   함께 내려야 SoundMate_APO.dll 핸들이 풀린다.
+    QuiesceAudioStack;
   end
 
   else if CurStep = usPostUninstall then begin

@@ -31,7 +31,7 @@ AppSettings LoadSettings() {
     s.defaultBands = j.value("default_bands", 5);
     s.runOnStartup = j.value("run_on_startup", false);
     s.minimizeToTray = j.value("minimize_to_tray", false);
-    s.language = j.value("language", "en");
+    s.language = j.value("language", s.language);
 
     // [PR-2C] eq_mode 우선 사용. 없으면 기존 두 bool로 마이그레이션.
     if (j.contains("eq_mode") && j["eq_mode"].is_number_integer()) {
@@ -52,10 +52,15 @@ AppSettings LoadSettings() {
   } catch (...) {
   }
 
-  // [i18n] 저장되는 값은 언어 코드("en")다. v0.0.x 는 여기에 표시
-  //   이름을 적어 둔 데다. 모르는 코드는 조용히 기본 언어로 되돌린다 —
-  //   없는 번역을 가리키게 두면 화면이 통째로 빈다.
-  if (Lang::IndexOfCode(s.language.c_str()) < 0) s.language = "en";
+  // [i18n] 저장되는 값은 언어 코드("ko"/"en")다. v0.0.x 는 여기에 표시
+  //   이름을 그대로 적었다 — 이걸 그냥 모르는 값으로 버리면 한국어를 쓰던
+  //   기존 사용자가 업그레이드 순간 영어로 뒤집힌다. 코드로 올려준다.
+  if (s.language == u8"한국어") s.language = "ko";
+  else if (s.language == "English") s.language = "en";
+
+  //   그래도 모르는 코드면 기본값으로 되돌린다 — 없는 번역을 가리키게
+  //   두면 화면이 통째로 빈다.
+  if (Lang::IndexOfCode(s.language.c_str()) < 0) s.language = AppSettings{}.language;
   Lang::Set(s.language.c_str());
   return s;
 }

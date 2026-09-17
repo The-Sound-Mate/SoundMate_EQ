@@ -248,74 +248,9 @@ private:
 };
 
 // ============================================================================
-// SamplePeakLimiter — Fast Attack (0.1ms) / Slow Release (100ms), 0ms Latency
-// ----------------------------------------------------------------------------
-// 기존 applyLimiter(waveshaper) 의 hard-clip → 사각파 왜곡 ("깨지는 소리") 문제를
-// 해결하기 위한 정통 동적 리미터. 0dBFS 초과 시에만 짧은 순간 게인을 dynamic하게
-// 눌러서 클립을 방지. EQ 게인 합산이 +10dB 가 되어도 limiter 가 0dBFS 직전에서
-// 부드럽게 흡수하므로 사용자의 EQ 의도(타격감) 보존.
-//
-// Pipeline:  attack/release envelope → desiredGain = ceiling / max(env, ceiling)
-//   - envState 가 ceiling 이하 → desiredGain = 1.0 (passthrough)
-//   - envState 가 ceiling 초과 → desiredGain < 1.0 (감쇠)
-// Ceiling 0.9661 (-0.3 dBFS) — ISP 헤드룸 보존 (MP3/AAC 등 압축 음원의
-//   inter-sample peak 가 0dBFS 살짝 초과하는 경우 대비).
-// ============================================================================
-class SamplePeakLimiter {
-public:
-  SamplePeakLimiter()
-      : envState(0.f), attackCoef(0.f), releaseCoef(0.f),
-        currentGain(1.f), ceiling(0.9661f) {}
-
-  void initialize(float sampleRate) {
-    // τ = 0.1ms attack → 99% 도달까지 ≈ 0.5ms (킥드럼 트랜지언트 1-2ms 충분히 커버)
-    // τ = 30ms release → 큰 transient 후 빠른 회복. 100ms 시 ducking 으로 음악이
-    //   "작아지는" 인지 보고 → 30ms 로 완화. 청감상 pumping 거의 안 들림.
-    attackCoef = 1.f - expf(-1.f / (0.0001f * sampleRate));
-    releaseCoef = 1.f - expf(-1.f / (0.030f * sampleRate));
-    envState = 0.f;
-    currentGain = 1.f;
-  }
-
-  // 모든 채널 중 가장 큰 절대값(linked-stereo) 을 받아 이 frame 의 통합 gain 반환.
-  inline float processFrame(float maxAbsThisFrame) {
-    if (maxAbsThisFrame > envState) {
-      envState += (maxAbsThisFrame - envState) * attackCoef;
-    } else {
-      envState += (maxAbsThisFrame - envState) * releaseCoef;
-    }
-    // NaN/Inf 방어 + denormal flush — DSP 영구 사망 차단.
-    if (!std::isfinite(envState)) envState = 0.f;
-    if (envState < 1e-30f) envState = 0.f;
-
-    // ceiling 이하면 max(env, ceiling) = ceiling → gain = 1.0 (passthrough)
-    // ceiling 초과면 max(env, ceiling) = env → gain = ceiling/env < 1.0
-    float denom = (envState > ceiling) ? envState : ceiling;
-    currentGain = ceiling / denom;
-    return currentGain;
-  }
-
-  void reset() {
-    envState = 0.f;
-    currentGain = 1.f;
-  }
-
-  // UI 인디케이터용 — 현재 frame 에서 limiter 가 감쇠 중인지.
-  // currentGain < 0.995 (≈ -0.04dB 미만 감쇠) 이면 active.
-  bool isActive() const { return currentGain < 0.995f; }
-
-private:
-  float envState;
-  float attackCoef;
-  float releaseCoef;
-  float currentGain;
-  float ceiling;
-};
-
-// ============================================================================
 // SoftClipper — 0-latency tanh-based soft saturation
 // ----------------------------------------------------------------------------
-// SamplePeakLimiter 의 0.1ms attack 동안 빠져나간 첫 spike 들 (~24 samples) 을
+// 리미터를 들어낸 뒤로는 호출부가 없다. 게인을 크게 올렸을 때의 hard clip 을
 // 부드럽게 압축. threshold 0.85 (-1.4 dBFS) 이하는 무왜곡 통과, 초과분만 tanh
 // 곡선으로 1.0 에 점근. 출력은 어떤 입력에도 절대 1.0 (0 dBFS) 을 못 넘음.
 // 결과: 음량 감소 ~0, hard clip 사각파 왜곡 → 진공관 같은 부드러운 비선형
@@ -338,92 +273,12 @@ inline float softClipSample(float x) {
 }
 
 // ============================================================================
-// LookaheadLimiter — Brickwall limiter with 2ms lookahead
-// ----------------------------------------------------------------------------
-// SamplePeakLimiter 의 0.1ms attack 동안 빠져나가는 첫 spike 를 원천 차단.
-// 입력 frame 을 2ms (96 sample @ 48k) 지연시키면서, 동시에 future window 의
-// peak 를 미리 보고 gain 을 미리 낮춤. spike 가 출력될 시점엔 gain 이 이미
-// 낮아진 상태 → 0dBFS 초과 절대 X, 음량 감소 거의 X, 다이내믹 보존.
-//
-// Trade-off: 시스템 와이드 2ms 추가 latency. 음악·동영상 무인지, 경쟁 게임
-// 미세 영향. Windows audio engine 기본 10–20ms 위에 추가되는 양.
-// ============================================================================
-class LookaheadLimiter {
-public:
-  void prepare(float sampleRate) {
-    lookaheadFrames = std::max(1, (int)(sampleRate * 0.002f));
-    peakBuf.assign(lookaheadFrames, 0.f);
-    releaseCoef = 1.f - expf(-1.f / (0.030f * sampleRate));
-    currentGain = 1.f;
-    writeIdx = 0;
-    channels = 0;  // lazy init on first processFrame
-  }
-
-  // in-place: outBuf[frameIdx*outCh..+outCh] 가 입력. 같은 위치에 지연된 출력 write.
-  inline void processFrame(float* outBuf, unsigned frameIdx,
-                           unsigned outCh, float frameMaxAbs) {
-    if (channels != outCh) {
-      channels = outCh;
-      sampleBuf.assign(lookaheadFrames * channels, 0.f);
-    }
-
-    float* slot = &outBuf[frameIdx * channels];
-
-    // 새 frame을 delay buffer에 push
-    float* writeSlot = &sampleBuf[writeIdx * channels];
-    for (unsigned c = 0; c < channels; ++c) writeSlot[c] = slot[c];
-    peakBuf[writeIdx] = frameMaxAbs;
-
-    // window 내 max peak (lookahead)
-    float windowMax = 0.f;
-    for (float p : peakBuf) if (p > windowMax) windowMax = p;
-
-    // target gain: window peak가 ceiling 넘으면 그만큼 감쇠
-    float targetGain = (windowMax > ceiling) ? ceiling / windowMax : 1.f;
-
-    // attack: 즉시 (lookahead 덕에 ramp 자체가 시간상 부드러움)
-    // release: 30ms 1-pole
-    if (targetGain < currentGain) {
-      currentGain = targetGain;
-    } else {
-      currentGain += (targetGain - currentGain) * releaseCoef;
-    }
-
-    // oldest frame을 출력 위치에 write (lookahead만큼 지연된 신호)
-    int readIdx = (writeIdx + 1) % lookaheadFrames;
-    float* readSlot = &sampleBuf[readIdx * channels];
-    for (unsigned c = 0; c < channels; ++c) slot[c] = readSlot[c] * currentGain;
-
-    writeIdx = (writeIdx + 1) % lookaheadFrames;
-  }
-
-  void reset() {
-    std::fill(sampleBuf.begin(), sampleBuf.end(), 0.f);
-    std::fill(peakBuf.begin(), peakBuf.end(), 0.f);
-    currentGain = 1.f;
-    writeIdx = 0;
-  }
-
-  bool isActive() const { return currentGain < 0.995f; }
-
-private:
-  std::vector<float> sampleBuf;  // stereo interleaved delay line
-  std::vector<float> peakBuf;    // per-frame peak history
-  int lookaheadFrames = 0;
-  int writeIdx = 0;
-  unsigned channels = 0;
-  float ceiling = 0.9661f;       // -0.3 dBFS, ISP 헤드룸
-  float currentGain = 1.f;
-  float releaseCoef = 0.f;
-};
-
-// ============================================================================
 // LoudnessNormalizer — content-aware AGC ("정규화")
 //
 // Problem: YouTube / Spotify mixes have wildly different loudness. Quiet
 // content sounds thin because the EQ chain can't add energy it doesn't have,
-// and the simple peak limiter only attenuates loud peaks — it doesn't boost
-// quiet content. The result is what the user called "빈약한" — anemic.
+// and the hard clamp at the end of the chain only chops loud peaks — it
+// doesn't boost quiet content. That is the "빈약한" (anemic) result.
 //
 // Approach (per-sample, RT-safe):
 //   1. Track signal RMS with a 1-pole envelope follower
@@ -436,8 +291,8 @@ private:
 //   4. Below the noise floor (≈ −50 dBFS), pin gain to 1.0 — don't amplify
 //   hiss.
 //
-// The peak limiter still sits AFTER this stage. Normalizer brings quiet
-// content up, limiter catches anything that would clip. The two cooperate.
+// The hard clamp still sits AFTER this stage. Normalizer brings quiet content
+// up; the clamp is the last line against clipping (리미터는 제거됨).
 // ============================================================================
 class LoudnessNormalizer {
 public:
@@ -742,11 +597,14 @@ public:
 
     // Initialize the normalizer at the actual sample rate
     normalizer.initialize(rate);
-    // [v12-lookahead] 2ms 미리보기 brickwall limiter — spike 도달 전 미리 감쇠.
-    lookaheadLimiter.prepare(rate);
-    framesSinceLimiterActive = 0;
 
     InitializeSharedMemory();
+
+    // [리미터 제거] 이제 아무도 이 플래그에 1 을 쓰지 않는다. 구버전 DLL 이
+    //   남겨 둔 1 이 그대로 굳어서 UI 인디케이터가 켜진 채로 남는 것을 막는다.
+    if (pSettings)
+      pSettings->limiterActiveFlag.store(0, std::memory_order_relaxed);
+
 #if SM_NORMALIZER_DEFAULT_ENABLED
     OpenDiagLog();
 #endif
@@ -873,7 +731,7 @@ public:
   //   LoudnessNormalizer.processFrame()
   //   3. apply that single gain to ALL channels of this frame (stereo image
   //   intact)
-  //   4. peak limiter — catches anything still above ±1.0
+  //   4. hard clamp — chops anything still above ±1.0 (리미터 제거됨)
   void process(float *outBuf, const float *inBuf, unsigned frames) {
     updatePending();
 
@@ -906,32 +764,19 @@ public:
         if (a > maxAbs) maxAbs = a;
       }
 
-      // [v12-lookahead] 2ms lookahead brickwall limiter.
-      //   bass sine 가 ±1.0 천장에 부딪혀 사각파로 찌그러지는 것 방지 (hard clamp
-      //   는 fundamental 을 죽이고 고조파만 생성 → 베이스 사라짐).
-      //   smooth gain reduction 으로 fundamental 보존, 깊은 저음 유지.
-      //   in-place: 출력은 2ms 지연된 신호.
-      lookaheadLimiter.processFrame(outBuf, f, outChannels, maxAbs);
-
-      // 안전망 hard clamp — limiter 가 ceiling=0.9661 보장하므로 정상 동작 시
-      // 영향 0. 만일의 드라이버 fault 차단용 마지막 보루 (BSOD 방지).
+      // [리미터 제거] 사용자 요청으로 LookaheadLimiter 를 신호 경로에서
+      //   완전히 들어냈다. 0dBFS 를 넘는 신호는 이제 아래 hard clamp 가
+      //   그대로 잘라낸다 — 밴드 게인을 크게 올리면 사각파 왜곡("깨지는
+      //   소리")이 다시 난다. 대신 리미터가 눌러 만들던 음량 감소는 없다.
+      //   되돌리려면 이 자리에 아래 한 줄만 복원하면 된다:
+      //     lookaheadLimiter.processFrame(outBuf, f, outChannels, maxAbs);
+      //
+      // hard clamp — 원래는 드라이버 fault 차단용 마지막 보루였지만,
+      //   리미터가 빠진 지금은 유일한 0dBFS 방어선이다.
       for (unsigned ch = 0; ch < outChannels; ++ch) {
         float &s = outBuf[f * outChannels + ch];
         if (s > 1.f)  s = 1.f;
         else if (s < -1.f) s = -1.f;
-      }
-
-      // limiter active → SHM 신호 + 200ms decay 카운터 (UI 인디케이터).
-      if (lookaheadLimiter.isActive()) {
-        framesSinceLimiterActive = 0;
-        if (pSettings)
-          pSettings->limiterActiveFlag.store(1, std::memory_order_relaxed);
-      } else {
-        framesSinceLimiterActive++;
-        if (framesSinceLimiterActive > (uint64_t)(sampleRate * 0.2f)) {
-          if (pSettings)
-            pSettings->limiterActiveFlag.store(0, std::memory_order_relaxed);
-        }
       }
     }
 
@@ -958,8 +803,6 @@ public:
       for (auto &dc : dcBlockers)
         dc.reset();
       // 정규화기는 자체 noise floor 가드가 있어서 별도 reset 불필요
-      // Limiter 도 reset — delay/peak buffer NaN 감염 차단.
-      lookaheadLimiter.reset();
     }
 
 #if SM_NORMALIZER_DEFAULT_ENABLED
@@ -1175,9 +1018,6 @@ private:
 
   // Loudness normalizer + temp diagnostic logger
   LoudnessNormalizer normalizer;
-  // [최종] Sample peak limiter — 0dBFS dynamic 감쇠 + SHM 신호.
-  LookaheadLimiter lookaheadLimiter;
-  uint64_t framesSinceLimiterActive = 0;
   HANDLE hDiagLog;
   uint64_t framesSinceLog;
   float peakSinceLog;
