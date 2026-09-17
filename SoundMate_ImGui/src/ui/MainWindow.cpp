@@ -82,6 +82,12 @@ MainWindow::~MainWindow() {
   if (m_aiThread.joinable())
     m_aiThread.join();
 
+  // [앱별 EQ 복구] Start() 했던 세션 감시를 반드시 멈추며,
+  //   선택 모드에서 슬롯에 써둔 평탄 프로파일과 v6 미확인 기본값을
+  //   전역 커브 상태로 되돌린다. 안 그러면 앱이 꺼진 뒤에도 특정
+  //   스트림이 원음으로 눌린 채 남을 수 있다.
+  m_appEq.Stop();
+
   // [작업 4] DX11 SRV 정리
   ReleaseTexture(&m_albumArtSRV);
   ReleaseTexture(&m_albumPlaceholderSRV);
@@ -98,6 +104,22 @@ void MainWindow::Initialize(EQController *eq, AIClient *ai,
   m_ai = ai;
   m_monitor = monitor;
   m_settings = LoadSettings();
+
+  // [UI 스레드 COM 초기화] 아래 FetchAudioDevices() 와 RefreshDefaultDevice()
+  //   가 IMMDeviceEnumerator 를 만든다. COM 이 초기화돼 있지 않은 스레드
+  //   에서 CoCreateInstance 는 CO_E_NOTINITIALIZED 로 조용히 실패한다 —
+  //   기기 목록이 통째로 비어 보이고 에러는 한 줄도 안 뜨는 증상이다.
+  //
+  //   예전엔 m_appEq.Start() 가 이 스레드를 STA 로 초기화해 주는 바람에
+  //   우연히 동작했다. 이제 세션 감시는 전용 MTA 스레드가 맡으므로
+  //   여기서 직접 책임진다. 의존하던 쪽이 먼저 사라져도 뒤탈이 없도록.
+  //
+  //   MTA 를 고른 이유: LoadTextureFromBytes() 가 자체적으로
+  //   CoInitializeEx(MTA) 를 부른다. 여기서 STA 로 잡아 두면 그쪽이
+  //   RPC_E_CHANGED_MODE 를 받게 된다. 이 스레드는 드래그앤드롭도
+  //   셸 대화상자도 안 쓰므로 STA 여야 할 이유가 없다.
+  CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+
   FetchAudioDevices();
   LoadUserPresets(); // 사용자 프리셋 로드
 
@@ -122,10 +144,13 @@ void MainWindow::Initialize(EQController *eq, AIClient *ai,
   {
     char base[MAX_PATH] = {0};
     GetEnvironmentVariableA("LOCALAPPDATA", base, MAX_PATH);
-    const std::string dir = std::string(base) + "\SoundMateEqualizer\record";
+    // [역슬래시는 두 번] "\r" 은 캐리지 리턴, "\a" 는 벨 문자다. 한 번만
+    //   쓰면 경로가 통째로 망가져 저장도 복원도 조용히 실패한다.
+    const std::string dir =
+        std::string(base) + "\\SoundMateEqualizer\\record";
     std::error_code ec;
     std::filesystem::create_directories(dir, ec);
-    m_appEq.Load(dir + "\app_eq_excluded.txt");
+    m_appEq.Load(dir + "\\app_eq_excluded.txt");
   }
   m_appEq.Start();
 
@@ -512,12 +537,19 @@ void MainWindow::ApplyEQNoSave() {
     //   (EQ on/off 음량 일치), 총에너지가 예산을 넘으면 편차를 줄인다
     //   (리미터 개입 방지). 측정 전이면 아무것도 하지 않는다.
     //
-    // [수동 조작은 건드리지 않는다] 사용자가 슬라이더를 직접 움직였거나
-    //   프리셋을 고른 경우는 "정확히 이 값을 원한다"는 뜻이다. 여기서
-    //   중역을 0 으로 재정렬하면 올린 밴드가 도로 내려가 슬라이더가 고장난
-    //   것처럼 느껴진다. 자동 경로(AI/캐시/프롬프트)에서만 적용한다.
+    // [수동 조작은 건드리지 않는다] 사용자가 슬라이더를 직접 움직였거나,
+    //   프리셋을 고르거나, 초기화를 눌러 평탄을 택한 경우는 "정확히 이 값을
+    //   원한다"는 뜻이다. 여기서 중역을 0 으로 재정렬하면 올린 밴드가 도로
+    //   내려가 슬라이더가 고장난 것처럼 느껴진다. 자동 경로(AI/캐시/프롬프트)
+    //   에서만 적용한다.
+    //
+    //   [Flat 이 빠져 있었다] 평탄은 정의상 이미 0 인데도 자동 취급이라
+    //   정규화를 거쳤다. 게다가 바로 위에서 적응 델타가 더해진 뒤라 정규화가
+    //   무해한 no-op 이 아니었다 — 0 이어야 할 커브가 델타 모양으로 덧칠돼
+    //   초기화를 눌러도 0 이 되지 않았다.
     const EqOrigin origin = m_eqOrigin.load();
-    if (origin != EqOrigin::Manual && origin != EqOrigin::Preset) {
+    if (origin != EqOrigin::Manual && origin != EqOrigin::Preset &&
+        origin != EqOrigin::Flat) {
       // LTAS 측정 전(첫 30초)에는 빠른 레벨로 대신한다. 안 그러면 그 구간만
       //   정규화가 꺼져 보정 전 커브가 나가 먹먹하게 들린다.
       const bool haveLtas = (m_adaptiveLevels.size() == AIClient::F31.size());
@@ -540,10 +572,16 @@ void MainWindow::ApplyEQNoSave() {
     // [부드러운 반영] 목표는 방금 계산한 값이고, 실제로 내보내는 것은 그쪽으로
     //   서서히 따라가는 m_eqDisplay31 이다. 프레임 루프가 평활을 진행하며
     //   200ms 마다 이 함수를 다시 부른다.
-    //   수동/프리셋은 사용자가 방금 정한 값이므로 즉시 반영한다.
+    //   수동/프리셋/평탄은 사용자가 방금 정한 값이므로 즉시 반영한다.
+    //
+    //   [플랫 EQ 가 기어가던 자리] Flat 이 여기 없어서 0dB 전환이 평활을
+    //   탔다. tau 가 3초라 0 까지 눈에 보이게 스르륵 내려갔다 — 버튼을 눌렀는데
+    //   바로 안 듣는 것처럼 느껴진다. 초기화는 사용자가 방금 내린 결정이므로
+    //   기다릴 이유가 없다.
     m_eqTarget31 = master31;
     const bool instant = (origin == EqOrigin::Manual ||
                           origin == EqOrigin::Preset ||
+                          origin == EqOrigin::Flat ||
                           m_eqDisplay31.size() != master31.size());
     if (instant)
       m_eqDisplay31 = master31;
@@ -875,6 +913,57 @@ int MainWindow::MapViewIndexToMaster31(int viewIdx) const {
     if (d < bestDist) { bestDist = d; best = (int)i; }
   }
   return best;
+}
+
+// ── N밴드 수동 조작을 31밴드로 펴 바른다 ──────────────────────────────────
+//   5/10/15밴드 뷰에서 슬라이더를 움직이면 master31 의 alias 인덱스 "한 점"
+//   만 바뀐다. 타 밴드를 건드리지 않으려는 의도였지만, 31밴드로 보면 그 칸만
+//   솟은 바늘이 되고 나머지는 0 에 남는다 — 5밴드에서 그린 완만한 곡선이
+//   31밴드에서는 점 다섯 개로 흩어져 보인다. 캐시에 저장되는 것도 그 바늘
+//   커브라, 다음에 같은 곡을 틀면 그대로 되살아난다.
+//
+//   그래서 방금 만진 앵커와 좌우 이웃 앵커 사이 구간만 로그-주파수 직선으로
+//   메운다. 구간 밖은 손대지 않으므로 AI 커브의 비-alias 디테일은 그대로다.
+//   첫 앵커 아래와 마지막 앵커 위는 앵커 값을 그대로 연장한다 —
+//   Map31ToTargetBands 가 범위 밖을 클램프하는 것과 같은 규칙이다.
+//
+//   [뷰의 다른 슬라이더는 안 움직인다] 앵커 값 자체는 손대지 않고 사이만
+//   채우므로, 5밴드 화면에서 옆 슬라이더가 따라 튀는 일은 없다.
+void MainWindow::SpreadMaster31FromAnchor(int viewIdx) {
+  if (m_eqGains31Master.size() != 31) return;
+  const int m = MapViewIndexToMaster31(viewIdx);
+  if (m < 0 || m >= 31) return;
+
+  const auto &F31 = AIClient::F31;
+  if (F31.size() != 31) return;
+
+  // 두 앵커 사이만 직선으로 채운다. 양 끝 값은 그대로 둔다.
+  auto blend = [&](int a, int b) {
+    if (a > b) std::swap(a, b);
+    if (b - a < 2) return;            // 사이에 채울 칸이 없다
+    const double la = std::log10((double)F31[a]);
+    const double lb = std::log10((double)F31[b]);
+    if (lb <= la) return;
+    const float va = m_eqGains31Master[a];
+    const float vb = m_eqGains31Master[b];
+    for (int k = a + 1; k < b; ++k) {
+      const double w = (std::log10((double)F31[k]) - la) / (lb - la);
+      m_eqGains31Master[k] = (float)(va + w * (vb - va));
+    }
+  };
+
+  const int prev = MapViewIndexToMaster31(viewIdx - 1);
+  const int next = MapViewIndexToMaster31(viewIdx + 1);
+
+  if (prev >= 0)
+    blend(prev, m);
+  else
+    for (int k = 0; k < m; ++k) m_eqGains31Master[k] = m_eqGains31Master[m];
+
+  if (next >= 0)
+    blend(m, next);
+  else
+    for (int k = m + 1; k < 31; ++k) m_eqGains31Master[k] = m_eqGains31Master[m];
 }
 
 // master31 → 현재 뷰 주파수에서 log-linear 보간 → m_eqGains 갱신.
@@ -1235,10 +1324,10 @@ void MainWindow::Render() {
       m_masterTransitionTarget = m_eqGains31Master; // no-op transition
     }
 
-    // [수동 초기화 복원용] AI/Prompt 시점의 master 스냅샷.
+    // [EQ 복원용] AI/Prompt 시점의 master 스냅샷.
     //   Cache origin 은 manual 값이 캐시에서 반환된 경우도 포함하므로 제외 →
     //   재생 시 직전 manual 이 snapshot 으로 잡혀 잘못 복원되는 사고 방지.
-    //   Cache 케이스는 수동 초기화의 2순위 (ClearManualEQ 후 캐시 재조회) 가 처리.
+    //   Cache 케이스는 EQ 복원의 2순위 (ClearManualEQ 후 캐시 재조회) 가 처리.
     EqOrigin curOrigin = m_eqOrigin.load();
     if (m_masterTransitionTarget.size() == 31 &&
         (curOrigin == EqOrigin::AI || curOrigin == EqOrigin::Prompt)) {
@@ -1272,7 +1361,7 @@ void MainWindow::Render() {
       m_currentSource = song.source;
       m_displayTitle = song.title + " - " + song.artist;
       m_marqueeOffset = 0.0f;
-      // [수동 초기화 복원용] 곡 바뀜 → 이전 곡 원본 스냅샷 무효화.
+      // [EQ 복원용] 곡 바뀜 → 이전 곡 원본 스냅샷 무효화.
       m_aiOriginalGains31.clear();
       m_aiOriginalSongKey.clear();
       // [LOG] 정규화 결과 + 메타 출력
@@ -1314,10 +1403,20 @@ void MainWindow::Render() {
       const EqMode mode = eligible ? m_settings.eqMode : EqMode::Off;
 
       // [4-B] 3초 디바운스 + canonical title/artist 로 DB 매칭.
-      std::thread([this, title, artist, mode, myEpoch]() {
+      //
+      //   [바로 적용] 앱 시작 직후 처음 잡힌 곡, 그리고 모드를 방금 누른
+      //   경우는 기다리지 않는다. 디바운스는 곡을 연달아 넘길 때 iTunes 를
+      //   과호출하지 않으려는 장치인데, 이 두 경우엔 넘길 이전 곡이 없다.
+      //   켜자마자 5초쯤 0dB 로 들리던 구간이 이걸로 사라진다.
+      //
+      //   0 이 아니라 0.3초를 남기는 건 epoch 검사를 최소 몇 번은 돌리기
+      //   위해서다 — 켜는 순간 마침 다음 곡으로 넘어가는 중이었다면 여기서
+      //   걸러져 헛된 조회를 막는다.
+      const int waitTicks = m_eqApplyNow.exchange(false) ? 3 : 30;
+      std::thread([this, title, artist, mode, myEpoch, waitTicks]() {
         // [수정] 3초 대기를 100ms 단위로 쪼개어, 중간에 곡이 바뀌면 즉시
         // 중단(Abort)
-        for (int i = 0; i < 30; ++i) {
+        for (int i = 0; i < waitTicks; ++i) {
           std::this_thread::sleep_for(std::chrono::milliseconds(100));
           if (m_songEpoch.load() != myEpoch)
             return;
@@ -1495,6 +1594,21 @@ void MainWindow::Render() {
   ImGui::End();
   ImGui::PopStyleVar();
 
+  // [여기 있는 이유] 아래 강제 업데이트 오버레이는 return 으로 끝난다.
+  //   이 호출이 그 뒤에 있으면 오버레이가 떠 있는 동안 갱신이 멈추고,
+  //   엔진이 보는 심장박동(appHeartbeatTick)이 묵어 "선택한 앱에만" 지시가
+  //   만료된다 — 고르지도 않은 앱에 EQ 가 걸린다. ImGui 호출이 아니라
+  //   창을 닫은 뒤 어디서 불러도 무해하다.
+  // [앱별 EQ] 새로 뜬 스트림을 세션과 대조해 신원을 확정하고, 제외 목록을
+  //   반영한다. SHM 이 아직 없으면(= 아무 소리도 안 나는 중) 조용히 넘어간다.
+  // [스펙트럼] 지금 곡을 내보내는 앱을 힌트로 준다. 그 앱이 EQ 적용
+  //   대상이면 오디오 탭이 그쪽에 붙어, 스펙트럼과 자동 분석이 **EQ 가
+  //   걸리는 소리만** 보게 된다.
+  if (m_eqCtrl) {
+    m_appEq.SetPreferredTapApp(CurrentSourceProcess());
+    m_appEq.Update(m_eqCtrl->SharedMemory());
+  }
+
   // ── [강제 업데이트] mandatory 업데이트가 감지되면 전체 UI 위에
   //    반투명 오버레이를 그려 조작을 완전 차단한다.
   //    오버레이 위에 업데이트 팝업만 렌더링.
@@ -1523,15 +1637,6 @@ void MainWindow::Render() {
   // 복원 백업 선택 팝업
   RenderRestorePopup();
 
-  // [앱별 EQ] 새로 뜬 스트림을 세션과 대조해 신원을 확정하고, 제외 목록을
-  //   반영한다. SHM 이 아직 없으면(= 아무 소리도 안 나는 중) 조용히 넘어간다.
-  // [스펙트럼] 지금 곡을 내보내는 앱을 힌트로 준다. 그 앱이 EQ 적용
-  //   대상이면 오디오 탭이 그쪽에 붙어, 스펙트럼과 자동 분석이 **EQ 가
-  //   걸리는 소리만** 보게 된다.
-  if (m_eqCtrl) {
-    m_appEq.SetPreferredTapApp(CurrentSourceProcess());
-    m_appEq.Update(m_eqCtrl->SharedMemory());
-  }
   if (m_appEqOpen)
     RenderAppEqWindow();
 
@@ -1708,9 +1813,39 @@ void MainWindow::RenderTopBar() {
         names, [this](int bIdx) { ChangeBands(bIdx); },
         [this]() { if (m_onLogout) m_onLogout(); },
         [this](const AppSettings &s) {
+          const EqMode prevMode = m_settings.eqMode;
           m_settings = s;
           // 모드 변경을 즉시 반영한다 — 앱 재시작을 요구하지 않는다.
           m_adaptive.SetTrackWithinSong(s.eqMode == EqMode::AutoTrack);
+
+          // [누르면 그 자리에서 걸려야 한다] eqMode 는 곡이 바뀔 때 딱 한 번
+          //   읽힌다. 그래서 OFF 에서 1회/실시간으로 켜도 다음 곡이 나오기
+          //   전까지는 아무 일도 없었다 — 버튼이 안 먹는 것처럼 보인다.
+          //   재생 중인 곡을 방금 시작한 것처럼 다시 태워 지금 적용한다.
+          //
+          //   [OFF 로 끌 때는 아무것도 안 한다] OFF 의 약속은 "자동 변환을
+          //   멈춘다" 이지 "지금 걸린 EQ 를 벗긴다" 가 아니다. 곡 변경
+          //   분기도 OFF 면 이전 EQ 를 그대로 둔다. 여기서 벗기면 규약이
+          //   갈린다.
+          if (s.eqMode != prevMode && s.eqMode != EqMode::Off &&
+              !m_rawTitle.empty()) {
+            SongInfo cur;
+            cur.title = m_rawTitle;
+            cur.artist = m_rawArtist;
+            cur.source = m_currentSource;
+            cur.durationSeconds = m_currentDuration;
+            cur.isPlaying = true;
+            {
+              std::lock_guard<std::mutex> lk(m_songMutex);
+              m_pendingSong = cur;
+            }
+            // 같은 곡이면 titleOrArtistChanged 가 false 라 그냥 흘러간다.
+            //   비워서 "새 곡" 으로 보이게 만들어야 분기를 탄다.
+            m_currentTitle.clear();
+            m_currentArtist.clear();
+            m_eqApplyNow = true; // 누른 즉시 — 3초 디바운스도 건너뛴다
+            m_pendingSongChange = true;
+          }
         },
         [this]() {
             std::thread([this]() {
@@ -2418,9 +2553,12 @@ void MainWindow::RenderEQPanel() {
   //   통일하면 그 점프가 사라진다 — 트랜지션은 master 를 2초에 걸쳐 옮기고,
   //   그에 따라 목표가 바뀌면 아래 지수 평활이 보정값을 부드럽게 끌고 간다.
   //   드래그 중에만 건너뛴다(사용자 조작과 싸우지 않도록).
+  //   [평탄도 제외한다] 초기화로 0 을 택했는데 여기서 보정값을 덮어쓰면
+  //   슬라이더가 0 에 머무르지 못하고 델타 모양으로 되살아난다.
   if (!ImGui::IsAnyItemActive()) {
     const EqOrigin o = m_eqOrigin.load();
-    if (o != EqOrigin::Manual && o != EqOrigin::Preset) {
+    if (o != EqOrigin::Manual && o != EqOrigin::Preset &&
+        o != EqOrigin::Flat) {
       std::vector<float> disp;
       {
         std::lock_guard<std::mutex> lk(m_adaptiveMutex);
@@ -2500,7 +2638,17 @@ void MainWindow::RenderEQPanel() {
       //   확정한다. 안 그러면 화면은 보정값인데 master 는 밑그림이라 드래그
       //   순간 다른 밴드들이 튄다. 이후로는 델타/정규화가 멈추므로(위 가드)
       //   누적 위험이 없다.
-      if (m_eqOrigin.load() != EqOrigin::Manual) {
+      //
+      //   [보정값을 보여주고 있던 경우에만 인계한다] 조건이 위 표시 게이트와
+      //   같아야 한다. 수동/프리셋/평탄일 때 화면에 있던 것은 보정값이 아니라
+      //   밑그림 그 자체이므로 인계할 것이 없다. 그런데도 보정값을 밀어넣으면
+      //   화면에 보이지도 않던 델타가 슬며시 밑그림이 된다 — 초기화로 0 을
+      //   만든 직후 슬라이더 하나를 건드리면 나머지 밴드가 0 을 떠나 델타
+      //   모양으로 물드는 식이다. 눌러서 0 을 만든 사람 입장에선 영문 모를
+      //   변화다.
+      const EqOrigin dragOrigin = m_eqOrigin.load();
+      if (dragOrigin != EqOrigin::Manual && dragOrigin != EqOrigin::Preset &&
+          dragOrigin != EqOrigin::Flat) {
         std::lock_guard<std::mutex> lk(m_adaptiveMutex);
         if (m_eqDisplay31.size() == 31) {
           EnsureMaster31();
@@ -2517,6 +2665,9 @@ void MainWindow::RenderEQPanel() {
       int m = MapViewIndexToMaster31(i);
       if (m >= 0 && m < (int)m_eqGains31Master.size()) {
         m_eqGains31Master[m] = m_eqGains[i];
+        // 한 점만 찍고 끝내면 31밴드에서 바늘로 보인다. 이웃 앵커까지
+        //   이어 붙여 사람이 그린 곡선이 되게 한다.
+        SpreadMaster31FromAnchor(i);
       }
 
       float now = (float)ImGui::GetTime();
@@ -2605,9 +2756,158 @@ void MainWindow::RenderBottomBar() {
   // [작업 C] 곡 정보(정규화 결과)가 없으면 프롬프트도 비활성 + 안내.
   // m_currentGenre.empty() → iTunes 매칭 실패 or 트랙 자체 미발견.
   const bool noSongInfo = m_currentGenre.empty();
+  const bool hasSong = !m_currentTitle.empty();
+
+  auto withSongKeys = [&](auto fn) {
+    bool touched = fn(m_currentTitle, m_currentArtist);
+    CanonicalSnapshot canon = SnapshotCanonical();
+    if (!canon.title.empty() || !canon.artist.empty()) {
+      if (canon.title != m_currentTitle || canon.artist != m_currentArtist)
+        touched = fn(canon.title, canon.artist) || touched;
+    }
+    return touched;
+  };
+
+  auto flatEq = [&]() {
+    // 사용자가 방금 선택한 명시적 0dB 상태. 이전 manual/direct 덮어쓰기는
+    //   제거해서, 나중에 EQ 복원을 눌렀을 때 원본 세팅을 볼 수 있게 한다.
+    withSongKeys([&](const std::string &title, const std::string &artist) {
+      return g_recordManager.ClearManualEQ(title, artist);
+    });
+    m_eqOrigin = EqOrigin::Flat;
+    m_eqGains31Master.assign(31, 0.f);
+    SyncCurrentFromMaster();
+    ApplyEQNoSave();
+    SetStatus(u8"플랫 EQ 적용.", Theme::TEXT_GRAY);
+  };
+
+  auto applyRestored31 = [&](const std::vector<float> &gains31) {
+    // 복원은 사용자가 누른 명시값이다. Cache 로 두면 재생용 정규화와
+    //   평활이 다시 들어가 "처음 세팅된 값" 과 달라질 수 있다.
+    m_eqOrigin = EqOrigin::Preset;
+    m_eqGains31Master = gains31;
+    SyncCurrentFromMaster();
+    ApplyEQNoSave();
+  };
+
+  auto restoreEq = [&]() {
+    // manual/direct, prompt 는 사용자가 원본 위에 덮어쓴 값이다. 둘 다 지운 뒤
+    //   1) 현재 세션의 원본 스냅샷, 2) 디스크/메모리 캐시 순서로 복원한다.
+    withSongKeys([&](const std::string &title, const std::string &artist) {
+      bool removed = g_recordManager.ClearManualEQ(title, artist);
+      removed = g_recordManager.ClearPromptEQ(title, artist) || removed;
+      return removed;
+    });
+
+    bool restored = false;
+    std::string curKey = m_currentTitle + "|" + m_currentArtist;
+
+    // [1순위] 인-메모리 "처음 세팅 EQ" 스냅샷 — 캐시 miss 무관.
+    if (m_aiOriginalGains31.size() == 31 &&
+        !m_aiOriginalSongKey.empty() && m_aiOriginalSongKey == curKey) {
+      applyRestored31(m_aiOriginalGains31);
+      SetStatus(u8"EQ 복원 완료.", Theme::COLOR_GREEN);
+      restored = true;
+    }
+
+    // [2순위] 디스크/메모리 캐시 — manual/prompt 를 지운 뒤라 원본 세팅만 남는다.
+    if (!restored) {
+      withSongKeys([&](const std::string &title, const std::string &artist) {
+        if (restored)
+          return false;
+        EQEntry *cached = g_recordManager.GetCachedEQ(title, artist);
+        if (cached && cached->gains31.size() == 31) {
+          applyRestored31(cached->gains31);
+          SetStatus(u8"EQ 복원 완료.", Theme::COLOR_GREEN);
+          restored = true;
+          return true;
+        }
+        return false;
+      });
+    }
+
+    if (!restored)
+      SetStatus(u8"복원할 EQ 기록이 없습니다.", Theme::TEXT_GRAY);
+  };
+
+  auto resetAutoEq = [&]() {
+    if (!hasSong) {
+      SetStatus(u8"현재 곡 정보가 없습니다.", Theme::TEXT_GRAY);
+      return;
+    }
+
+    // 수동/프롬프트 덮어쓰기를 제거하고 현재 곡을 자동 적용 경로로 다시 태운다.
+    //   AI 를 무조건 호출하는 버튼은 아니다. 캐시가 있으면 캐시를 우선 적용하고,
+    //   캐시가 없고 AI 사용이 가능한 경우에만 자동 분석을 다시 시작한다.
+    withSongKeys([&](const std::string &title, const std::string &artist) {
+      bool removed = g_recordManager.ClearManualEQ(title, artist);
+      removed = g_recordManager.ClearPromptEQ(title, artist) || removed;
+      return removed;
+    });
+
+    bool appliedCached = false;
+    withSongKeys([&](const std::string &title, const std::string &artist) {
+      if (appliedCached)
+        return false;
+      EQEntry *cached = g_recordManager.GetCachedEQ(title, artist);
+      if (cached && cached->gains31.size() == 31) {
+        m_eqOrigin = EqOrigin::Cache;
+        m_eqGains31Master = cached->gains31;
+        SyncCurrentFromMaster();
+        ApplyEQNoSave();
+        SetStatus(u8"자동 EQ 재설정 완료.", Theme::COLOR_GREEN);
+        appliedCached = true;
+        return true;
+      }
+      return false;
+    });
+    if (appliedCached)
+      return;
+
+    if (!aiEligible) {
+      SetStatus(u8"자동 EQ 기록이 없습니다. Pro 플랜에서 다시 분석할 수 있습니다.",
+                Theme::COLOR_ORANGE);
+      return;
+    }
+    if (noSongInfo) {
+      SetStatus(u8"곡 정보가 없어 자동 EQ를 다시 만들 수 없습니다.",
+                Theme::TEXT_GRAY);
+      return;
+    }
+
+    memset(m_promptBuf, 0, sizeof(m_promptBuf));
+    TriggerAIGeneration();
+  };
+
+  auto deleteSongEq = [&]() {
+    if (!hasSong) {
+      SetStatus(u8"삭제할 곡 정보가 없습니다.", Theme::TEXT_GRAY);
+      return;
+    }
+
+    bool removed = withSongKeys([&](const std::string &title,
+                                    const std::string &artist) {
+      return g_recordManager.ClearSongEQCache(title, artist);
+    });
+
+    m_aiOriginalGains31.clear();
+    m_aiOriginalSongKey.clear();
+    SetStatus(removed ? u8"이 곡 EQ 기록을 삭제했습니다."
+                      : u8"삭제할 EQ 기록이 없습니다.",
+              removed ? Theme::COLOR_GREEN : Theme::TEXT_GRAY);
+  };
+
+  // 하단 오른쪽 고정 컨트롤 폭을 먼저 빼서 입력창 길이를 항상 맞춘다.
+  const float gap = UIScale::Px(8);
+  const float actionBtnW = UIScale::Px(aiEligible ? 80.0f : 130.0f);
+  const float menuBtnW = UIScale::Px(104.0f);
+  float promptW = ImGui::GetContentRegionAvail().x - actionBtnW - menuBtnW - gap * 2.0f;
+  const float minPromptW = UIScale::Px(180.0f);
+  if (promptW < minPromptW)
+    promptW = minPromptW;
 
   if (aiEligible && noSongInfo) {
-    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - UIScale::Px(330));
+    ImGui::SetNextItemWidth(promptW);
     ImGui::PushStyleColor(ImGuiCol_FrameBg, IM_COL32(35, 35, 45, 255));
     ImGui::PushStyleColor(ImGuiCol_Text, Theme::ToU32(Theme::TEXT_GRAY));
     ImGui::BeginDisabled(true);
@@ -2618,16 +2918,14 @@ void MainWindow::RenderBottomBar() {
                      ImGuiInputTextFlags_ReadOnly);
     ImGui::EndDisabled();
     ImGui::PopStyleColor(2);
-    ImGui::SameLine(0, UIScale::Px(8));
+    ImGui::SameLine(0, gap);
 
-    // 비활성 입력 버튼 (자리 유지)
     ImGui::BeginDisabled(true);
     ImGui::Button("입력", UIScale::V(80, 0));
     ImGui::EndDisabled();
-    ImGui::SameLine(0, UIScale::Px(8));
+    ImGui::SameLine(0, gap);
   } else if (!aiEligible) {
-    // 비활성 InputText로 입력 영역 가로 폭 유지 (UI 흔들림 방지)
-    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - UIScale::Px(330));
+    ImGui::SetNextItemWidth(promptW);
     ImGui::PushStyleColor(ImGuiCol_FrameBg, IM_COL32(35, 35, 45, 255));
     ImGui::PushStyleColor(ImGuiCol_Text, Theme::ToU32(Theme::TEXT_GRAY));
     ImGui::BeginDisabled(true);
@@ -2639,9 +2937,8 @@ void MainWindow::RenderBottomBar() {
                      ImGuiInputTextFlags_ReadOnly);
     ImGui::EndDisabled();
     ImGui::PopStyleColor(2);
-    ImGui::SameLine(0, UIScale::Px(8));
+    ImGui::SameLine(0, gap);
 
-    // Pro 구독하기 버튼 — 모달 안내 또는 즉시 페이지 오픈
     ImGui::PushStyleColor(ImGuiCol_Button, Theme::ToU32(Theme::GRAD_START));
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
                           Theme::ToU32(Theme::GRAD_END));
@@ -2649,91 +2946,41 @@ void MainWindow::RenderBottomBar() {
       m_showUpgradePopup = true;
     }
     ImGui::PopStyleColor(2);
-    ImGui::SameLine(0, UIScale::Px(8));
+    ImGui::SameLine(0, gap);
   } else {
-    // 프롬프트 입력
-    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - UIScale::Px(330));
+    ImGui::SetNextItemWidth(promptW);
     bool enter = ImGui::InputText("##prompt", m_promptBuf, sizeof(m_promptBuf),
                                   ImGuiInputTextFlags_EnterReturnsTrue);
-    ImGui::SameLine(0, UIScale::Px(8));
+    ImGui::SameLine(0, gap);
 
-    // 입력 버튼
     ImGui::PushStyleColor(ImGuiCol_Button, Theme::ToU32(Theme::BTN_SECONDARY));
     if (ImGui::Button("입력", UIScale::V(80, 0)) || enter)
       TriggerAIGeneration();
     ImGui::PopStyleColor();
-    ImGui::SameLine(0, UIScale::Px(8));
+    ImGui::SameLine(0, gap);
   }
 
-  // 수동 초기화
   ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(61, 61, 61, 255));
-  if (ImGui::Button("수동 초기화", UIScale::V(110, 0))) {
-    g_recordManager.ClearManualEQ(m_currentTitle, m_currentArtist);
-
-    bool restored = false;
-
-    // [1순위] 인-메모리 "원본 분석 EQ" 스냅샷 — 캐시 miss 무관.
-    //   AI/Prompt 적용 시점에 master 가 저장돼 있음.
-    std::string curKey = m_currentTitle + "|" + m_currentArtist;
-    if (m_aiOriginalGains31.size() == 31 &&
-        !m_aiOriginalSongKey.empty() && m_aiOriginalSongKey == curKey) {
-      m_eqGains31Master = m_aiOriginalGains31;
-      SyncCurrentFromMaster();
-      ApplyEQNoSave();
-      SetStatus("Restored to AI Original.", Theme::TEXT_GRAY);
-      restored = true;
-    }
-
-    // [2순위] 디스크/메모리 캐시 — 스냅샷이 비어 있을 때 fallback.
-    if (!restored) {
-      EQEntry *cached =
-          g_recordManager.GetCachedEQ(m_currentTitle, m_currentArtist);
-      if (cached && cached->gains31.size() == 31) {
-        m_eqGains31Master = cached->gains31;
-        SyncCurrentFromMaster();
-        ApplyEQNoSave();
-        SetStatus("Restored to AI Original.", Theme::TEXT_GRAY);
-        restored = true;
-      }
-    }
-
-    // [3순위] 분석 이력이 전혀 없는 곡 — 어쩔 수 없이 Flat.
-    if (!restored) {
-      m_eqGains31Master.assign(31, 0.f);
-      SyncCurrentFromMaster();
-      ApplyEQNoSave();
-      SetStatus("EQ Reset to Flat.", Theme::TEXT_GRAY);
-    }
-  }
+  if (ImGui::Button(u8"EQ 관리", UIScale::V(104, 0)))
+    ImGui::OpenPopup("##eq_manage_menu");
   ImGui::PopStyleColor();
-  ImGui::SameLine(0, UIScale::Px(8));
 
-  // AI 초기화 — Free 플랜에서는 노출 자체를 막는다 (의미 없는 버튼 제거).
-  //   [의도] 사용자 프롬프트로 추가한 "prompt" 소스만 제거하고, 원본 자동 분석
-  //   "AI" 소스의 EQ 로 복원. AI 재분석은 트리거하지 않음.
-  if (aiEligible) {
-    ImGui::PushStyleColor(ImGuiCol_Button, Theme::ToU32(Theme::GRAD_START));
-    if (ImGui::Button("AI 초기화", UIScale::V(100, 0))) {
-      g_recordManager.ClearPromptEQ(m_currentTitle, m_currentArtist);
+  if (ImGui::BeginPopup("##eq_manage_menu")) {
+    if (ImGui::MenuItem(u8"플랫 EQ"))
+      flatEq();
 
-      // [AI 소스 한정 조회] 우선순위(direct/manual/prompt/AI) 무시하고 "AI" 만.
-      //   direct/manual 이 있어도 무시 — 원본 자동 분석값으로 정확히 복원.
-      EQEntry *aiBaseline = g_recordManager.GetCachedEQBySource(
-          m_currentTitle, m_currentArtist, "AI");
+    ImGui::BeginDisabled(!hasSong);
+    if (ImGui::MenuItem(u8"EQ 복원"))
+      restoreEq();
+    ImGui::Separator();
+    if (ImGui::MenuItem(u8"자동 EQ 재설정"))
+      resetAutoEq();
+    if (ImGui::MenuItem(u8"이 곡 EQ 기록 삭제"))
+      deleteSongEq();
+    ImGui::EndDisabled();
 
-      if (aiBaseline && aiBaseline->gains31.size() == 31) {
-        // master31 SSOT 로 복원 + 현재 뷰는 log-linear 보간 readout.
-        m_eqGains31Master = aiBaseline->gains31;
-        SyncCurrentFromMaster();
-        ApplyEQNoSave();
-        SetStatus("Restored to Baseline AI.", Theme::COLOR_GREEN);
-      } else {
-        // 원본 AI 분석 기록 자체가 없는 곡 — 재분석 트리거 X, 상태만 안내.
-        SetStatus(u8"원본 AI 분석 기록이 없습니다.", Theme::TEXT_GRAY);
-      }
-    }
-    ImGui::PopStyleColor();
-  } // end if (aiEligible) — Free 플랜은 AI 초기화 버튼 자체가 숨겨짐
+    ImGui::EndPopup();
+  }
 
   ImGui::EndChild();
   ImGui::PopStyleColor();
@@ -2918,10 +3165,20 @@ void MainWindow::RenderAppEqWindow() {
                         rowStart.y + (rowH - ImGui::GetTextLineHeight()) * 0.5f);
         dl->AddText(tp, fade(on ? Theme::TEXT_WHITE : Theme::TEXT_GRAY), shown);
 
-        const char *badge = on ? u8"EQ 적용" : u8"원음";
+        // [체크가 아니라 결과를 보여준다] 소리를 내는 앱이 여럿이면
+        //   어느 스트림이 누구 것인지 못 가린다(confirmed=false). 그때는
+        //   무리 전체가 같은 결정을 받으므로 체크 상태와 실제 결과가
+        //   갈릴 수 있다. 결과를 쓰고, 갈릴 수 있는 줄에는 그 사실을
+        //   붙인다 — 숨기면 "왜 딴 앱에 걸리지?" 를 영영 알 수 없다.
+        const bool applied = perApp ? a.eqApplied : true;
+        const char *badge =
+            a.confirmed ? (applied ? u8"EQ 적용" : u8"원음")
+                        : (applied ? u8"EQ 적용 · 구분 불가"
+                                   : u8"원음 · 구분 불가");
         const ImVec2 bs = ImGui::CalcTextSize(badge);
         dl->AddText(ImVec2(rowStart.x + rowW - bs.x - UIScale::Px(10.0f), tp.y),
-                    fade(on ? Theme::GRAD_START : Theme::TEXT_GRAY), badge);
+                    fade(applied ? Theme::GRAD_START : Theme::TEXT_GRAY),
+                    badge);
 
         ImGui::PopID();
         ImGui::Spacing();
@@ -2975,18 +3232,24 @@ void MainWindow::RenderAppEqWindow() {
   // [진단] 앱이 목록에 안 뜰 때 어느 단계에서 끊겼는지 보여준다.
   //   SHM   : 공유 메모리 연결 + 버전 (스트림 표는 3 이상)
   //   스트림 : APO 가 등록한 칸 수 — 0 이면 DLL 이 옛 버전이거나 미배포
-  //   알림   : 받은 세션 알림 누적 — 0 이면 WASAPI 알림이 안 오는 것
+  //   콜백   : WASAPI 가 우리 콜백을 부른 횟수 — 0 이면 알림이 안 오는 것
+  //   알림   : 그중 프로세스 이름까지 읽어 기록된 것 — 콜백은 있는데
+  //            여기가 0 이면 OpenProcess 가 막힌 것이다
   //   대기   : 아직 스트림과 대응 안 된 알림
   //   대응   : 신원 확정된 앱 수
   {
     const auto d = m_appEq.GetDiagnostics();
     ImGui::Spacing();
+    ImGui::TextColored(
+        Theme::TEXT_GRAY,
+        u8"진단  SHM %s(v%u)  스트림 %d  콜백 %lu  알림 %lu  대기 %d  대응 %d",
+        d.shmMapped ? "O" : "X", d.shmVersion, d.activeSlots, d.rawCallbacks,
+        d.sessionEvents, d.pendingEvents, d.matched);
+    // 좀비 : 죽은 audiodg 가 남기고 간 칸을 거둔 누적 수.
+    //        오래 켜둔 채 계속 올라가면 audiodg 가 반복해서 죽는 중이다.
     ImGui::TextColored(Theme::TEXT_GRAY,
-                       u8"진단  SHM %s(v%u)  스트림 %d  알림 %lu  대기 %d  대응 %d",
-                       d.shmMapped ? "O" : "X", d.shmVersion, d.activeSlots,
-                       d.sessionEvents, d.pendingEvents, d.matched);
-    ImGui::TextColored(Theme::TEXT_GRAY, u8"      미확인 %d  재생세션 %d",
-                       d.unidentified, d.freeSessions);
+                       u8"      미확인 %d  재생세션 %d  좀비 %lu",
+                       d.unidentified, d.freeSessions, d.staleSlots);
   }
 
   ImGui::End();

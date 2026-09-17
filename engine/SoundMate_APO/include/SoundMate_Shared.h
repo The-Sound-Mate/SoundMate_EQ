@@ -8,7 +8,7 @@
 #define SOUNDMATE_EVENT_NAME    L"Global\\SoundMate_ConfigChanged"
 #define SOUNDMATE_MAX_BANDS     31
 #define SOUNDMATE_MAGIC         0x534D5445u  // 'SMTE'
-#define SOUNDMATE_VERSION       5u
+#define SOUNDMATE_VERSION       6u
 
 // [v3 앱별 EQ] 동시에 존재할 수 있는 SFX(스트림별) 인스턴스 수의 상한.
 //   실측상 동시 9개까지 봤다. 16이면 넉넉하고, 넘치면 그 스트림은 전역
@@ -16,6 +16,13 @@
 #define SOUNDMATE_MAX_STREAMS   16
 // 앱별 커브 슬롯 수. "음악은 이 커브, 게임은 저 커브" 식.
 #define SOUNDMATE_MAX_PROFILES  8
+
+// [v6] 앱이 살아있다고 인정해 주는 시간.
+//   앱은 프레임마다 appHeartbeatTick 을 갱신하고, 엔진은 이 시간이
+//   지나도록 값이 안 바뀌면 앱이 죽은 것으로 보고 unmatchedProfileIndex
+//   지시를 버린다. 60Hz 기준 프레임 간격이 ~16ms 라 3초면 180프레임 —
+//   잠깐 버벅여도 끊기지 않을 만큼 넉넉하다.
+#define SOUNDMATE_APP_HEARTBEAT_TIMEOUT_MS  3000u
 
 // ============================================================================
 // 동기화 모델 — cross-process SHM 안전성
@@ -82,7 +89,7 @@ struct EqProfile {
 
 struct SoundMateSettings {
     uint32_t                magic;             // SOUNDMATE_MAGIC — validity sentinel
-    uint32_t                version;           // SOUNDMATE_VERSION (현재 5)
+    uint32_t                version;           // SOUNDMATE_VERSION (현재 6)
     float                   masterGain;        // pre-amp in dB (0.0 = unity)
     uint32_t                bandCount;         // number of active entries in bands[]
     BandConfig              bands[SOUNDMATE_MAX_BANDS];
@@ -129,6 +136,36 @@ struct SoundMateSettings {
     std::atomic<uint32_t>   tapOwnerInstanceId;
     StreamSlot              streams[SOUNDMATE_MAX_STREAMS];
     EqProfile               profiles[SOUNDMATE_MAX_PROFILES];
+
+    // ── v6: 신원을 못 밝힌 스트림을 어떻게 다룰 것인가 ───────────────────
+    //
+    //   엔진(APO)은 앱이 "모든 소리에 적용" 모드인지 "선택한 앱에만" 모드인지
+    //   알 방법이 없다. 그래서 아직 신원이 안 밝혀진 스트림에 무엇을 적용할지
+    //   앱이 여기 미리 적어둔다.
+    //
+    //     -1 = 전역 커브 (모든 소리에 적용)
+    //      0 = 평탄 프로파일 (선택한 앱에만 — 기본은 미적용)
+    //
+    //   이게 없으면 두 곳이 어긋난다:
+    //     (1) 새로 생긴 칸은 앱이 배정해 줄 때까지 전역 커브다. 고르지도
+    //         않은 앱에 EQ 가 한두 프레임 새어나간다.
+    //     (2) 표가 꽉 차(16개 초과) 칸을 못 잡은 스트림은 **영원히** 전역
+    //         커브다. "고른 앱에만" 규칙이 정반대로 깨진다.
+    std::atomic<int32_t>    unmatchedProfileIndex;
+
+    // 앱이 살아있음을 알리는 시각 (GetTickCount, 32비트).
+    //
+    //   위 지시는 앱이 살아있을 때만 유효하다. 앱이 죽거나 강제 종료되면
+    //   "평탄" 지시만 남아 **EQ 가 영영 안 걸리는** 상태가 된다. 공유 메모리는
+    //   audiodg 재시작도 견디므로 재부팅 전까진 안 풀린다. 그래서 엔진은 이
+    //   값이 SOUNDMATE_APP_HEARTBEAT_TIMEOUT_MS 넘게 묵으면 지시를 버리고
+    //   전역 커브(v5 까지의 동작)로 돌아간다. 0 = 한 번도 안 알림.
+    //
+    //   [왜 32비트인가] pack(4) 라 여기 붙는 64비트 원자는 4바이트 경계에
+    //   놓일 수 있고, x64 에서 정렬 안 된 64비트 원자 연산은 lock-free 가
+    //   깨진다. 32비트 둘은 항상 자연 정렬이다 (5176, 5180). 49.7일마다
+    //   도는 wrap 은 부호 없는 뺄셈으로 비교해 저절로 처리된다.
+    std::atomic<uint32_t>   appHeartbeatTick;
 };
 
 // std::atomic 의 layout 안정성 — x64 에서 std::atomic<uint64_t> 는 정확히 8바이트,
@@ -136,6 +173,14 @@ struct SoundMateSettings {
 static_assert(sizeof(std::atomic<uint64_t>) == 8,  "atomic uint64 must be 8 bytes");
 static_assert(sizeof(std::atomic<uint32_t>) == 4,  "atomic uint32 must be 4 bytes");
 static_assert(sizeof(std::atomic<int32_t>)  == 4,  "atomic int32 must be 4 bytes");
+
+// [v6 ABI 고정] 앱과 APO 가 같은 struct 를 보고 있어야 한다. pack(4) 기준
+//   손으로 계산한 값: bands 16..512, streams[16] 536..1112(칸당 36),
+//   profiles[8] 1112..5176(칸당 508), 새 필드 5176 / 5180 → 5184.
+//   구조체를 건드려 이 값이 바뀌면 SOUNDMATE_VERSION 도 같이 올려야 한다.
+static_assert(sizeof(StreamSlot) == 36,          "StreamSlot layout changed");
+static_assert(sizeof(EqProfile)  == 508,         "EqProfile layout changed");
+static_assert(sizeof(SoundMateSettings) == 5184, "SHM layout changed — bump VERSION");
 
 // [버전 불일치 방어] 구버전 Controller 가 먼저 더 작은 크기로 매핑을 만들어
 //   두면, 신버전이 v3 필드를 건드리는 순간 매핑 밖을 읽는다. 그래서 APO/앱
@@ -153,6 +198,13 @@ inline bool SoundMateHasTapOwner(const SoundMateSettings *s) {
 // v5 이상에서만 존재하는 '소리 내는 중' 표시.
 inline bool SoundMateHasAudibleTick(const SoundMateSettings *s) {
   return s && s->magic == SOUNDMATE_MAGIC && s->version >= 5u;
+}
+
+// v6 이상에서만 존재하는 '미확인 스트림 기본값' 정책과 앱 심장박동.
+//   구버전 크기로 만들어진 매핑에서는 이 필드가 매핑 밖이므로, 읽고 쓰기
+//   전에 반드시 이 검사를 통과해야 한다.
+inline bool SoundMateHasUnmatchedPolicy(const SoundMateSettings *s) {
+  return s && s->magic == SOUNDMATE_MAGIC && s->version >= 6u;
 }
 
 #pragma pack(pop)

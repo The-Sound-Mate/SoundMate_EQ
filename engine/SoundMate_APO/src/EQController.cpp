@@ -55,6 +55,23 @@ bool EQController::Initialize() {
 
     pSettings = (SoundMateSettings*)MapViewOfFile(
         hMapFile, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(SoundMateSettings));
+
+    // [구버전 크기 섹션 방어] 섹션 크기는 먼저 만든 쪽이 정한다. 구버전 APO
+    //   가 만든 섹션은 현재 구조체보다 작아 위 매핑이 실패한다. 그대로 두면
+    //   여기서 false 를 반환해 커브가 아예 전달되지 않는다. 크기 0 = 섹션
+    //   전체라 성공하고, 새 필드는 version 검사로 막혀 있다.
+    //   (APO 쪽 FilterEngine::InitializeSharedMemory 에도 같은 폴백이 있다.)
+    bool shortMapping = false;
+    if (!pSettings) {
+        pSettings = (SoundMateSettings*)MapViewOfFile(
+            hMapFile, FILE_MAP_ALL_ACCESS, 0, 0, 0);
+        if (pSettings) {
+            shortMapping = true;
+            std::cerr << "[EQController] 구버전 크기 매핑으로 폴백 (version="
+                      << pSettings->version << ")\n";
+        }
+    }
+
     if (!pSettings) {
         std::cerr << "[EQController] Failed to map shared memory view\n";
         CloseHandle(hMapFile);
@@ -63,7 +80,9 @@ bool EQController::Initialize() {
     }
 
     // Initialize SHM if it looks fresh (magic not set)
-    if (pSettings->magic != SOUNDMATE_MAGIC) {
+    //   짧은 매핑에서는 memset 이 매핑 밖까지 밀 수 있으니 건너뛴다. 이미
+    //   존재하는 섹션이라 magic 은 어차피 박혀 있다.
+    if (pSettings->magic != SOUNDMATE_MAGIC && !shortMapping) {
         memset(pSettings, 0, sizeof(SoundMateSettings));
         pSettings->magic      = SOUNDMATE_MAGIC;
         pSettings->version    = SOUNDMATE_VERSION;

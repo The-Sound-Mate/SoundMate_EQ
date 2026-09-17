@@ -84,6 +84,10 @@ private:
   //   F5/F10/F15 모두 F31 부분집합 — 정확한 1:1 매핑 보장.
   int  MapViewIndexToMaster31(int viewIdx) const;
 
+  // N밴드 뷰에서 만진 앵커를 좌우 이웃 앵커까지 로그-주파수 직선으로 펴 바른다.
+  //   드래그로 alias 한 점만 바꾼 직후에 부른다.
+  void SpreadMaster31FromAnchor(int viewIdx);
+
   // [최종] 31밴드 master 의 non-alias(현재 뷰에 안 보이는) 인덱스에 |값|>0.1dB
   //   이 하나라도 있으면 true. UI 디테일 인디케이터 표시 조건.
   bool HasHiddenMasterDetail() const;
@@ -127,9 +131,9 @@ private:
   std::vector<float> m_masterTransitionStart;
   std::vector<float> m_masterTransitionTarget;
 
-  // [수동 초기화 복원용] 곡별 "원본 분석 EQ" 인-메모리 스냅샷.
-  //   AI/Prompt/Cache 적용 순간의 master31 을 백업.
-  //   수동 슬라이더 조작은 origin=Manual 이라 스냅샷에 영향 X.
+  // [EQ 복원용] 곡별 "처음 세팅 EQ" 인-메모리 스냅샷.
+  //   AI/Prompt 적용 순간의 master31 을 백업.
+  //   수동 슬라이더 조작과 플랫 EQ 는 origin 이 다르므로 스냅샷에 영향 X.
   //   곡이 바뀌면 클리어 — 다음 자동 적용 시 새로 갱신.
   std::vector<float> m_aiOriginalGains31;
   std::string m_aiOriginalSongKey;
@@ -393,6 +397,12 @@ private:
   // 곡 변경마다 epoch++. 디바운스 스레드는 sleep 후 epoch 가 그대로면 진행,
   // 그 사이 새 곡으로 바뀌었으면 (epoch 증가) 스킵.
   std::atomic<int> m_songEpoch{0};
+
+  // [바로 적용] 디바운스를 건너뛰고 지금 거는 경우 — 앱을 켰더니 이미 곡이
+  //   재생 중이었거나, 사용자가 EQ 자동 적용 모드를 방금 눌렀을 때. 둘 다
+  //   "곡을 연달아 넘기는 중" 이 아니므로 3초를 기다릴 이유가 없다.
+  //   초기값 true = 켜자마자 처음 잡히는 곡.
+  std::atomic<bool> m_eqApplyNow{true};
 
   // [4-A/B] iTunes 정규화된 canonical title/artist. DB key 로 사용.
   // m_currentTitle/m_currentArtist 는 사용자에게 보이는 원본 (정규화 후),

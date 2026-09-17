@@ -137,9 +137,16 @@ bool EQController::ApplyEQ(const std::vector<float> &gains,
   float q = CalculateQ((int)freqs.size());
 
   // [프리앰프 0 고정] 음량은 프리앰프가 아니라 **EQ 밴드 게인**으로 맞춘다.
-  //   AdaptiveCurve::LoudnessOffsetDb 가 그 곡을 실제로 재서 밴드 게인에
-  //   전역 오프셋을 넣으므로, EQ 를 켜도 껐을 때와 음량이 같다.
-  //   프리앰프를 따로 깎으면 그만큼 EQ on 이 더 조용해질 뿐이다.
+  //   AdaptiveCurve::NormalizeForPlayback 이 그 곡의 실측 스펙트럼으로
+  //   중역(200Hz~4kHz) 체감음량을 0dB 에 앵커하므로, EQ 를 켜도 껐을 때와
+  //   음량이 같다. 프리앰프를 따로 깎으면 그만큼 EQ on 이 더 조용해질 뿐이다.
+  //
+  //   [건드리지 말 것 — 실제로 시도했다가 되돌렸다] 커브의 합성 피크만큼
+  //   (최대 6dB) 프리앰프를 자동으로 내려 리미터 펌핑을 없애 보았다.
+  //   펌핑은 줄었을지 몰라도 EQ on 이 눈에 띄게 얇아졌다 — "풍부함이
+  //   사라진다". 위 앵커가 맞춰 둔 음량 일치를 광대역 감쇠가 그대로
+  //   깨뜨리기 때문이다. 리미터 펌핑을 손대려면 프리앰프가 아니라
+  //   엔진 쪽(LookaheadLimiter 릴리스 시정수)을 봐야 한다.
   const float preamp = 0.0f;
 
   std::ostringstream oss;
@@ -220,6 +227,19 @@ bool EQController::EnsureShmMapped() {
   if (!h) return false;
   void* view = MapViewOfFile(h, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0,
                              sizeof(SoundMateSettings));
+
+  // [구버전 크기 섹션 방어] 섹션 크기는 **먼저 만든 쪽**(= APO)이 정한다.
+  //   구버전 APO DLL 이 돌고 있는 상태에서 새 앱을 실행하면 섹션이 현재
+  //   구조체보다 작아 이 매핑이 실패한다. 그대로 두면 EnsureShmMapped 가
+  //   계속 false 를 반환해 **EQ 가 통째로 안 걸린다.** (APO 쪽에도 같은
+  //   폴백이 있다 — FilterEngine::InitializeSharedMemory 참고.)
+  //
+  //   크기 0 = "섹션 전체" 라 성공한다. 새 필드 접근은 version 검사
+  //   (SoundMateHasStreamTable / SoundMateHasUnmatchedPolicy) 로 막혀 있으니
+  //   매핑 밖을 건드리지 않고, 최소한 전역 EQ 는 정상 동작한다.
+  if (!view) {
+    view = MapViewOfFile(h, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, 0);
+  }
   if (!view) {
     CloseHandle(h);
     return false;

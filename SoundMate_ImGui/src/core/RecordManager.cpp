@@ -1407,6 +1407,61 @@ bool RecordManager::ClearPromptEQ(const std::string &title,
   return removed;
 }
 
+bool RecordManager::ClearSongEQCache(const std::string &title,
+                                     const std::string &artist) {
+  if (title.empty())
+    return false;
+
+  std::lock_guard<std::mutex> lk(m_mutex);
+  const std::string key = NormalizeKey(title, artist);
+  bool removed = false;
+
+  if (m_cache.contains("songs") && m_cache["songs"].is_object() &&
+      m_cache["songs"].contains(key)) {
+    m_cache["songs"].erase(key);
+    removed = true;
+  }
+
+  if (m_historyMap.erase(key) > 0)
+    removed = true;
+
+  // Pro+ 에서 아직 서버 동기화 전인 pending 파일도 같이 지운다. 이 파일은
+  //   곡 제목/아티스트 해시로 결정되므로 같은 곡 재생 시 되살아나는 일을 막는다.
+  try {
+    std::error_code ec;
+    const bool pendingRemoved = std::filesystem::remove(
+        PendingDir(m_recordDir) + "\\" + PendingFilenameFor(title, artist), ec);
+    if (pendingRemoved)
+      removed = true;
+  } catch (...) {}
+
+  m_entryCache.erase(key);
+
+  if (removed) {
+    SaveCache();
+
+    // history_integrated.json 도 같은 곡을 제거해서 다음 실행 때 재로딩되지 않게 한다.
+    try {
+      json history = json::array();
+      if (std::filesystem::exists(m_historyFile)) {
+        std::ifstream f(m_historyFile);
+        history = json::parse(f);
+      }
+      json kept = json::array();
+      for (auto &rec : history) {
+        auto &song = rec["data"]["song"];
+        std::string t = song.value("title", "");
+        std::string a = song.value("artist", "");
+        if (NormalizeKey(t, a) != key)
+          kept.push_back(rec);
+      }
+      std::ofstream out(m_historyFile, std::ios::trunc);
+      out << kept.dump(4);
+    } catch (...) {}
+  }
+  return removed;
+}
+
 // ── Supabase REST 요청 ──────────────────────────────────────────────────────
 // [v0.1.0] Edge Function 호출 래퍼.
 // 타임아웃 10초 — 곡 변경 스레드에서 호출되므로 오래 물고 있으면 다음 곡의

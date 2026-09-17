@@ -604,7 +604,11 @@ public:
       s.sampleRate = (uint32_t)sampleRate;
       s.channels = outChannels;
       s.framesPerPacket = framesPerPacket;
-      s.profileIndex.store(-1, std::memory_order_relaxed);  // 미배정 = 전역
+      // [v6] 예전엔 무조건 -1(전역 커브) 로 열었다. 그래서 "선택한 앱에만"
+      //   모드에서도 앱이 배정해 줄 때까지 한두 프레임 EQ 가 새어나갔다.
+      //   이제 앱이 정한 기본값으로 연다.
+      s.profileIndex.store(unmatchedDefaultProfile(),
+                           std::memory_order_relaxed);
       myStreamSlot = (int)i;
       pSettings->streamTableEpoch.fetch_add(1, std::memory_order_release);
       char buf[128];
@@ -614,7 +618,9 @@ public:
       WriteAPOLog(buf);
       return;
     }
-    WriteAPOLog("StreamSlot: table full — 이 스트림은 전역 커브로 처리");
+    // 칸을 못 잡았다. myStreamSlot 이 -1 로 남고, updateFromSharedMemory 가
+    //   앱이 정한 기본값으로 처리한다 (아래 참고). 소리가 죽는 일은 없다.
+    WriteAPOLog("StreamSlot: table full — 앱이 정한 기본 커브로 처리");
   }
 
   // [v4 탭 소유권] 이 인스턴스가 오디오 탭을 떠야 하는가?
@@ -671,6 +677,41 @@ public:
 
   // 탭 포맷 게시용. outChannels 는 이미 public 이라 짝을 맞춘다.
   float sampleRateHz() const { return sampleRate; }
+
+  // [v6] 신원이 아직/영영 안 밝혀진 스트림에 무엇을 적용할 것인가.
+  //
+  //   APO 는 앱이 "모든 소리에 적용" 모드인지 "선택한 앱에만" 모드인지 알
+  //   방법이 없다. 그래서 앱이 unmatchedProfileIndex 에 미리 적어둔 지시를
+  //   따른다. -1 = 전역 커브, 0 = 평탄(원음).
+  //
+  //   [심장박동을 왜 보나] 앱이 죽거나 강제 종료되면 "평탄" 지시만 남는다.
+  //   공유 메모리 섹션은 audiodg 재시작도 견디므로 재부팅 전까지 **EQ 가
+  //   영영 안 걸리는** 상태가 된다. 그래서 앱이 일정 시간 조용하면 지시를
+  //   버리고 v5 까지의 동작(전역 커브)으로 돌아간다.
+  //
+  //   RT 스레드에서도 불린다. GetTickCount 는 KUSER_SHARED_DATA 읽기라
+  //   syscall 이 없다 (tapEligible 도 이미 쓰고 있다). 할당·락 없음.
+  int32_t unmatchedDefaultProfile() const {
+    if (!SoundMateHasUnmatchedPolicy(pSettings))
+      return -1;  // 구버전 매핑 — 새 필드는 매핑 밖일 수 있다
+
+    const uint32_t hb =
+        pSettings->appHeartbeatTick.load(std::memory_order_relaxed);
+    if (hb == 0)
+      return -1;  // 앱이 한 번도 알린 적 없다
+    // 부호 없는 뺄셈이라 49.7일 wrap 도 저절로 맞는다.
+    if ((uint32_t)(GetTickCount() - hb) >
+        SOUNDMATE_APP_HEARTBEAT_TIMEOUT_MS)
+      return -1;  // 앱이 죽었다고 본다
+
+    const int32_t p =
+        pSettings->unmatchedProfileIndex.load(std::memory_order_relaxed);
+    if (p < 0 || p >= (int32_t)SOUNDMATE_MAX_PROFILES)
+      return -1;
+    if (!pSettings->profiles[p].inUse)
+      return -1;  // 앱이 아직 그 프로파일을 안 만들었다
+    return p;
+  }
 
   void releaseStreamSlot() {
     if (myStreamSlot < 0 || !SoundMateHasStreamTable(pSettings))
@@ -760,15 +801,21 @@ public:
     if (myStreamSlot >= 0 && SoundMateHasStreamTable(pSettings)) {
       profile = pSettings->streams[myStreamSlot].profileIndex.load(
           std::memory_order_relaxed);
-      if (profile >= 0 && profile < (int32_t)SOUNDMATE_MAX_PROFILES &&
-          pSettings->profiles[profile].inUse) {
-        const EqProfile &p = pSettings->profiles[profile];
-        srcBands = p.bands;
-        srcBandCount = p.bandCount;
-        srcMasterGain = p.masterGain;
-      } else {
-        profile = -1;  // 미배정이거나 빈 프로파일 → 전역으로 폴백
-      }
+    } else {
+      // [v6] 표에 칸이 없어 등록을 못 한 스트림. 예전엔 여기서 무조건 전역
+      //   커브를 썼다. "선택한 앱에만" 모드에서는 고르지도 않은 앱에 EQ 가
+      //   **영구히** 걸린다는 뜻이라 규칙이 정반대로 깨졌다. 앱이 정한
+      //   기본값을 따른다. 구버전 매핑이면 -1 이 나와 예전과 같이 동작한다.
+      profile = unmatchedDefaultProfile();
+    }
+    if (profile >= 0 && profile < (int32_t)SOUNDMATE_MAX_PROFILES &&
+        pSettings->profiles[profile].inUse) {
+      const EqProfile &p = pSettings->profiles[profile];
+      srcBands = p.bands;
+      srcBandCount = p.bandCount;
+      srcMasterGain = p.masterGain;
+    } else {
+      profile = -1;  // 미배정이거나 빈 프로파일 → 전역으로 폴백
     }
 
     uint64_t counter = pSettings->updateCounter.load(std::memory_order_relaxed);
@@ -961,6 +1008,16 @@ private:
     hMapFile =
         CreateFileMappingW(INVALID_HANDLE_VALUE, &sa, PAGE_READWRITE, 0,
                            sizeof(SoundMateSettings), SOUNDMATE_SHM_NAME);
+
+    // [중요] "내가 새로 만들었나" 판정을 **바로 여기서** 해둔다.
+    //   아래의 LocalFree / OpenFileMappingW / VirtualLock 이 전부 last error
+    //   를 덮어쓴다. 예전엔 memset 직전에 GetLastError() 를 봤는데 그 사이에
+    //   VirtualLock 이 끼어 있어, **이미 있는 섹션을 새로 만든 것으로 착각**
+    //   할 수 있었다. 그러면 남이 쓰고 있는 공유 메모리를 0 으로 밀어버린다
+    //   — 그것도 audiodg.exe 안에서. 구조체가 커질수록 위험이 커진다.
+    const bool createdFresh =
+        (hMapFile != NULL && GetLastError() != ERROR_ALREADY_EXISTS);
+
     if (pSD)
       LocalFree(pSD);
 
@@ -975,8 +1032,35 @@ private:
       return;
     }
 
+    // 첫 시도가 성공하면 섹션이 현재 구조체 이상 크다는 뜻이다. 실패하고
+    //   아래 폴백이 성공하면 섹션이 더 작다 — 그게 shortMapping 이다.
+    bool shortMapping = false;
+
     pSettings = (SoundMateSettings *)MapViewOfFile(
         hMapFile, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(SoundMateSettings));
+
+    // [구버전 매핑 방어] 공유 메모리를 **먼저 만든 쪽**이 크기를 정한다.
+    //   구버전 Controller 가 먼저 뜨면 더 작은 매핑이 만들어지고, 여기서
+    //   sizeof(현재 구조체) 로 매핑하려다 실패한다. 그대로 두면 pSettings 가
+    //   null 이라 커브가 영영 전달되지 않아 **EQ 가 통째로 죽는다.**
+    //   (실제로 겪었다 — 로그에 "FAILED to map shared memory view" 만 남는다.)
+    //
+    //   크기를 0 으로 주면 "매핑 전체" 라 성공한다. 새 필드는 version 검사로
+    //   막혀 있으므로(SoundMateHasStreamTable 등) 안전하고, 최소한 EQ 는
+    //   정상 동작한다. 앱별 EQ 만 조용히 비활성된다.
+    if (!pSettings) {
+      pSettings = (SoundMateSettings *)MapViewOfFile(
+          hMapFile, FILE_MAP_ALL_ACCESS, 0, 0, 0);
+      if (pSettings) {
+        shortMapping = true;
+        char warn[192];
+        _snprintf_s(warn, sizeof(warn), _TRUNCATE,
+                    "FilterEngine: 구버전 크기 매핑으로 폴백 (version=%u) — "
+                    "Controller 를 같이 갱신할 것",
+                    (unsigned)pSettings->version);
+        WriteAPOLog(warn);
+      }
+    }
 
     if (!pSettings) {
       WriteAPOLog("FilterEngine: FAILED to map shared memory view");
@@ -985,11 +1069,16 @@ private:
       return;
     }
 
-    // Pin pages in RAM — prevents page faults in the AVRT thread
-    VirtualLock(pSettings, sizeof(SoundMateSettings));
+    // Pin pages in RAM — prevents page faults in the AVRT thread.
+    //   짧은 매핑이면 구조체 크기로 잠그려다 실패하니 첫 페이지만 잠근다.
+    //   실패해도 성능만 조금 손해라 무시한다.
+    VirtualLock(pSettings, shortMapping ? 4096u : sizeof(SoundMateSettings));
 
     // Initialize if we created the mapping fresh
-    if (GetLastError() != ERROR_ALREADY_EXISTS) {
+    //   shortMapping 이면 memset 이 매핑 밖까지 밀 수 있다. 새로 만든 섹션은
+    //   항상 제 크기라 둘이 동시에 참일 수 없지만, 틀렸을 때 터지는 곳이
+    //   audiodg 라 조건을 명시해 둔다.
+    if (createdFresh && !shortMapping) {
       memset(pSettings, 0, sizeof(SoundMateSettings));
       pSettings->magic = SOUNDMATE_MAGIC;
       // [주의] 예전엔 여기에 1 이 박혀 있었다. v3 스트림 표는 version >= 3
