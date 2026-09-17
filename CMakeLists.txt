@@ -14,6 +14,14 @@ configure_file(
     "${CMAKE_CURRENT_BINARY_DIR}/generated/Version.h"
     @ONLY
 )
+# [설치 스크립트 경로도 SoT 에서 파생] .iss 는 빌드 산출물을 절대경로로 참조한다.
+# 예전에는 "build\Release\" 로 하드코딩돼 있었는데, f01fef1 에서 빌드 폴더를
+# build-release / build-debug 로 분리하면서 .iss 만 따라오지 못했다. 그 결과
+# Installer 타깃이 "파일 없음"으로 죽어 인스톨러를 만들 수 없는 상태였다.
+# RUNTIME_OUTPUT_DIRECTORY_RELEASE 와 같은 식이므로 빌드 폴더 이름을 또 바꿔도
+# 자동으로 따라온다.
+file(TO_NATIVE_PATH "${CMAKE_CURRENT_BINARY_DIR}/Release" SM_RELEASE_BIN)
+
 configure_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/SoundMate_Setup.iss.in"
     "${CMAKE_CURRENT_BINARY_DIR}/SoundMate_Setup.iss"

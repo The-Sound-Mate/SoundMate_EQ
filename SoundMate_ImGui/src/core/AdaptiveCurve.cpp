@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <complex>
 
 namespace AdaptiveCurve {
 
@@ -15,7 +16,74 @@ float LoudnessWeight(float f) {
   const float hi = f / 8000.f;
   return (lo * lo / (1.f + lo * lo)) * (1.f / (1.f + hi * hi));
 }
+
+// ── 엔진이 실제로 그리는 응답 ────────────────────────────────────────────────
+//
+// [왜 커브의 숫자를 그대로 믿으면 안 되는가]
+//   엔진은 밴드마다 peaking biquad 를 하나씩 놓고 종속 연결한다. 1/3옥타브
+//   간격에 Q=4.318 이면 이웃 필터의 스커트가 서로 겹쳐서 **합산**된다.
+//   그래서 렌더된 응답은 의도한 커브보다 대비가 크다 — 실측으로 의도 스팬
+//   7.37dB 가 렌더 11.11dB 로 나왔다 (약 1.5배).
+//
+// [이게 왜 치명적이었나]
+//   에너지 예산은 리미터 개입을 막으려고 존재한다. 그런데 리미터는 우리가
+//   보낸 **숫자**가 아니라 실제로 흐르는 **렌더된 응답**에 반응한다. 예산을
+//   보낸 숫자로만 재면, 예산이 "+1.50dB 이니 통과"라고 판정한 커브가 실제로는
+//   +2.36dB 를 밀어 넣는다. 초과분은 광대역 덕킹으로 돌아와 킥마다 보컬이
+//   눌리는 "먹먹함"이 됐다. 즉 예산이 거짓말을 하고 있었다.
+//   (실측: tools/chain_probe_main.cpp)
+//
+// 비용은 NormalizeForPlayback 1회당 약 1.2ms — 200ms 주기 호출에서 0.6% CPU.
+// 선형 커플링 행렬로 근사할 수도 있으나 게인이 커지면 오차가 1.3dB 까지
+// 벌어져서(실측) 예산 판정에는 쓸 수 없다. 정확한 식을 그대로 쓴다.
+
 } // namespace
+
+// EQController::CalculateQ 의 31밴드 값. 항상 31밴드를 보내므로 상수다.
+constexpr double kRenderQ = 4.318;
+// 설계 기준 샘플레이트. 44.1k 에서도 차이는 최고역 일부에 그치고, 그 대역의
+// 에너지 지분은 0.01% 미만이라 예산 판정 결과를 바꾸지 않는다.
+constexpr double kRenderFs = 48000.0;
+
+// 게인 벡터를 엔진이 렌더한 뒤 각 밴드 중심주파수에서 읽은 실제 응답(dB).
+// 식은 engine/SoundMate_APO/include/FilterEngine.h 의 makePeaking 과 동일.
+std::vector<float> RenderedAtBands(const std::vector<float>& gains,
+                                   const std::vector<int>& freqs) {
+  const size_t n = gains.size();
+  std::vector<float> out(n, 0.f);
+  if (n == 0 || n != freqs.size())
+    return out;
+
+  const double kPi = 3.14159265358979323846;
+  std::vector<double> cs(n), alpha(n), amp(n);
+  std::vector<std::complex<double>> z1(n), z2(n);
+  for (size_t i = 0; i < n; ++i) {
+    const double w0 = 2.0 * kPi * (double)freqs[i] / kRenderFs;
+    cs[i] = std::cos(w0);
+    alpha[i] = std::sin(w0) / (2.0 * kRenderQ);
+    amp[i] = std::pow(10.0, (double)gains[i] / 40.0);
+    z1[i] = std::polar(1.0, -w0);
+    z2[i] = std::polar(1.0, -2.0 * w0);
+  }
+  for (size_t b = 0; b < n; ++b) {
+    double sum = 0.0;
+    for (size_t i = 0; i < n; ++i) {
+      if (std::fabs(gains[i]) < 1e-6)
+        continue;  // 게인 0 인 필터는 통과 — 엔진도 같다.
+      const double m1 = -2.0 * cs[i];
+      const std::complex<double> num =
+          (1.0 + alpha[i] * amp[i]) + m1 * z1[b] +
+          (1.0 - alpha[i] * amp[i]) * z2[b];
+      const std::complex<double> den =
+          (1.0 + alpha[i] / amp[i]) + m1 * z1[b] +
+          (1.0 - alpha[i] / amp[i]) * z2[b];
+      sum += 20.0 * std::log10(std::abs(num / den));
+    }
+    out[b] = (float)sum;
+  }
+  return out;
+}
+
 
 // ITU-R BS.1770 K-weighting 의 파워 가중을 31밴드 중심주파수에서 미리 계산한 값.
 const float kKWeight[31] = {
@@ -82,29 +150,129 @@ void NormalizeForPlayback(std::vector<float>& gains,
       gains.size() != freqs.size() || gains.size() != 31)
     return;
 
+  // [렌더 기준으로 잰다] 음량도 예산도 커브의 숫자가 아니라 엔진이 실제로
+  //   그리는 응답에서 잰다. 이유는 RenderedAtBands 위 주석 참조.
+  auto midOf = [&](const std::vector<float>& g) {
+    return MidLoudnessDb(RenderedAtBands(g, freqs), measuredDb, usable, freqs);
+  };
+  auto energyOf = [&](const std::vector<float>& g) {
+    return EnergyDb(RenderedAtBands(g, freqs), measuredDb, usable);
+  };
+
   // 1) 중역을 0dB 로 정렬 — EQ on/off 음량 일치.
+  //   [한 번 빼서는 안 맞는다] 렌더 기준이면 전 밴드에서 공통 오프셋 c 를 빼도
+  //   렌더된 중역은 c 가 아니라 약 1.5c 만큼 내려간다 (이웃 필터가 겹쳐 합산
+  //   되므로). 그래서 감쇠를 걸고 고정점까지 반복한다. 감쇠 0.6 은 겹침 배율
+  //   r 이 0 < r < 3.3 인 한 항상 수렴하고, 실측상 2~3회면 0.02dB 안에 든다.
   auto anchor = [&](std::vector<float>& g) {
-    const float off = MidLoudnessDb(g, measuredDb, usable, freqs);
-    for (float& v : g) v -= off;
+    for (int it = 0; it < 8; ++it) {
+      const float off = midOf(g);
+      if (std::fabs(off) < 0.02f)
+        break;
+      for (float& v : g) v -= off * 0.6f;
+    }
   };
   anchor(gains);
 
-  // 2) 에너지 예산 초과분은 중역 기준 편차를 줄여 맞춘다.
-  //    편차를 k 배 하면 에너지가 단조 감소하므로 이분탐색으로 찾는다.
-  //    (k=0 이면 완전 평탄 = 에너지 변화 0 이므로 해가 반드시 존재한다.)
-  if (EnergyDb(gains, measuredDb, usable) <= kEnergyBudgetDb)
+  // 2) 에너지 예산 초과분을 깎는다. **어디를 깎는지가 음질을 가른다.**
+  //
+  //  [예전 방식과 그 대가] 전 밴드를 균일하게 k 배 했다. 예산은 지켜지지만
+  //  총에너지를 실제로 밀어올리는 밴드와 그렇지 않은 밴드를 구분하지 않는다.
+  //  pop LTAS 실측 지분(최대밴드 대비): 125Hz 79% / 250Hz 40% / 1k 10% /
+  //  4k 2.5% / 8k 0.63% / 12.5k 0.13%. 즉 고역을 깎아봐야 헤드룸은 한 방울도
+  //  못 벌면서 공기감과 디테일만 사라진다.
+  //  실측: 저음 성향 설문 + Dance 커브에서 스팬 8.42dB -> 3.96dB (47% 잔존),
+  //  저역이 무거운 마스터의 힙합 커브에서는 38% 까지 내려갔다. 사용자가
+  //  "EQ 가 예전보다 풍부하지 않다"고 느낀 자리가 여기다 — 음량은 맞는데
+  //  음색 대비가 없다.
+  //
+  //  [지금 방식] 밴드의 실측 파워 지분 w[b] 에 비례해서만 깎는다. 에너지를
+  //  올리는 당사자가 비용을 내고, 기여가 없는 밴드는 원래 게인을 지킨다.
+  //
+  //  [컷은 건드리지 않는다] 음수 게인은 에너지를 **줄이는** 쪽이라 예산에
+  //  도움이 된다. 같이 축소하면 그 도움까지 걷어내서 부스트를 더 깎아야 한다.
+  //  컷을 고정하면 k 를 줄일수록 에너지가 단조 감소해 이분탐색이 성립한다.
+  //
+  //  전수 81920 케이스(장르 16 x 설문 1024 x LTAS 5) 검증. 모든 수치는 보낸
+  //  숫자가 아니라 **엔진이 렌더한 응답** 기준이다 — 리미터가 보는 것이 그쪽
+  //  이므로 (RenderedAtBands 주석 참조):
+  //    평균 렌더 스팬 잔존 87.9% -> 94.1%
+  //    예산 초과        38953건 -> 0건
+  //  LTAS 별 잔존 (구판 -> 신판): pop 80.7 -> 96.7 / bass 66.9 -> 88.1 /
+  //  light 99.1 -> 99.0 / bright 100 -> 100. 손해 보던 곡일수록 많이 돌아온다.
+  //
+  //  [초과 38953건이 핵심이다] 구판은 보낸 숫자로 재서 "예산 준수"라고 답했지만
+  //  실제 렌더 응답으로 재면 81920 중 절반 가까이가 예산을 넘고 있었다. 커브가
+  //  눌린 것만 문제가 아니라, 눌러놓고도 리미터를 물리고 있었다는 뜻이다.
+  //  (합성 스펙트럼 flat 만 92.5 -> 86.7 로 내려간다. 구판이 거기서 예산을
+  //   아예 안 지키고 있었기 때문이므로, 잃은 스팬이 아니라 갚은 빚이다.)
+  //  (검증: tools/gain_probe_main.cpp)
+  if (energyOf(gains) <= kEnergyBudgetDb)
     return;
-  const std::vector<float> base = gains;
-  float lo = 0.f, hi = 1.f;
-  for (int it = 0; it < 24; ++it) {
-    const float k = 0.5f * (lo + hi);
-    std::vector<float> t(base.size());
-    for (size_t b = 0; b < base.size(); ++b) t[b] = base[b] * k;
-    anchor(t);
-    if (EnergyDb(t, measuredDb, usable) > kEnergyBudgetDb) hi = k; else lo = k;
+
+  // 밴드별 에너지 지분 — 가장 큰 밴드를 1 로 정규화.
+  double pmax = 0.0;
+  for (size_t b = 0; b < gains.size(); ++b) {
+    if (!usable[b] || measuredDb[b] <= -190.f)
+      continue;
+    const double p = std::pow(10.0, (double)measuredDb[b] / 10.0);
+    if (p > pmax) pmax = p;
   }
-  for (size_t b = 0; b < gains.size(); ++b) gains[b] = base[b] * lo;
-  anchor(gains);
+  if (pmax <= 1e-30)
+    return;  // 측정값이 전부 바닥 — 깎을 근거가 없다.
+
+  std::vector<float> w(gains.size(), 0.f);
+  for (size_t b = 0; b < gains.size(); ++b) {
+    if (!usable[b] || measuredDb[b] <= -190.f)
+      continue;
+    w[b] = (float)(std::pow(10.0, (double)measuredDb[b] / 10.0) / pmax);
+  }
+
+  const std::vector<float> base = gains;
+  auto shrink = [&](float k) {
+    std::vector<float> t(base.size());
+    for (size_t b = 0; b < base.size(); ++b)
+      t[b] = (base[b] > 0.f) ? base[b] * (1.f - (1.f - k) * w[b]) : base[b];
+    anchor(t);
+    return t;
+  };
+
+  float lo = 0.f, hi = 1.f;
+  for (int it = 0; it < 16; ++it) {
+    const float k = 0.5f * (lo + hi);
+    if (energyOf(shrink(k)) > kEnergyBudgetDb)
+      hi = k;
+    else
+      lo = k;
+  }
+  gains = shrink(lo);
+
+  // [안전망 — 죽은 코드가 아니다. 지우지 말 것.]
+  //   지분 가중 축소만으로 예산을 못 맞추는 경우가 실제로 있다. k=0 이면
+  //   지분이 큰 밴드의 부스트는 사라지지만, 그 직후 anchor() 가 중역 기준을
+  //   다시 0 으로 맞추느라 전 밴드에 공통 오프셋을 더한다. 중역을 깎는 커브면
+  //   이 오프셋이 양수라 저역 에너지가 도로 올라온다. 즉 shrink(0) 의 에너지가
+  //   예산 아래라는 보장이 없고, 그러면 이분탐색이 수렴한 lo 도 예산을 넘는다.
+  //   이때만 예전의 균일 축소를 덧씌운다 — 균일 축소는 k->0 에서 완전 평탄
+  //   (에너지 변화 0) 으로 가므로 해가 반드시 존재한다.
+  //   실측: 전수 81920 케이스 중 8697건이 이 경로를 탔고 대부분 저역이 무거운
+  //   마스터(hip-hop/EDM) 였다. 예산을 렌더 기준으로 옮긴 뒤 197건에서 이만큼
+  //   늘었는데, 예산이 이제 실제로 구속력을 갖기 때문이다 — 전에는 넘는 줄도
+  //   모르고 통과시켰다. 리미터 여유 약속은 절대이므로 예외를 두지 않는다.
+  //   이 블록을 지우면 그 8697건에서 리미터가 문다.
+  if (energyOf(gains) > kEnergyBudgetDb) {
+    const std::vector<float> b2 = gains;
+    float l2 = 0.f, h2 = 1.f;
+    for (int it = 0; it < 16; ++it) {
+      const float k = 0.5f * (l2 + h2);
+      std::vector<float> t(b2.size());
+      for (size_t b = 0; b < b2.size(); ++b) t[b] = b2[b] * k;
+      anchor(t);
+      if (energyOf(t) > kEnergyBudgetDb) h2 = k; else l2 = k;
+    }
+    for (size_t b = 0; b < gains.size(); ++b) gains[b] = b2[b] * l2;
+    anchor(gains);
+  }
 }
 
 std::vector<float> ComputeDelta(const std::vector<float>& measuredDb,

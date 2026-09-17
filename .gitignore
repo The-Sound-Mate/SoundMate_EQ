@@ -76,3 +76,8 @@ supabase/.temp/
 # 빌드 디렉터리 분리 (Debug/Release 가 서로를 지우지 않도록)
 build-debug/
 build-release/
+
+# 검증 프로브 빌드 산출물 (tools/ 의 소스와 .bat 만 공유한다)
+tools/obj/
+tools/*.exe
+tools/*.log

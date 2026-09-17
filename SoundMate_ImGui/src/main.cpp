@@ -301,20 +301,47 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
       0x2700, 0x27BF, // Dingbats (✨)
       0,
   };
+  // ── 폰트 로드 ────────────────────────────────────────────────────────────
+  //
+  // [NULL 을 반드시 받는다] AddFontFromFileTTF 는 파일이 없으면 릴리스 빌드에서
+  // 조용히 NULL 을 돌려준다. 그 NULL 을 슬롯에 넣어두면 나중에 PushFont(NULL)
+  // 에서 죽는다. malgun.ttf 는 보통 있지만 Windows N/KN, 서버 SKU, 폰트를
+  // 정리한 기업 이미지에는 없을 수 있다 — 설치 직후 첫 실행이 크래시로 끝나는
+  // 종류의 사고다.
+  //
+  // 순서는 한글 표시 능력 순이다. 마지막 ImGui 내장 폰트는 한글이 없어 네모로
+  // 보이지만, 적어도 창은 뜨고 사용자가 무슨 일이 났는지 볼 수 있다.
+  static const char* const kFontCandidates[] = {
+      "C:/Windows/Fonts/malgun.ttf",   // 맑은 고딕 (기본)
+      "C:/Windows/Fonts/gulim.ttc",    // 굴림 (구형 이미지)
+      "C:/Windows/Fonts/batang.ttc",   // 바탕
+      "C:/Windows/Fonts/segoeui.ttf",  // 한글 없음 — 최후의 라틴 폴백
+  };
   for (auto& slot : g_fontSlots) {
     ImFontConfig font_config;
     font_config.OversampleH = 1;
     font_config.OversampleV = 1;
-    slot.font = io.Fonts->AddFontFromFileTTF(
-        "C:\\Windows\\Fonts\\malgun.ttf", 18.0f * slot.scale, &font_config,
-        koreanFullRanges);
+    // 후보를 훑는 것이 정상 동작이므로 "못 읽었다" assert 를 끈다. 이 플래그가
+    // 없으면 Debug 빌드는 폴백이 제대로 도는 중에도 브레이크를 건다.
+    font_config.Flags |= ImFontFlags_NoLoadError;
+    slot.font = nullptr;
+    for (const char* path : kFontCandidates) {
+      slot.font = io.Fonts->AddFontFromFileTTF(path, 18.0f * slot.scale,
+                                               &font_config, koreanFullRanges);
+      if (slot.font)
+        break;
+    }
+    if (!slot.font)
+      slot.font = io.Fonts->AddFontDefault();
 
-    // 기호 글리프 병합 — 한글/영문은 맑은 고딕, 기호만 Segoe UI Symbol.
+    // 기호 글리프 병합 — 한글/영문은 위에서 고른 폰트, 기호만 Segoe UI Symbol.
+    // 없으면 병합을 건너뛴다. 기호가 네모로 보일 뿐 동작에는 지장이 없다.
     ImFontConfig symbolCfg;
     symbolCfg.MergeMode  = true;
     symbolCfg.OversampleH = 1;
     symbolCfg.OversampleV = 1;
-    io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\seguisym.ttf",
+    symbolCfg.Flags |= ImFontFlags_NoLoadError;
+    io.Fonts->AddFontFromFileTTF("C:/Windows/Fonts/seguisym.ttf",
                                  18.0f * slot.scale, &symbolCfg, symbolRanges);
   }
 

@@ -55,21 +55,21 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 ; ============================================================================
 [Files]
 ; --- 잠금 위험 파일: 스테이징 경로로 1차 복사 (restartreplace 사용 안 함) ---
-Source: "build\Release\SoundMate_APO.dll"; DestDir: "{app}\_tmp_install"; Flags: ignoreversion
+Source: "@SM_RELEASE_BIN@\SoundMate_APO.dll"; DestDir: "{app}\_tmp_install"; Flags: ignoreversion
 
 ; --- 잠금 위험 없는 파일: {app} 에 직접 복사 ---
-Source: "build\Release\SoundMate Equalizer.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "build\Release\SoundMate_Controller.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "build\Release\SoundMate_reset.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "build\Release\SoundMate_uninstall.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "build\Release\SoundMate_setup.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "build\Release\libcurl-x64.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "@SM_RELEASE_BIN@\SoundMate Equalizer.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "@SM_RELEASE_BIN@\SoundMate_Controller.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "@SM_RELEASE_BIN@\SoundMate_reset.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "@SM_RELEASE_BIN@\SoundMate_uninstall.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "@SM_RELEASE_BIN@\SoundMate_setup.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "@SM_RELEASE_BIN@\libcurl-x64.dll"; DestDir: "{app}"; Flags: ignoreversion
 
 ; config 및 기타 필요한 리소스들
 Source: "config\*"; DestDir: "{app}\config"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 ; 앨범 placeholder 등 assets
-Source: "build\Release\assets\*"; DestDir: "{app}\assets"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "@SM_RELEASE_BIN@\assets\*"; DestDir: "{app}\assets"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 ; 로그 수집 도구
 Source: "tool\*"; DestDir: "{app}\tool"; Flags: ignoreversion recursesubdirs createallsubdirs

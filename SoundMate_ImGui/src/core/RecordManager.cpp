@@ -11,6 +11,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <set>
 #include <sstream>
 #include <tuple>
 #include <windows.h>
@@ -728,7 +729,7 @@ bool RecordManager::RefreshUserProfile() {
 
   std::string endpoint =
       "/rest/v1/profiles?id=eq." + m_userId +
-      "&select=plan_type,display_name,trial_started_at,subscription_status";
+      "&select=plan_type,display_name,trial_started_at,subscription_status,current_period_end";
   std::string resp = SupabaseRequest("GET", endpoint, "", at);
   if (resp.empty())
     return false;
@@ -747,6 +748,10 @@ bool RecordManager::RefreshUserProfile() {
     p["display_name"]        = SafeStr(row, "display_name");
     p["trial_started_at"]    = SafeStr(row, "trial_started_at");
     p["subscription_status"] = SafeStr(row, "subscription_status");
+    // [보안] 서버 is_plan_entitled() 와 같은 재료로 판정하기 위해 만료일도
+    // 가지고 있어야 한다. 한쪽만 보면 해지한 계정이 UI 에선 여전히
+    // 유료로 보이고 서버만 403 을 리턴한다.
+    p["current_period_end"]  = SafeStr(row, "current_period_end");
     SaveCache();
     return true;
   } catch (...) {
@@ -1090,13 +1095,67 @@ bool RecordManager::UploadAudioPreferences(const std::string &bass,
   return false;
 }
 
+// ISO8601 문자열 → time_t. 파싱 실패 시 0.
+// PostgREST 는 timestamptz 를 "2026-09-17T03:31:24.685+00:00" 처럼 주는데,
+// get_time 은 초까지만 읽고 소수점·오프셋은 남긴다. 세션 TZ 는 UTC 가
+// 기본이므로 오프셋은 +00:00 이라 가정한다 — 진짜 게이트는 서버니,
+// 여기서 몇 시간 어그러지는 보안 경계가 아니다.
+static std::time_t ParseIsoUtc(const std::string &ts) {
+  if (ts.empty()) return 0;
+  std::tm tm{};
+  std::istringstream ss(ts);
+  ss >> std::get_time(&tm, "%Y-%m-%dT%H:%M:%S");
+  if (ss.fail()) return 0;
+  return _mkgmtime(&tm);
+}
+
+// 서버 public.is_plan_entitled() 의 pro/expert 분기와 **같은 규칙**.
+// NULL 을 '유효' 로 보는 것이 핵심이다 — 현재 유료 계정은 전부 수동
+// 부여라 두 열이 NULL 이며, NULL 을 만료로 읽으면 살아 있는 계정이
+// 잠긴다. 해지는 'canceled' 로 들어온다.
+bool RecordManager::IsSubscriptionActive() {
+  try {
+    if (!m_cache.contains("profile") || !m_cache["profile"].is_object())
+      return false;
+    auto &p = m_cache["profile"];
+
+    // NormalizePlan 은 trim + 소문자 — 서버의 lower(btrim(...)) 과 동일.
+    std::string st = NormalizePlan(p.value("subscription_status", std::string()));
+    static const char *kTerminal[] = {"canceled", "cancelled", "past_due",
+                                      "paused",   "unpaid",    "expired",
+                                      "deleted"};
+    for (const char *t : kTerminal)
+      if (st == t) return false;
+
+    std::string cpe = p.value("current_period_end", std::string());
+    if (!cpe.empty()) {
+      std::time_t endsAt = ParseIsoUtc(cpe);
+      if (endsAt != 0 && std::time(nullptr) >= endsAt) return false;
+    }
+    return true;
+  } catch (...) {
+    return false;  // fail closed
+  }
+}
+
 bool RecordManager::IsAIEligible() {
   // [E-1] 익명 사용자는 AI/DB 모두 차단 — 로컬 캐시만 동작.
   if (IsAnonymous()) return false;
   std::string plan = GetUserPlanType();
-  if (plan == "pro" || plan == "beta" || plan == "expert")
-    return true;
-  return GetTrialRemainingDays() > 0;
+
+  // 서버 consume_ai_quota 의 (v_entitled OR v_is_trial_active) 와
+  // **정확하게 같은** 식. 어그러지면 버튼은 눌리는데 403 만 돌아오거나,
+  // 쓸 수 있는데 UI 가 막는다.
+  //   beta        = 수동 부여 — 결제 레코드가 없으니 구독 상태를 보지 않는다.
+  //   pro/expert  = 구독이 살아 있어야 한다.
+  //   그 밖       = 트라이얼로만 허용.
+  bool entitled = false;
+  if (plan == "beta")
+    entitled = true;
+  else if (plan == "pro" || plan == "expert")
+    entitled = IsSubscriptionActive();
+
+  return entitled || GetTrialRemainingDays() > 0;
 }
 
 std::string RecordManager::GetPlanDisplayLabel() {
@@ -1108,6 +1167,11 @@ std::string RecordManager::GetPlanDisplayLabel() {
   else if (plan == "expert") base = u8"Expert 플랜";
   else if (plan == "free")   base = u8"무료 플랜";
   else                       base = plan; // 알 수 없는 값은 그대로 노출
+
+  // 구독이 끝난 유료 플랜은 라벨로 알린다. 서버가 거부하는 이유가
+  // 화면에 보이지 않으면 사용자는 그것을 버그로 받아들인다.
+  if ((plan == "pro" || plan == "expert") && !IsSubscriptionActive())
+    base += u8" (만료)";
 
   int trialDays = GetTrialRemainingDays();
   if (trialDays > 0) {
@@ -1619,136 +1683,86 @@ bool RecordManager::SyncToDB(long timeoutSecs) {
   WriteSyncLog({{"event","sync_start"},{"items", (int)items.size()},
                 {"user_id", m_userId}});
   try {
-    // 1) track 테이블 upsert (deduplicated by track_hash)
-    std::map<std::string, json> uniqueTracks;
+    // 1) [보안] track + user_track_history 를 sync_track_history RPC 한 번으로
+    //    처리한다. 예전엔 PostgREST 로 두 테이블에 직접 썼는데, track 의
+    //    RLS 정책이 INSERT/UPDATE 둘 다 (true) 라 **로그인한 아무나 남의 곡
+    //    행을 덮어쓸 수** 있었고, history 도 user_id 를 클라이언트가 실어
+    //    보내서 위조가 가능했다.
+    //
+    //    이제 서버가 auth.uid() 로 user_id 를 정하고, 이미 값이 차 있는
+    //    track 칸은 덮어쓰지 않는다. 또 SELECT fallback 이 필요 없어졌다 —
+    //    track_id 를 클라이언트가 알 이유가 없기 때문이다.
+    json rpcItems = json::array();
+    std::map<std::string, std::vector<std::filesystem::path>> hashToFiles;
     for (auto &it : items) {
       std::string h = GenerateTrackHash(it.data.value("title", ""),
                                         it.data.value("artist", ""));
-      uniqueTracks[h] = {{"track_hash", h},
-                         {"title",  it.data.value("title", "")},
-                         {"artist", it.data.value("artist", "")},
-                         {"genre",  it.data.value("genre", "")}};
-    }
-    json tracks = json::array();
-    for (auto &[h, trackJson] : uniqueTracks) {
-      tracks.push_back(trackJson);
-    }
-
-    std::map<std::string, std::string> hashToId;
-    long thttp = 0;
-    auto tresp = SupabaseRequest("POST",
-        "/rest/v1/track?on_conflict=track_hash", tracks.dump(),
-        accessToken, &thttp, timeoutSecs);
-    if (thttp < 200 || thttp >= 300) {
-      WriteSyncLog({{"event","track_upsert_fail"},{"http",thttp},
-                    {"body", tresp.substr(0, std::min<size_t>(256, tresp.size()))}});
-      return false;
-    }
-    try {
-      auto tarr = nlohmann::json::parse(tresp);
-      for (auto &r : tarr) {
-        if (r.contains("track_hash") && r.contains("id")
-            && r["track_hash"].is_string() && r["id"].is_string()) {
-          hashToId[r["track_hash"].get<std::string>()] =
-              r["id"].get<std::string>();
-        }
-      }
-    } catch (...) {
-      WriteSyncLog({{"event","track_response_parse_fail"},
-                    {"body", tresp.substr(0, std::min<size_t>(256, tresp.size()))}});
-      // 파싱 실패해도 SELECT fallback으로 한 번 더 시도
+      if (h.empty()) continue;
+      rpcItems.push_back({{"track_hash",  h},
+                          {"title",       it.data.value("title", "")},
+                          {"artist",      it.data.value("artist", "")},
+                          {"genre",       it.data.value("genre", "")},
+                          {"eq_5",        it.data.value("eq_5",  json())},
+                          {"eq_10",       it.data.value("eq_10", json())},
+                          {"eq_15",       it.data.value("eq_15", json())},
+                          {"eq_31",       it.data.value("eq_31", json())},
+                          {"source",      it.data.value("source", "")},
+                          {"prompt",      it.data.value("prompt", "")},
+                          {"device_name", it.data.value("device_name", "")}});
+      hashToFiles[h].push_back(it.path);
     }
 
-    // [Fix] track 응답이 빈 배열이거나 일부 누락된 경우 → SELECT fallback.
-    // PostgREST 일부 버전 / Prefer 헤더 조합에 따라 merge-duplicates 응답이
-    // 비어 있는 케이스 방어. 누락된 해시만 골라서 GET 으로 id 조회.
-    std::vector<std::string> missing;
-    for (auto &it : items) {
-      std::string h = GenerateTrackHash(it.data.value("title", ""),
-                                        it.data.value("artist", ""));
-      if (!hashToId.count(h)) missing.push_back(h);
-    }
-    if (!missing.empty()) {
-      // PostgREST in.(...) 문법. 짧은 해시 ID라 batch URL 길이 안전.
-      std::string in = "in.(";
-      for (size_t i = 0; i < missing.size(); ++i) {
-        if (i) in += ",";
-        in += missing[i];
-      }
-      in += ")";
-      long sh = 0;
-      auto sresp = SupabaseRequest("GET",
-          "/rest/v1/track?select=id,track_hash&track_hash=" + in,
-          "", accessToken, &sh, timeoutSecs);
-      if (sh >= 200 && sh < 300) {
-        try {
-          auto sarr = nlohmann::json::parse(sresp);
-          for (auto &r : sarr) {
-            if (r.contains("track_hash") && r.contains("id")
-                && r["track_hash"].is_string() && r["id"].is_string()) {
-              hashToId[r["track_hash"].get<std::string>()] =
-                  r["id"].get<std::string>();
-            }
-          }
-        } catch (...) {}
-      }
-      WriteSyncLog({{"event","track_select_fallback"},
-                    {"missing_before", (int)missing.size()},
-                    {"hashToId_after", (int)hashToId.size()}});
-    }
-
-    // 2) user_track_history — 모든 source 를 upsert.
-    // UNIQUE(user_id, track_id, source) 위반(같은 곡 + 같은 source 재시도)
-    // 시 단순 INSERT 면 batch 전체 실패. on_conflict=user_id,track_id,source
-    // 로 덮어쓰기 정책 통일.
-    // 중복 방지를 위해 (user_id, track_id, source) 별로 맵에서 관리하며,
-    // 이전 중복 파일들의 경로는 업로드 성공 시 삭제되도록 uploaded 목록에 수집.
-    std::map<std::tuple<std::string, std::string, std::string>, std::pair<json, std::filesystem::path>> uniqueHistory;
-    std::vector<std::filesystem::path> uploaded;
-    for (auto &it : items) {
-      std::string h = GenerateTrackHash(it.data.value("title", ""),
-                                        it.data.value("artist", ""));
-      std::string tid = hashToId.count(h) ? hashToId[h] : "";
-      if (tid.empty()) continue;
-      std::string src = it.data.value("source", "");
-      auto key = std::make_tuple(m_userId, tid, src);
-      json hist = {{"user_id", m_userId},
-                   {"track_id", tid},
-                   {"eq_5",  it.data.value("eq_5",  json())},
-                   {"eq_10", it.data.value("eq_10", json())},
-                   {"eq_15", it.data.value("eq_15", json())},
-                   {"eq_31", it.data.value("eq_31", json())},
-                   {"source",      src},
-                   {"prompt",      it.data.value("prompt", "")},
-                   {"device_name", it.data.value("device_name", "")}};
-      if (uniqueHistory.count(key)) {
-        uploaded.push_back(uniqueHistory[key].second);
-      }
-      uniqueHistory[key] = {hist, it.path};
-    }
-    json batch = json::array();
-    for (auto &[k, val] : uniqueHistory) {
-      batch.push_back(val.first);
-      uploaded.push_back(val.second);
-    }
-    WriteSyncLog({{"event","history_batch_prepared"},
-                  {"hashToId", (int)hashToId.size()},
-                  {"batch", (int)batch.size()},
-                  {"skipped_no_tid", (int)items.size() - (int)batch.size()}});
+    WriteSyncLog({{"event","rpc_batch_prepared"},
+                  {"items", (int)rpcItems.size()},
+                  {"hashes", (int)hashToFiles.size()}});
 
     bool ok = true;
-    if (!batch.empty()) {
+    std::set<std::string> savedHashes;
+    // 서버 상한은 200. 여유를 두고 잘라 보낸다 — 오프라인으로 곱이
+    // 많이 쌓인 뒤 한 번에 올라올 때 too_many_items 로 통째 실패하는 것 방지.
+    const size_t kChunk = 100;
+    for (size_t off = 0; off < rpcItems.size() && ok; off += kChunk) {
+      json chunk = json::array();
+      for (size_t i = off; i < rpcItems.size() && i < off + kChunk; ++i)
+        chunk.push_back(rpcItems[i]);
+
+      json payload = {{"p_items", chunk}};
       long h = 0;
-      auto r = SupabaseRequest("POST",
-          "/rest/v1/user_track_history?on_conflict=user_id,track_id,source",
-          batch.dump(), accessToken, &h, timeoutSecs);
+      auto r = SupabaseRequest("POST", "/rest/v1/rpc/sync_track_history",
+                               payload.dump(), accessToken, &h, timeoutSecs);
       if (h < 200 || h >= 300) {
         ok = false;
-        WriteSyncLog({{"event","history_upsert_fail"},{"http",h},
+        WriteSyncLog({{"event","sync_rpc_fail"},{"http",h},
                       {"body", r.substr(0, std::min<size_t>(256, r.size()))}});
+        break;
+      }
+      try {
+        auto resp = nlohmann::json::parse(r);
+        if (!resp.value("ok", false)) {
+          ok = false;
+          WriteSyncLog({{"event","sync_rpc_denied"},
+                        {"reason", resp.value("reason", std::string("unknown"))}});
+          break;
+        }
+        if (resp.contains("hashes") && resp["hashes"].is_array()) {
+          for (auto &hv : resp["hashes"])
+            if (hv.is_string()) savedHashes.insert(hv.get<std::string>());
+        }
+      } catch (...) {
+        ok = false;
+        WriteSyncLog({{"event","sync_rpc_parse_fail"},
+                      {"body", r.substr(0, std::min<size_t>(256, r.size()))}});
+        break;
       }
     }
-    // (옛 direct/inserts 분기 제거됨 — 모두 단일 batch upsert로 통합.)
+
+    // 서버가 저장을 확인해 준 해시의 파일만 지운다. 확인 안 된 건 남겨
+    // 두고 다음 시도에 재처리한다 (재업로드 손실 방지).
+    std::vector<std::filesystem::path> uploaded;
+    for (auto &kv : hashToFiles) {
+      if (savedHashes.count(kv.first) == 0) continue;
+      for (auto &p : kv.second) uploaded.push_back(p);
+    }
 
     if (ok) {
       // 업로드 성공한 pending 파일만 삭제. 실패하면 그대로 두고 다음에 재시도.

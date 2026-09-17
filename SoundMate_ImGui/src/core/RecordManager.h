@@ -72,6 +72,11 @@ public:
   // 클라이언트측 캐시 기반 — 서버가 진짜 게이트(consume_ai_quota).
   bool IsAIEligible();
 
+  // pro/expert 구독이 살아 있는가. 서버 public.is_plan_entitled() 와
+  // 같은 규칙 (종료 상태 목록 + current_period_end, NULL 은 유효).
+  // beta 는 이 함수와 무관 — 수동 부여라 항상 허용된다.
+  bool IsSubscriptionActive();
+
   // [PR-2D] 로그아웃 시 메모리 캐시 + access token 클리어. 백그라운드 thread가
   // 살아있어도 다음 sync에서 m_userId.empty() 가드로 no-op 됨.
   void SignOut();

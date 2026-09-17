@@ -588,17 +588,30 @@ void MainWindow::ApplyEQNoSave() {
     master31 = m_eqDisplay31;
   }
 
-  // 뷰 모드별로 N개 필터를 송신 — 엔진이 옥타브 폭에 맞는 Q 로 처리.
-  // 31밴드 외엔 master31 을 N밴드 주파수에서 log-주파수 보간 (Map31ToTargetBands).
-  std::vector<float> sendGains;
-  std::vector<int>   sendFreqs;
-  if (m_ai && !m_currentBands.empty() && (int)m_currentBands.size() != 31) {
-    sendGains = m_ai->Map31ToTargetBands(master31, m_currentBands);
-    sendFreqs = m_currentBands;
-  } else {
-    sendGains = master31;
-    sendFreqs = AIClient::F31;
-  }
+  // [항상 31밴드를 보낸다] 뷰(5/10/15)는 UI 슬라이더 개수만 정한다.
+  //
+  //   [되돌린 회귀] 여기에는 뷰가 31 이 아니면 Map31ToTargetBands 로 N 점만
+  //   뽑아 보내는 분기가 있었다. 7a0a7d1 이 의도적으로 항상-31 로 바꾸고 위
+  //   [최종] 주석을 달았는데, 15ed248 (double precision 리팩터) 이 주석만
+  //   남기고 분기를 되살렸다 — 설계 변경이 아니라 리팩터 사고였다.
+  //
+  //   [대가가 얼마였나] 기본 뷰가 5밴드라 대부분의 사용자가 5개 필터만 받고
+  //   있었다. 5밴드는 Q=0.667 (2옥타브) 이라 31점 커브를 5점으로 뭉갠다.
+  //   실측: 31밴드 렌더 대비 스팬 51.3%, 설계 의도 대비 RMS 오차 1.32dB 로
+  //   네 뷰 중 최악이다. 보컬 프레즌스나 공기감 같은 좁은 특징은 아예 존재할
+  //   수 없다. "EQ 가 풍부하지 않다"의 가장 큰 몫이 여기였다.
+  //   (검증: tools/chain_probe_main.cpp)
+  //
+  //   [수동 조작도 안전하다] 5밴드에서 슬라이더 하나를 움직여도 master31 에
+  //   외톨이 스파이크가 생기지 않는다 — MapViewIndexToMaster31 + blend 가
+  //   이웃 앵커 사이를 로그축 직선으로 채우므로 master31 은 늘 완만하다.
+  //
+  //   [혼자 되돌리면 안 된다] 31밴드는 1/3옥타브 필터가 겹쳐 합산돼 렌더
+  //   에너지가 예산(1.5dB) 대비 +2.36dB 까지 오른다. 이 분기만 고치면 리미터가
+  //   물어서 먹먹함이 도로 온다. 그래서 AdaptiveCurve 의 에너지 예산을 렌더
+  //   기준으로 재는 수정과 **반드시 함께** 가야 한다.
+  const std::vector<float>& sendGains = master31;
+  const std::vector<int>&   sendFreqs = AIClient::F31;
 
   if (!m_eqCtrl->ApplyEQ(sendGains, sendFreqs, dev)) {
     bool expected = false;
