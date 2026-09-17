@@ -9,6 +9,7 @@
 
 #include "include/EQController.h"
 #include "include/DeviceManager.h"
+#include "include/SoundMate_InstallPaths.h"
 #include <windows.h>
 #include <fstream>
 #include <iostream>
@@ -16,12 +17,26 @@
 #include <cstdio>
 #include <cmath>
 
-static const wchar_t* CONFIG_PATH =
-    L"C:\\Program Files\\SoundMate Equalizer\\config.txt";
-static const char* CONFIG_PATH_A =
-    "C:\\Program Files\\SoundMate Equalizer\\config.txt";
-static const wchar_t* CONFIG_DIR =
-    L"C:\\Program Files\\SoundMate Equalizer";
+// 설치 경로 해석은 SoundMate_InstallPaths.h 한 곳에만 둔다. 여기에 Program Files
+// 를 문자열로 박아 두면, 사용자가 다른 폴더에 설치했을 때 Controller 는 아무도
+// 쓰지 않는 config.txt 를 감시하고 앱은 반대편 파일을 쓴다. 증상은 "EQ 를
+// 만졌는데 소리가 안 바뀐다" 로만 보여서 원인을 찾기가 아주 어렵다.
+//
+// 값을 static 으로 한 번만 굳혀 둔다. 프로세스가 살아 있는 동안 설치 경로가
+// 바뀔 일은 없고, 감시 루프가 매번 재해석하면 레지스트리를 계속 두드리게 된다.
+static const std::wstring& ConfigPathW() {
+    static const std::wstring p = SoundMatePaths::ConfigTxtW();
+    return p;
+}
+static const std::string& ConfigPathA() {
+    static const std::string p = SoundMatePaths::ConfigTxtA();
+    return p;
+}
+static const std::wstring& ConfigDirW() {
+    // config.txt 는 설치 루트 바로 아래에 있다(하위 config\ 폴더가 아니다).
+    static const std::wstring p = SoundMatePaths::RootW();
+    return p;
+}
 
 // ============================================================================
 // Parse config.txt and push settings into shared memory via EQController.
@@ -31,7 +46,7 @@ static const wchar_t* CONFIG_DIR =
 // Returns true if the file was read successfully.
 // ============================================================================
 static bool ParseAndApply(EQController& eq) {
-    std::ifstream file(CONFIG_PATH_A);
+    std::ifstream file(ConfigPathA());
     if (!file.is_open()) {
         std::cerr << " [!] config.txt not found — using flat response\n";
         eq.ResetBands();
@@ -110,13 +125,13 @@ static bool ParseAndApply(EQController& eq) {
 // Write a default config.txt if none exists.
 // ============================================================================
 static void EnsureDefaultConfig() {
-    DWORD attr = GetFileAttributesW(CONFIG_PATH);
+    DWORD attr = GetFileAttributesW(ConfigPathW().c_str());
     if (attr != INVALID_FILE_ATTRIBUTES) return;  // already exists
 
     // Create the directory if needed
-    CreateDirectoryW(CONFIG_DIR, NULL);
+    CreateDirectoryW(ConfigDirW().c_str(), NULL);
 
-    std::ofstream f(CONFIG_PATH_A);
+    std::ofstream f(ConfigPathA());
     if (!f.is_open()) return;
     f << "# SoundMate EQ Configuration\n"
          "# Format: Filter: <id> <freq Hz> <gain dB> <Q>\n"
@@ -181,7 +196,7 @@ static void FlattenToPassthrough(EQController& eq) {
 
     // 앱의 ApplyBypass() 와 같은 내용. 우리가 쓰면 변경 알림이 한 번 뜨지만,
     //   호출한 쪽이 곧바로 루프를 빠져나가므로 다시 읽히지 않는다.
-    std::ofstream f(CONFIG_PATH_A, std::ios::trunc);
+    std::ofstream f(ConfigPathA(), std::ios::trunc);
     if (f.is_open())
         f << "Preamp: 0.0 dB\n";
 }
@@ -204,7 +219,7 @@ int main() {
 
     // Create file-change notification on the config directory
     HANDLE hChange = FindFirstChangeNotificationW(
-        CONFIG_DIR,
+        ConfigDirW().c_str(),
         FALSE,                        // don't watch subtrees
         FILE_NOTIFY_CHANGE_LAST_WRITE // only care about writes
     );
@@ -223,7 +238,7 @@ int main() {
         return FALSE;  // let the default handler run (terminates the process)
     }, TRUE);
 
-    std::cout << " [*] Monitoring: " << CONFIG_PATH_A << "\n"
+    std::cout << " [*] Monitoring: " << ConfigPathA() << "\n"
                  " [*] Press Ctrl+C to stop.\n\n";
 
     // 앱 생사를 확인하는 주기. 강제 종료 후 소리가 돌아오기까지 최대 이만큼

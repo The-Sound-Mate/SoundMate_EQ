@@ -21,7 +21,8 @@ struct AppSettings {
     int         defaultBands = 5;
     bool        runOnStartup = false;
     bool        minimizeToTray = false;
-    std::string language = "한국어";
+    // [i18n] 표시 이름이 아니라 언어 코드를 넣는다. 목록은 Lang.cpp 의 kLanguages[].
+    std::string language = "en";
 
     // [PR-2C] 새 통합 필드. 기본은 AiAuto.
     EqMode      eqMode = EqMode::AutoTrack;

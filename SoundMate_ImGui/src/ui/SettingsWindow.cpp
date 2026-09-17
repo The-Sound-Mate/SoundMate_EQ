@@ -1,5 +1,6 @@
 // src/ui/SettingsWindow.cpp
 #include "SettingsWindow.h"
+#include "Lang.h"
 #include "../core/RecordManager.h"
 #include "Theme.h"
 #include "UIScale.h"
@@ -19,8 +20,10 @@ static std::string SettingsFilePath() {
 AppSettings LoadSettings() {
   AppSettings s;
   std::string path = SettingsFilePath();
-  if (!std::filesystem::exists(path))
+  if (!std::filesystem::exists(path)) {
+    Lang::Set(s.language.c_str());
     return s;
+  }
   try {
     std::ifstream f(path);
     auto j = json::parse(f);
@@ -28,7 +31,7 @@ AppSettings LoadSettings() {
     s.defaultBands = j.value("default_bands", 5);
     s.runOnStartup = j.value("run_on_startup", false);
     s.minimizeToTray = j.value("minimize_to_tray", false);
-    s.language = j.value("language", "한국어");
+    s.language = j.value("language", "en");
 
     // [PR-2C] eq_mode 우선 사용. 없으면 기존 두 bool로 마이그레이션.
     if (j.contains("eq_mode") && j["eq_mode"].is_number_integer()) {
@@ -48,6 +51,12 @@ AppSettings LoadSettings() {
     s.autoAnalyze = (s.eqMode != EqMode::Off);
   } catch (...) {
   }
+
+  // [i18n] 저장되는 값은 언어 코드("en")다. v0.0.x 는 여기에 표시
+  //   이름을 적어 둔 데다. 모르는 코드는 조용히 기본 언어로 되돌린다 —
+  //   없는 번역을 가리키게 두면 화면이 통째로 빈다.
+  if (Lang::IndexOfCode(s.language.c_str()) < 0) s.language = "en";
+  Lang::Set(s.language.c_str());
   return s;
 }
 
@@ -172,7 +181,7 @@ void SettingsWindow::Render() {
   ImGui::SetNextWindowSize(UIScale::ClampPopupSize(UIScale::V(450, 700)),
                            ImGuiCond_Always);
   ImGui::PushStyleColor(ImGuiCol_WindowBg, Theme::ToU32(Theme::PANEL_COLOR));
-  ImGui::Begin("오디오 설정##settingswin", &m_open,
+  ImGui::Begin(Lang::T(Lang::WIN_SETTINGS), &m_open,
                ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize |
                    ImGuiWindowFlags_NoTitleBar);
 
@@ -186,7 +195,7 @@ void SettingsWindow::Render() {
   // 실제 자동 EQ 적용 분기는 IsAIEligible() 검사를 추가로 거치므로 안전.
   const bool aiEligible = g_recordManager.IsAIEligible();
 
-  // [작업 A] "기본 출력 장치" 드롭다운 제거 — 시스템 기본 출력 장치를
+  // [작업 A] Lang::T(Lang::DEVICE_DEFAULT_OUTPUT) 드롭다운 제거 — 시스템 기본 출력 장치를
   // 자동 추종(Windows 사운드 설정 따라감). 사용자가 앱 내에서 잘못 선택해
   // "스피커로 듣는데 헤드셋이 선택돼 있다" 같은 혼란을 원천 차단.
   // "오디오 설정" 섹션 자체도 비어 있어 제거. 시스템 설정 섹션부터 시작.
@@ -195,9 +204,9 @@ void SettingsWindow::Render() {
   // 3단계 세그먼트(OFF / 글로벌 평균 / AI 자동)로 통합되었음.
 
   // ── 시스템 설정 ──
-  RenderSection("시스템 설정");
+  RenderSection(Lang::T(Lang::SEC_SYSTEM));
 
-  ImGui::TextColored(Theme::TEXT_GRAY, "시작 시 자동 실행");
+  ImGui::TextColored(Theme::TEXT_GRAY, Lang::T(Lang::RUN_ON_STARTUP));
   ImGui::SameLine(cw - UIScale::Px(40.0f));
   if (ToggleButton("##startup", &m_settings.runOnStartup)) {
     HKEY hKey;
@@ -220,7 +229,7 @@ void SettingsWindow::Render() {
   // [PR-2B] Free는 트레이 토글을 회색 비활성 + "Pro 전용" 툴팁.
   {
     const bool eligible = g_recordManager.IsAIEligible();
-    ImGui::TextColored(Theme::TEXT_GRAY, "트레이 아이콘으로 최소화");
+    ImGui::TextColored(Theme::TEXT_GRAY, Lang::T(Lang::MINIMIZE_TO_TRAY));
     ImGui::SameLine(cw - UIScale::Px(40.0f));
     ImGui::BeginDisabled(!eligible);
     if (ToggleButton("##tray", &m_settings.minimizeToTray)) {
@@ -229,29 +238,39 @@ void SettingsWindow::Render() {
     ImGui::EndDisabled();
     if (!eligible &&
         ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-      ImGui::SetTooltip(u8"Pro 전용 기능입니다.");
+      ImGui::SetTooltip(Lang::T(Lang::PRO_ONLY));
     }
   }
 
-  ImGui::TextColored(Theme::TEXT_GRAY, "언어 (Language)");
+  ImGui::TextColored(Theme::TEXT_GRAY, Lang::T(Lang::LANGUAGE_LABEL));
   ImGui::SameLine(rightCol);
   ImGui::SetNextItemWidth(UIScale::Px(150));
-  // [Phase 3] i18n 본 작업(I18nManager) 전까지 dropdown 비활성. 동작 안 하는
-  // 토글을 노출하면 다른 토글의 신뢰도까지 떨어뜨림.
-  ImGui::BeginDisabled(true);
-  if (ImGui::BeginCombo("##lang", m_settings.language.c_str())) {
+  // 등록된 언어가 하나뿐이면 고를 게 없으므로 비활성으로 둔다.
+  // Lang.cpp 의 kLanguages[] 에 줄이 늘면 여기는 저절로 열린다.
+  const bool multiLang = Lang::Count() > 1;
+  ImGui::BeginDisabled(!multiLang);
+  if (ImGui::BeginCombo("##lang", Lang::CurrentName())) {
+    for (int i = 0; i < Lang::Count(); ++i) {
+      const bool sel = (i == Lang::CurrentIndex());
+      if (ImGui::Selectable(Lang::NameAt(i), sel) && Lang::Set(Lang::CodeAt(i))) {
+        m_settings.language = Lang::CodeAt(i);
+        SaveSettings(m_settings);
+      }
+      if (sel) ImGui::SetItemDefaultFocus();
+    }
     ImGui::EndCombo();
   }
   ImGui::EndDisabled();
-  if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-    ImGui::SetTooltip(u8"준비 중입니다.");
+  if (!multiLang &&
+      ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+    ImGui::SetTooltip(Lang::T(Lang::COMING_SOON));
   }
   ImGui::Spacing();
 
   // ── EQ 제어 ──
-  RenderSection("EQ 제어");
+  RenderSection(Lang::T(Lang::SEC_EQ_CONTROL));
 
-  ImGui::TextColored(Theme::TEXT_GRAY, "밴드 수");
+  ImGui::TextColored(Theme::TEXT_GRAY, Lang::T(Lang::BAND_COUNT));
   static const char *bandNames[] = {"5-Band", "10-Band", "15-Band", "31-Band"};
   static const int bandCounts[] = {5, 10, 15, 31};
 
@@ -299,16 +318,17 @@ void SettingsWindow::Render() {
   // Free 사용자: 모든 자동 EQ 비활성. 라디오 전체 disabled + 안내 툴팁.
   {
     const bool eligible = g_recordManager.IsAIEligible();
-    ImGui::TextColored(Theme::TEXT_GRAY, "EQ 자동 적용");
+    ImGui::TextColored(Theme::TEXT_GRAY, Lang::T(Lang::EQ_AUTO_APPLY));
 
     struct ModeOption {
       EqMode mode;
       const char *label;
     };
-    static const ModeOption kOptions[] = {
+    // [i18n] static 으로 두면 첫 프레임의 언어로 라벨이 굳어버린다.
+    const ModeOption kOptions[] = {
         {EqMode::Off, u8"OFF"},
-        {EqMode::AutoOnce, u8"1회"},
-        {EqMode::AutoTrack, u8"실시간"},
+        {EqMode::AutoOnce, Lang::T(Lang::AUTO_ONCE)},
+        {EqMode::AutoTrack, Lang::T(Lang::AUTO_REALTIME)},
     };
     constexpr int kModeCount = (int)(sizeof(kOptions) / sizeof(kOptions[0]));
 
@@ -354,26 +374,26 @@ void SettingsWindow::Render() {
 
     if (!eligible &&
         ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-      ImGui::SetTooltip(u8"Pro 플랜에서 사용 가능합니다.");
+      ImGui::SetTooltip(Lang::T(Lang::PRO_PLAN_FEATURE));
     }
   }
 
-  ImGui::TextColored(Theme::TEXT_GRAY, "자동 장치 설정");
+  ImGui::TextColored(Theme::TEXT_GRAY, Lang::T(Lang::AUTO_DEVICE_SETUP));
   ImGui::SameLine(kRightEdge - UIScale::Px(110.0f));
   ImGui::PushStyleColor(ImGuiCol_Button,
                         IM_COL32(233, 30, 99, 255)); // Pinkish red
   ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(255, 64, 129, 255));
-  if (ImGui::Button("자동 설정", UIScale::V(110, 28))) {
+  if (ImGui::Button(Lang::T(Lang::AUTO_SETUP), UIScale::V(110, 28))) {
     if (m_onAutoDevice)
       m_onAutoDevice();
   }
   ImGui::PopStyleColor(2);
 
-  ImGui::TextColored(Theme::TEXT_GRAY, "자동 설정 장치 복원");
+  ImGui::TextColored(Theme::TEXT_GRAY, Lang::T(Lang::AUTO_SETUP_RESTORE));
   ImGui::SameLine(kRightEdge - UIScale::Px(110.0f));
   ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(117, 117, 117, 255));
   ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(158, 158, 158, 255));
-  if (ImGui::Button("복원", UIScale::V(110, 28))) {
+  if (ImGui::Button(Lang::T(Lang::RESTORE_SHORT), UIScale::V(110, 28))) {
     if (m_onRestoreDevice)
       m_onRestoreDevice();
   }
@@ -381,15 +401,15 @@ void SettingsWindow::Render() {
   ImGui::Spacing();
 
   // ── 계정 정보 ──
-  RenderSection("계정 정보");
+  RenderSection(Lang::T(Lang::SEC_ACCOUNT));
 
   auto [userName, userPlan] = g_recordManager.GetUserInfo();
-  ImGui::TextColored(Theme::TEXT_GRAY, "로그인된 사용자");
+  ImGui::TextColored(Theme::TEXT_GRAY, Lang::T(Lang::SIGNED_IN_AS));
   ImGui::SameLine(cw - ImGui::CalcTextSize(userName.c_str()).x);
   ImGui::TextColored(Theme::TEXT_WHITE, "%s", userName.c_str());
 
   // [Phase 3] 한글 라벨 + Trial D-N. 로직은 RecordManager 단에서 일원화.
-  ImGui::TextColored(Theme::TEXT_GRAY, "현재 플랜");
+  ImGui::TextColored(Theme::TEXT_GRAY, Lang::T(Lang::CURRENT_PLAN));
   std::string planText = g_recordManager.GetPlanDisplayLabel();
   bool isFreePlan =
       (userPlan == "free" && g_recordManager.GetTrialRemainingDays() <= 0);
@@ -399,12 +419,12 @@ void SettingsWindow::Render() {
 
   ImGui::Spacing();
 
-  ImGui::TextColored(Theme::TEXT_GRAY, "오디오 맞춤형 취향 설정");
+  ImGui::TextColored(Theme::TEXT_GRAY, Lang::T(Lang::SEC_PREFERENCES));
   ImGui::SameLine(cw - UIScale::Px(160.0f));
   ImGui::PushStyleColor(ImGuiCol_Button, Theme::ToU32(Theme::GRAD_START));
   ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Theme::ToU32(Theme::GRAD_END));
   ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(0, 0, 0, 255));
-  if (ImGui::Button("취향 설문하기", UIScale::V(160, 32))) {
+  if (ImGui::Button(Lang::T(Lang::TAKE_SURVEY), UIScale::V(160, 32))) {
     // [Phase 3] z-order 충돌 방지 — Settings를 먼저 닫고 Survey 호출
     m_open = false;
     if (m_onSurvey)
@@ -412,11 +432,11 @@ void SettingsWindow::Render() {
   }
   ImGui::PopStyleColor(3);
 
-  ImGui::TextColored(Theme::TEXT_GRAY, "계정 관리");
+  ImGui::TextColored(Theme::TEXT_GRAY, Lang::T(Lang::SEC_ACCOUNT_MANAGE));
   ImGui::SameLine(cw - UIScale::Px(160.0f));
   ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(216, 27, 96, 255));
   ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(233, 30, 99, 255));
-  if (ImGui::Button("로그아웃", UIScale::V(160, 32))) {
+  if (ImGui::Button(Lang::T(Lang::SIGN_OUT), UIScale::V(160, 32))) {
     if (m_onLogout)
       m_onLogout();
     m_open = false;
@@ -428,7 +448,7 @@ void SettingsWindow::Render() {
 
   ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(50, 50, 50, 255));
   ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(80, 80, 80, 255));
-  if (ImGui::Button("닫기", ImVec2(cw, UIScale::Px(40))))
+  if (ImGui::Button(Lang::T(Lang::BTN_CLOSE), ImVec2(cw, UIScale::Px(40))))
     m_open = false;
   ImGui::PopStyleColor(2);
 

@@ -203,6 +203,7 @@ set(GUI_SOURCES
     ${GUI_SRC_DIR}/src/ui/LoginWindow.cpp
     ${GUI_SRC_DIR}/src/ui/SettingsWindow.cpp
     ${GUI_SRC_DIR}/src/ui/SurveyWindow.cpp
+    ${GUI_SRC_DIR}/src/ui/Lang.cpp
     ${GUI_SRC_DIR}/src/core/EQController.cpp
     ${GUI_SRC_DIR}/src/core/MediaMonitor.cpp
     ${GUI_SRC_DIR}/src/core/AIClient.cpp

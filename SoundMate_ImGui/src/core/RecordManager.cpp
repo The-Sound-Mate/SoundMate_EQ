@@ -1,5 +1,6 @@
 // src/core/RecordManager.cpp
 #include "RecordManager.h"
+#include "../../../engine/SoundMate_APO/include/SoundMate_InstallPaths.h"
 #include "../utils/StringUtils.h"
 #include "../ui/LoginWindow.h"   // [Phase 2-A] DPAPI 헬퍼 공유
 #include "SurveyMapping.h"       // [C-2] 라벨 ↔ ID 변환
@@ -37,7 +38,7 @@ static size_t WriteCallback(char *ptr, size_t size, size_t nmemb,
 
 RecordManager::RecordManager() {
   // [v12.0] 모든 데이터를 Program Files 폴더 하나로 통합
-  m_recordDir = "C:\\Program Files\\SoundMate Equalizer\\record";
+  m_recordDir = SoundMatePaths::RecordDirA();
   m_cacheFile = m_recordDir + "\\song_cache.json";
   m_historyFile = m_recordDir + "\\history_integrated.json";
   m_sessionFile = m_recordDir + "\\last_session.json";

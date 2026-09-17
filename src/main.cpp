@@ -39,20 +39,40 @@ using namespace std;
 #pragma comment(lib, "Advapi32.lib")
 
 #include "migration.h"
+#include "SoundMate_InstallPaths.h"
 
 // ============================================================================
 // Constants
 // ============================================================================
-static const wchar_t* INSTALL_DIR      = L"C:\\Program Files\\SoundMate Equalizer";
+// 설치 폴더. 해석 규칙은 SoundMate_InstallPaths.h 한 곳에만 둔다.
+// 인스톨러가 [Registry] 로 InstallPath 를 먼저 써 두므로, ssPostInstall 에서
+// 불리는 이 시점에는 사용자가 고른 폴더가 그대로 읽힌다.
+//
 // DLL location: Program Files, NOT System32. Equalizer APO does the same on
 // Win11 26200 — System32-resident unsigned 3rd-party DLLs may be blocked from
 // loading as audio APOs by stricter Win11 protected-process policy. Putting
 // it in Program Files + icacls grant to LocalService matches Equalizer's
-// proven-working setup.
-static const wchar_t* DLL_DEST         = L"C:\\Program Files\\SoundMate Equalizer\\SoundMate_APO.dll";
-static const wchar_t* CTRL_DEST        = L"C:\\Program Files\\SoundMate Equalizer\\SoundMate_Controller.exe";
-static const wchar_t* RESET_DEST       = L"C:\\Program Files\\SoundMate Equalizer\\SoundMate_reset.exe";
-static const wchar_t* CONFIG_PATH      = L"C:\\Program Files\\SoundMate Equalizer\\config.txt";
+// proven-working setup. (설치 폴더가 어디든 System32 가 아니기만 하면 된다.)
+static const std::wstring& InstallDir() {
+    static const std::wstring p = SoundMatePaths::RootW();
+    return p;
+}
+static const std::wstring& DllDest() {
+    static const std::wstring p = SoundMatePaths::ApoDllW();
+    return p;
+}
+static const std::wstring& CtrlDest() {
+    static const std::wstring p = SoundMatePaths::ControllerExeW();
+    return p;
+}
+static const std::wstring& ResetDest() {
+    static const std::wstring p = SoundMatePaths::ResetExeW();
+    return p;
+}
+static const std::wstring& ConfigPath() {
+    static const std::wstring p = SoundMatePaths::ConfigTxtW();
+    return p;
+}
 static const char*    LOG_PATH         = "C:\\Users\\Public\\SoundMate_Setup.log";
 
 // Child APO backup path (matches DeviceAPOInfo.cpp APP_REGPATH)
@@ -518,7 +538,7 @@ static void RegisterOneAPODirect(const wchar_t* guidStr, const wchar_t* friendly
     wstring clsidBase = wstring(L"SOFTWARE\\Classes\\CLSID\\") + guidStr;
     RegWriteSZ(HKEY_LOCAL_MACHINE, clsidBase.c_str(), L"", friendlyName);
     wstring inprocBase = clsidBase + L"\\InprocServer32";
-    RegWriteSZ(HKEY_LOCAL_MACHINE, inprocBase.c_str(), L"", DLL_DEST);
+    RegWriteSZ(HKEY_LOCAL_MACHINE, inprocBase.c_str(), L"", DllDest().c_str());
     RegWriteSZ(HKEY_LOCAL_MACHINE, inprocBase.c_str(), L"ThreadingModel", L"Both");
 }
 
@@ -700,11 +720,11 @@ static void ProcessDevice(const wchar_t* deviceGuid) {
 // Write default config.txt
 // ============================================================================
 static void CreateDefaultConfig() {
-    DWORD attr = GetFileAttributesW(CONFIG_PATH);
+    DWORD attr = GetFileAttributesW(ConfigPath().c_str());
     if (attr != INVALID_FILE_ATTRIBUTES) return;
-    CreateDirectoryW(INSTALL_DIR, NULL);
+    CreateDirectoryW(InstallDir().c_str(), NULL);
     FILE* f = NULL;
-    _wfopen_s(&f, CONFIG_PATH, L"w, ccs=UTF-8");
+    _wfopen_s(&f, ConfigPath().c_str(), L"w, ccs=UTF-8");
     if (!f) return;
     fwprintf(f,
         L"# SoundMate EQ Configuration\n"
@@ -738,6 +758,23 @@ int main() {
         Log("DisableProtectedAudioDG = 1");
     }
 
+    // Step 1b: 설치 경로를 레지스트리에 못박는다.
+    //   인스톨러의 [Registry] 가 이미 써 주지만, 그걸 믿고 넘어갈 수 없는
+    //   경로가 둘 있다. (1) 앱의 "APO 복구" 가 setup.exe 를 단독으로 부른다.
+    //   (2) v0.0.x 에서 올라온 설치본에는 이 값이 아예 없다.
+    //   값이 없으면 RootW() 가 Program Files 로 떨어지고, 다른 폴더에 설치한
+    //   사용자는 Controller 가 읽지도 않는 config.txt 를 쓰게 된다.
+    //   InstallDir() 은 첫 호출에서 굳어지므로, 이 쓰기가 이번 실행의 판단을
+    //   바꾸지는 않는다 — 다음 실행부터 적용된다.
+    if (SoundMatePaths::WriteInstallPathToRegistry(InstallDir())) {
+        char buf[MAX_PATH + 64];
+        _snprintf_s(buf, sizeof(buf), _TRUNCATE,
+                    "InstallPath = %ws", InstallDir().c_str());
+        Log(buf);
+    } else {
+        Log("WARN: failed to write HKLM\\SOFTWARE\\SoundMateAPO\\InstallPath");
+    }
+
     // Step 2: Copy files from the installer's own directory (sibling files)
     //   audiodg 가 DLL 을 잡고 있으면 복사가 실패하므로 먼저 내린다.
     //   맨 아래 RestartAudioServicesSC() 가 다시 올린다.
@@ -748,11 +785,22 @@ int main() {
         PathRemoveFileSpecW(selfPath);  // strip filename, keep directory
         wstring dir = selfPath;
 
-        CreateDirectoryW(INSTALL_DIR, NULL);
+        CreateDirectoryW(InstallDir().c_str(), NULL);
+
+        // [제자리 실행] 인스톨러는 setup.exe 를 설치 폴더 안에 넣고 거기서
+        //   실행한다. 그래서 복사 원본과 대상이 같은 파일이 되는 경우가 흔하다.
+        //   그때 CopyFileW 는 실패를 돌려주는데, 그건 "이미 제자리에 있다" 는
+        //   뜻이지 갱신 실패가 아니다. 구분하지 않으면 정상 설치마다 로그에
+        //   COPY FAILED 세 줄이 찍혀서, 진짜 실패를 찾을 수 없게 된다.
+        const bool inPlace = SoundMatePaths::SameDirectory(dir, InstallDir());
+        if (inPlace) {
+            Log("Setup is running from the install folder — skipping self-copy.");
+        }
 
         // [검증] 예전에는 반환값을 안 보고 무조건 "Files copied" 를 찍어서
         //   DLL 복사 실패가 완전히 숨겨졌다. 실패는 반드시 로그에 남긴다.
         auto copyChecked = [&](const wchar_t* name, const wchar_t* dest) {
+            if (inPlace) return;
             const wstring src = dir + L"\\" + name;
             if (CopyFileW(src.c_str(), dest, FALSE)) return;
             char buf[256];
@@ -761,9 +809,9 @@ int main() {
                 name, GetLastError());
             Log(buf);
         };
-        copyChecked(L"SoundMate_APO.dll",        DLL_DEST);
-        copyChecked(L"SoundMate_Controller.exe", CTRL_DEST);
-        copyChecked(L"SoundMate_reset.exe",      RESET_DEST);
+        copyChecked(L"SoundMate_APO.dll",        DllDest().c_str());
+        copyChecked(L"SoundMate_Controller.exe", CtrlDest().c_str());
+        copyChecked(L"SoundMate_reset.exe",      ResetDest().c_str());
 
         // Dynamic CRT runtime DLLs — bundled alongside our APO DLL exactly like
         // Equalizer APO does. Without these, audiodg cannot load our APO when
@@ -775,8 +823,16 @@ int main() {
         };
         for (auto* crtName : crtDlls) {
             wstring src  = dir + L"\\" + crtName;
-            wstring dest = wstring(INSTALL_DIR) + L"\\" + crtName;
-            if (GetFileAttributesW(src.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            wstring dest = InstallDir() + L"\\" + crtName;
+            const bool srcExists =
+                GetFileAttributesW(src.c_str()) != INVALID_FILE_ATTRIBUTES;
+            // 제자리 실행 + 파일이 이미 있다 = src 와 dest 가 같은 파일이다.
+            //   할 일이 없다. 여기서 안 빠지면 아래 System32 폴백이 걸려서,
+            //   우리가 함께 배포한 CRT 를 시스템 버전으로 덮어써 버린다.
+            //   (제자리인데 파일이 없으면 폴백은 여전히 필요하다 — 이게 없으면
+            //    audiodg 가 APO 를 못 읽는다.)
+            if (inPlace && srcExists) continue;
+            if (!inPlace && srcExists) {
                 CopyFileW(src.c_str(), dest.c_str(), FALSE);
             } else {
                 // Fall back to System32 copy (VS redist installed system-wide)
@@ -787,8 +843,8 @@ int main() {
             }
         }
 
-        GrantFileAccess(INSTALL_DIR, true);  // directory: inherit to children
-        GrantFileAccess(DLL_DEST,   false); // single file: plain RX only
+        GrantFileAccess(InstallDir().c_str(), true);  // directory: inherit to children
+        GrantFileAccess(DllDest().c_str(),   false); // single file: plain RX only
         Log("Files copied and permissions set.");
     }
 
@@ -804,7 +860,7 @@ int main() {
     // audiodg treats us as "registered but unknown" and never creates a
     // processing instance — LockForProcess is never invoked.
     {
-        HMODULE hDll = LoadLibraryW(DLL_DEST);
+        HMODULE hDll = LoadLibraryW(DllDest().c_str());
         if (hDll) {
             typedef HRESULT (STDAPICALLTYPE *DllRegFn)();
             DllRegFn pReg = (DllRegFn)GetProcAddress(hDll, "DllRegisterServer");
@@ -860,7 +916,7 @@ int main() {
     RestartAudioServicesSC();
 
     // Step 7: Launch Controller (hidden window)
-    ShellExecuteW(NULL, L"open", CTRL_DEST, NULL, NULL, SW_HIDE);
+    ShellExecuteW(NULL, L"open", CtrlDest().c_str(), NULL, NULL, SW_HIDE);
 
     // Step 8: SchemaVersion 작성 — 다음 설치가 idempotent 분기 가능.
     WriteSchemaVersion();

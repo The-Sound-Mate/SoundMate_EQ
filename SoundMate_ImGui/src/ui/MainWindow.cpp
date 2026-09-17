@@ -1,7 +1,9 @@
 // src/ui/MainWindow.cpp
 #include "MainWindow.h"
+#include "Lang.h"
 // 공유 메모리의 실제 밴드를 읽어 필터 응답을 계산한다 (비주얼라이저용).
 #include "../../../engine/SoundMate_APO/include/SoundMate_Shared.h"
+#include "../../../engine/SoundMate_APO/include/SoundMate_InstallPaths.h"
 #include "../utils/StringUtils.h"
 #include "Theme.h"
 #include "UIScale.h"
@@ -202,7 +204,7 @@ void MainWindow::Initialize(EQController *eq, AIClient *ai,
 
   // [v12.0] UI 실행 시 컨트롤러를 백그라운드에서 자동 실행.
   // 탐색 우선순위:
-  //   1) installed location ("C:\Program Files\SoundMate Equalizer\")
+  //   1) installed location (SoundMatePaths::RootA — 레지스트리가 알려준 곳)
   //   2) GUI 실행 파일 옆 (build output, dev workflow)
   //   3) build 트리의 engine/ 하위
   std::thread([]() {
@@ -210,8 +212,7 @@ void MainWindow::Initialize(EQController *eq, AIClient *ai,
 
     // (1) installed location — installer가 여기에 SoundMate_Controller.exe
     // 복사함
-    const char *installed =
-        "C:\\Program Files\\SoundMate Equalizer\\SoundMate_Controller.exe";
+    const std::string installed = SoundMatePaths::ControllerExeA();
     if (std::filesystem::exists(installed)) {
       controllerPath = installed;
     } else {
@@ -260,8 +261,7 @@ void MainWindow::EnsureControllerHealthy() {
     GetModuleFileNameA(nullptr, exeP, MAX_PATH);
     std::filesystem::path curDir = std::filesystem::path(exeP).parent_path();
     std::string controllerPath;
-    const char *installed =
-        "C:\\Program Files\\SoundMate Equalizer\\SoundMate_Controller.exe";
+    const std::string installed = SoundMatePaths::ControllerExeA();
     if (std::filesystem::exists(installed)) {
       controllerPath = installed;
     } else {
@@ -355,7 +355,7 @@ void MainWindow::RefreshDefaultDevice() {
   }
 
   std::lock_guard<std::mutex> lk(m_defaultDeviceMutex);
-  m_defaultDeviceName = nameUtf8.empty() ? "기본 출력 장치" : nameUtf8;
+  m_defaultDeviceName = nameUtf8.empty() ? Lang::T(Lang::DEVICE_DEFAULT_OUTPUT) : nameUtf8;
   m_defaultDeviceGuid = guidW;
   m_defaultDeviceApoRegistered = apoOk;
 }
@@ -468,11 +468,11 @@ std::string MainWindow::GetSelectedDeviceGuid() const {
 std::string MainWindow::GetSelectedDeviceDisplayName() const {
   std::lock_guard<std::mutex> lk(m_devicesMutex);
   if (m_devices.empty())
-    return "-- 선택 --";
+    return Lang::T(Lang::SELECT_PLACEHOLDER);
   if (m_selectedDevice >= 0 && m_selectedDevice < (int)m_devices.size()) {
     return m_devices[m_selectedDevice].displayName;
   }
-  return "-- 선택 --";
+  return Lang::T(Lang::SELECT_PLACEHOLDER);
 }
 
 // ── Controller 프로세스 존재 확인 (GUI-only, Process Enumeration) ───────────
@@ -616,12 +616,12 @@ void MainWindow::ApplyEQNoSave() {
   if (!m_eqCtrl->ApplyEQ(sendGains, sendFreqs, dev)) {
     bool expected = false;
     if (s_healthRecoveryInFlight.compare_exchange_strong(expected, true)) {
-      SetStatus(u8"EQ 엔진 응답 없음 — 재기동 중...", Theme::COLOR_YELLOW);
+      SetStatus(Lang::T(Lang::ENGINE_NO_RESPONSE_RESTARTING), Theme::COLOR_YELLOW);
       EnsureControllerHealthy();
       std::thread([this, dev, sendGains, sendFreqs]() {
         std::this_thread::sleep_for(std::chrono::seconds(1));
         if (!m_eqCtrl->ApplyEQ(sendGains, sendFreqs, dev)) {
-          SetStatus(u8"EQ 설정 엔진 응답 없음. 프로그램을 재시작해주세요.",
+          SetStatus(Lang::T(Lang::ENGINE_NO_RESPONSE_RESTART_APP),
                     Theme::COLOR_RED);
         }
         s_healthRecoveryInFlight = false;
@@ -676,11 +676,11 @@ void MainWindow::TriggerAIGeneration() {
   // [Phase 3] Free 플랜은 AI 호출 자체를 막는다. 서버도 이중으로 막지만
   // 호출 비용·대기시간을 줄이기 위해 클라이언트에서 1차 컷.
   // (auto 트리거에서도 호출되므로 popup은 띄우지 않고 상태바만 표시 →
-  //  popup은 하단 바 "Pro 구독하기" 버튼 또는 서버 403 'free_no_ai' 응답에서만)
+  //  popup은 하단 바 Lang::T(Lang::SUBSCRIBE_PRO) 버튼 또는 서버 403 'free_no_ai' 응답에서만)
   if (!g_recordManager.IsAIEligible()) {
     memset(m_promptBuf, 0, sizeof(m_promptBuf));
     SetStatus(
-        u8"Free 플랜은 AI 기능이 제한됩니다. Pro 플랜으로 업그레이드하세요.",
+        Lang::T(Lang::AI_FREE_PLAN_LIMITED),
         Theme::COLOR_ORANGE);
     return;
   }
@@ -728,7 +728,7 @@ void MainWindow::TriggerAIGeneration() {
     // [A-1] HTTP 요청 직전에도 한 번 더 검사 — 그 사이 곡이 바뀌었으면 호출
     // 자체를 안 함.
     if (m_songEpoch.load() != myEpoch) {
-      SetStatus(u8"AI: 곡 변경으로 취소", Theme::TEXT_GRAY);
+      SetStatus(Lang::T(Lang::AI_CANCELLED_TRACK_CHANGED), Theme::TEXT_GRAY);
       return;
     }
 
@@ -748,7 +748,7 @@ void MainWindow::TriggerAIGeneration() {
     const bool useLocalCurve = prompt.empty();
 
     if (useLocalCurve) {
-      SetStatus(u8"로컬 분석 중...", Theme::TEXT_WHITE);
+      SetStatus(Lang::T(Lang::LOCAL_ANALYZING), Theme::TEXT_WHITE);
       // [v0.1.0] 커브는 서버가 산출한 것을 우선 사용한다 (산출식이 바이너리에
       //   남지 않음 + 규칙 수정 시 클라이언트 재배포 불필요).
       //   서버에 도달하지 못했을 때만 LocalCurve 로 폴백한다 — 같은 알고리즘
@@ -777,7 +777,7 @@ void MainWindow::TriggerAIGeneration() {
           }
         }
         if (aiAborted) break;
-        SetStatus(u8"AI 재시도 중... (" + std::to_string(attempt + 1) + "/" +
+        SetStatus(Lang::T(Lang::AI_RETRYING_PREFIX) + std::to_string(attempt + 1) + "/" +
                       std::to_string(kAiAttempts) + ")",
                   Theme::TEXT_WHITE);
       } else {
@@ -799,7 +799,7 @@ void MainWindow::TriggerAIGeneration() {
     } // else (AI 경로)
 
     if (aiAborted) {
-      SetStatus(u8"AI: 응답 폐기 (곡 변경됨)", Theme::TEXT_GRAY);
+      SetStatus(Lang::T(Lang::AI_RESPONSE_DISCARDED), Theme::TEXT_GRAY);
       return;
     }
 
@@ -815,13 +815,13 @@ void MainWindow::TriggerAIGeneration() {
 
     if (result.errorCode == 429) {
       // [UX] 일시 레이트리밋 — 이전 EQ 유지. Flat 강제 X.
-      SetStatus(u8"AI Rate Limit — 이전 EQ 유지 (재시도 모두 실패)",
+      SetStatus(Lang::T(Lang::AI_RATE_LIMIT_KEPT_EQ),
                 Theme::COLOR_YELLOW);
       g_recordManager.LogAiError(m_currentTitle, m_currentArtist, "429",
                                  result.errorMsg);
     } else if (result.errorCode == 503) {
       // [UX] 모델 일시 과부하 — 이전 EQ 유지. Flat 강제 X.
-      SetStatus(u8"AI 서버 일시 과부하 — 이전 EQ 유지 (재시도 모두 실패)",
+      SetStatus(Lang::T(Lang::AI_SERVER_BUSY_KEPT_EQ),
                 Theme::COLOR_YELLOW);
       g_recordManager.LogAiError(m_currentTitle, m_currentArtist, "503",
                                  result.errorMsg);
@@ -829,18 +829,18 @@ void MainWindow::TriggerAIGeneration() {
       // [세션 정책] 401은 토큰 일시 만료 — silent 처리. 자동 refresh가
       // 다음 호출 시 재시도. 사용자에게 로그인 강요 X.
       applyFlatOnAiFail();
-      SetStatus(u8"AI 일시 오류 — 다음 곡에서 재시도합니다.", Theme::TEXT_GRAY);
+      SetStatus(Lang::T(Lang::AI_TEMP_ERROR_RETRY_NEXT), Theme::TEXT_GRAY);
       g_recordManager.LogAiError(m_currentTitle, m_currentArtist, "401",
                                  result.errorMsg);
     } else if (result.errorCode == 403) {
       if (result.quotaReason == "free_no_ai") {
         // Free는 이전 EQ 유지 정책 — Flat 적용 안 함.
         m_showUpgradePopup = true;
-        SetStatus(u8"Free 플랜은 AI 기능을 사용할 수 없습니다.",
+        SetStatus(Lang::T(Lang::AI_NOT_ON_FREE_PLAN),
                   Theme::COLOR_ORANGE);
       } else if (result.quotaReason == "monthly_limit") {
         applyFlatOnAiFail();
-        SetStatus(u8"이번 달 AI 사용 한도를 모두 사용했습니다. (EQ Flat)",
+        SetStatus(Lang::T(Lang::AI_MONTHLY_QUOTA_USED),
                   Theme::COLOR_ORANGE);
       } else {
         applyFlatOnAiFail();
@@ -1026,8 +1026,7 @@ void MainWindow::Render() {
   if (m_controllerCheckTimer >= kControllerCheckInterval) {
     bool nowRunning = IsControllerRunning();
     if (m_controllerRunning && !nowRunning) {
-      SetStatus("⚠ Controller Not Running — EQ 변경이 적용되지 않습니다 "
-                "(관리자 권한 필요)",
+      SetStatus(Lang::T(Lang::CONTROLLER_NOT_RUNNING),
                 Theme::COLOR_RED);
     }
     m_controllerRunning = nowRunning;
@@ -1069,7 +1068,7 @@ void MainWindow::Render() {
 
   // 폴링 결과 처리 (메인 thread)
   if (m_forceLogoutTriggered.exchange(false)) {
-    SetStatus(u8"다른 위치에서 로그아웃되었습니다.", Theme::COLOR_YELLOW);
+    SetStatus(Lang::T(Lang::SIGNED_OUT_ELSEWHERE), Theme::COLOR_YELLOW);
     // 타이머를 0으로 리셋해 재로그인 후 즉시 다시 폴링하지 않도록 함.
     // (서버측 check_device_session이 force_logout 플래그를 자동 클리어하므로
     //  재폴링돼도 valid=true 반환하지만, 불필요한 호출을 방지.)
@@ -1289,7 +1288,7 @@ void MainWindow::Render() {
           mx = (std::fabs(v) > mx) ? std::fabs(v) : mx;
         char msg[128];
         _snprintf_s(msg, sizeof(msg), _TRUNCATE,
-                    u8"곡 분석 완료 — 보정 적용 (최대 %.1f dB)", mx);
+                    Lang::T(Lang::TRACK_ANALYZED_FMT), mx);
         SetStatus(msg, Theme::TEXT_GRAY);
       }
       ApplyEQNoSave();
@@ -1468,10 +1467,10 @@ void MainWindow::Render() {
               m_queuedMaster31 = cached->gains31; // [Task 3-A] master 정밀도 보존
               m_pendingEQUpdate = true;
               m_eqOrigin = EqOrigin::Cache;
-              SetStatus(u8"로컬 캐시 적용 (익명 모드)", Theme::COLOR_GREEN);
+              SetStatus(Lang::T(Lang::LOCAL_CACHE_APPLIED_ANON), Theme::COLOR_GREEN);
             }
           } else if (!cached) {
-            SetStatus(u8"익명 모드: 회원가입 후 AI EQ 사용 가능",
+            SetStatus(Lang::T(Lang::ANON_MODE_SIGNUP_FOR_AI),
                       Theme::TEXT_GRAY);
           }
           return; // 익명 모드는 여기서 종료
@@ -1541,7 +1540,7 @@ void MainWindow::Render() {
             m_pendingEQUpdate = true;
             m_eqOrigin = EqOrigin::Flat;
             SetStatus(
-                u8"음원 정보를 찾을 수 없어 EQ를 평탄(Flat)으로 설정합니다.",
+                Lang::T(Lang::NO_TRACK_INFO_FLAT),
                 Theme::COLOR_YELLOW);
           } else if (mode != EqMode::Off && m_ai) {
             TriggerAIGeneration();
@@ -1609,7 +1608,7 @@ void MainWindow::Render() {
 
   // [여기 있는 이유] 아래 강제 업데이트 오버레이는 return 으로 끝난다.
   //   이 호출이 그 뒤에 있으면 오버레이가 떠 있는 동안 갱신이 멈추고,
-  //   엔진이 보는 심장박동(appHeartbeatTick)이 묵어 "선택한 앱에만" 지시가
+  //   엔진이 보는 심장박동(appHeartbeatTick)이 묵어 Lang::T(Lang::TO_SELECTED_APPS) 지시가
   //   만료된다 — 고르지도 않은 앱에 EQ 가 걸린다. ImGui 호출이 아니라
   //   창을 닫은 뒤 어디서 불러도 무해하다.
   // [앱별 EQ] 새로 뜬 스트림을 세션과 대조해 신원을 확정하고, 제외 목록을
@@ -1684,7 +1683,7 @@ void MainWindow::RenderTopBar() {
   {
     std::string presetLabel;
     if (!m_presetModeActive || m_selectedPresetIdx < 0)
-      presetLabel = u8"[AI] 자동";
+      presetLabel = Lang::T(Lang::PRESET_AI_AUTO);
     else
       presetLabel = m_userPresets[m_selectedPresetIdx].name;
 
@@ -1693,7 +1692,7 @@ void MainWindow::RenderTopBar() {
     ImGui::SetNextItemWidth(comboW);
     if (ImGui::BeginCombo("##preset", presetLabel.c_str())) {
       bool autoSel = !m_presetModeActive;
-      if (ImGui::Selectable(u8"[AI] 자동", autoSel)) {
+      if (ImGui::Selectable(Lang::T(Lang::PRESET_AI_AUTO), autoSel)) {
         m_presetModeActive = false;
         m_selectedPresetIdx = -1;
         SetStatus("Auto AI mode.", Theme::TEXT_WHITE);
@@ -1708,7 +1707,7 @@ void MainWindow::RenderTopBar() {
         }
       }
       if (m_userPresets.empty()) {
-        ImGui::TextColored(Theme::TEXT_DARK_GRAY, u8"  (저장된 프리셋 없음)");
+        ImGui::TextColored(Theme::TEXT_DARK_GRAY, Lang::T(Lang::PRESET_NONE_SAVED));
       }
       ImGui::EndCombo();
     }
@@ -1718,13 +1717,13 @@ void MainWindow::RenderTopBar() {
                                                ? IM_COL32(60, 180, 80, 255)
                                                : IM_COL32(60, 60, 120, 255));
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(80, 200, 100, 255));
-    if (ImGui::Button(u8"저장")) {
+    if (ImGui::Button(Lang::T(Lang::BTN_SAVE))) {
       int limit = GetPresetLimit();
       if (limit == 0) {
-        SetStatus(u8"유료 플랜에서만 프리셋을 저장할 수 있습니다.", Theme::COLOR_RED);
+        SetStatus(Lang::T(Lang::PRESET_PAID_ONLY), Theme::COLOR_RED);
       } else if (limit != -1 && (int)m_userPresets.size() >= limit) {
         char msg[128];
-        snprintf(msg, sizeof(msg), u8"최대 %d개만 저장 가능한 플랜입니다.", limit);
+        snprintf(msg, sizeof(msg), Lang::T(Lang::PRESET_LIMIT_FMT), limit);
         SetStatus(msg, Theme::COLOR_RED);
       } else {
         memset(m_newPresetName, 0, sizeof(m_newPresetName));
@@ -1741,7 +1740,7 @@ void MainWindow::RenderTopBar() {
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
                           canDelete ? IM_COL32(220, 60, 60, 255)
                                     : IM_COL32(60, 60, 60, 255));
-    if (ImGui::Button(u8"삭제") && canDelete)
+    if (ImGui::Button(Lang::T(Lang::BTN_DELETE)) && canDelete)
       m_deletePresetConfirm = true;
     ImGui::PopStyleColor(2);
   }
@@ -1766,10 +1765,10 @@ void MainWindow::RenderTopBar() {
   if (!m_isEqEnabled)
     std::snprintf(powerLabel, sizeof(powerLabel), "POWER OFF");
   else if (eqPerApp)
-    std::snprintf(powerLabel, sizeof(powerLabel), u8"POWER ON (앱 %zu)",
+    std::snprintf(powerLabel, sizeof(powerLabel), Lang::T(Lang::POWER_ON_APPS_FMT),
                   eqIncludedCount);
   else
-    std::snprintf(powerLabel, sizeof(powerLabel), u8"POWER ON (전체)");
+    std::snprintf(powerLabel, sizeof(powerLabel), Lang::T(Lang::POWER_ON_ALL));
 
   float powerW = ImGui::CalcTextSize(powerLabel).x + UIScale::Px(24.0f);
   {
@@ -1794,7 +1793,7 @@ void MainWindow::RenderTopBar() {
     bool apoOk;
     {
       std::lock_guard<std::mutex> lk(m_defaultDeviceMutex);
-      name = m_defaultDeviceName.empty() ? "기본 출력 장치" : m_defaultDeviceName;
+      name = m_defaultDeviceName.empty() ? Lang::T(Lang::DEVICE_DEFAULT_OUTPUT) : m_defaultDeviceName;
       apoOk = m_defaultDeviceApoRegistered;
     }
     ImGui::BeginChild("##devlabel", ImVec2(devW, ImGui::GetFrameHeight()), false, ImGuiWindowFlags_NoScrollbar);
@@ -1802,7 +1801,7 @@ void MainWindow::RenderTopBar() {
     ImGui::TextColored(Theme::TEXT_WHITE, "%s", name.c_str());
     if (!apoOk) {
       ImGui::SameLine(0, UIScale::Px(6));
-      ImGui::TextColored(Theme::COLOR_RED, u8"- 장치설정 요함");
+      ImGui::TextColored(Theme::COLOR_RED, Lang::T(Lang::DEVICE_SETUP_REQUIRED));
     }
     ImGui::EndChild();
   }
@@ -1866,7 +1865,7 @@ void MainWindow::RenderTopBar() {
               GetModuleFileNameA(nullptr, exeP, MAX_PATH);
               std::filesystem::path curDir = std::filesystem::path(exeP).parent_path();
               std::string toolExe = "";
-              const char *installed = "C:\\Program Files\\SoundMate Equalizer\\SoundMate_setup.exe";
+              const std::string installed = SoundMatePaths::SetupExeA();
               if (std::filesystem::exists(installed)) {
                 toolExe = installed;
               } else {
@@ -1879,10 +1878,10 @@ void MainWindow::RenderTopBar() {
                 }
               }
               if (toolExe.empty()) {
-                SetStatus("SoundMate_setup.exe를 찾을 수 없습니다", Theme::COLOR_RED);
+                SetStatus(Lang::T(Lang::SETUP_EXE_NOT_FOUND), Theme::COLOR_RED);
                 return;
               }
-              SetStatus("현재 장치에 EQ 엔진 설치 중...", Theme::TEXT_WHITE);
+              SetStatus(Lang::T(Lang::INSTALLING_ENGINE), Theme::TEXT_WHITE);
               SHELLEXECUTEINFOA sei = {sizeof(sei)};
               sei.cbSize = sizeof(sei);
               sei.lpVerb = "runas";
@@ -1892,10 +1891,10 @@ void MainWindow::RenderTopBar() {
               if (ShellExecuteExA(&sei)) {
                 WaitForSingleObject(sei.hProcess, 30000);
                 CloseHandle(sei.hProcess);
-                SetStatus("설정 완료! 현재 장치에 엔진이 주입되었습니다.", Theme::COLOR_GREEN);
+                SetStatus(Lang::T(Lang::INSTALL_ENGINE_DONE), Theme::COLOR_GREEN);
                 FetchAudioDevices();
               } else {
-                SetStatus("설정 실패 (권한 거부)", Theme::COLOR_RED);
+                SetStatus(Lang::T(Lang::INSTALL_ENGINE_DENIED), Theme::COLOR_RED);
               }
             }).detach();
         },
@@ -1907,7 +1906,7 @@ void MainWindow::RenderTopBar() {
                 [this](const std::string &pref) {
                   m_userPreference = pref;
                   g_recordManager.SaveUserTendency(pref, {});
-                  SetStatus(u8"취향이 저장되었습니다.", Theme::COLOR_GREEN);
+                  SetStatus(Lang::T(Lang::PREFERENCES_SAVED), Theme::COLOR_GREEN);
                   std::thread([pref]() {
                     std::vector<std::string> parts;
                     std::string s = pref;
@@ -1991,15 +1990,15 @@ void MainWindow::RenderTopBar() {
       }
     }
     if (ImGui::IsItemHovered())
-      ImGui::SetTooltip(m_isEqEnabled ? u8"EQ 켜짐 — 누르면 끕니다"
-                                      : u8"EQ 꺼짐 — 누르면 켭니다");
+      ImGui::SetTooltip(m_isEqEnabled ? Lang::T(Lang::EQ_ON_CLICK_TO_OFF)
+                                      : Lang::T(Lang::EQ_OFF_CLICK_TO_ON));
 
     // 오른쪽 — 앱 설정창. 오른쪽 모서리만 둥글게.
     if (segment("##appeq", powerW, gearW, ImDrawFlags_RoundCornersRight,
                 u8"⚙"))
       m_appEqOpen = !m_appEqOpen;
     if (ImGui::IsItemHovered())
-      ImGui::SetTooltip(u8"앱별 EQ 설정");
+      ImGui::SetTooltip(Lang::T(Lang::PER_APP_EQ_SETTINGS));
 
     // 다음 위젯(헬스 점)이 이어지도록 커서를 묶음 오른쪽 끝으로 옮긴다.
     ImGui::SetCursorScreenPos({origin.x + powerW + gearW, origin.y});
@@ -2610,7 +2609,7 @@ void MainWindow::RenderEQPanel() {
     ImVec2 textPos{pos.x + UIScale::Px(12), pos.y + UIScale::Px(10)};
     ImGui::SetCursorScreenPos(textPos);
     ImGui::TextColored(Theme::TEXT_DARK_GRAY,
-                       u8"※ 창이 좁아 15밴드로 표시 중 (창을 넓히면 31밴드 복구)");
+                       Lang::T(Lang::BANDS_COLLAPSED_15));
   }
 
   ImGui::SetCursorScreenPos({pos.x + UIScale::Px(12), pos.y + UIScale::Px(10)});
@@ -2724,9 +2723,8 @@ void MainWindow::RenderEQPanel() {
           ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1.0f), "!");
           if (ImGui::IsItemHovered()) {
             ImGui::BeginTooltip();
-            ImGui::Text("저역 + 큰 부스트는 베이스 타이밍을 늘어지게 만들 수 "
-                        "있습니다.");
-            ImGui::Text("(킥/베이스 어택이 ~3-5ms 늦게 도착)");
+            ImGui::Text(Lang::T(Lang::TOOLTIP_LOW_BOOST_TIMING));
+            ImGui::Text(Lang::T(Lang::TOOLTIP_LOW_BOOST_DELAY));
             ImGui::EndTooltip();
           }
         }
@@ -2791,7 +2789,7 @@ void MainWindow::RenderBottomBar() {
     m_eqGains31Master.assign(31, 0.f);
     SyncCurrentFromMaster();
     ApplyEQNoSave();
-    SetStatus(u8"플랫 EQ 적용.", Theme::TEXT_GRAY);
+    SetStatus(Lang::T(Lang::FLAT_EQ_APPLIED), Theme::TEXT_GRAY);
   };
 
   auto applyRestored31 = [&](const std::vector<float> &gains31) {
@@ -2819,7 +2817,7 @@ void MainWindow::RenderBottomBar() {
     if (m_aiOriginalGains31.size() == 31 &&
         !m_aiOriginalSongKey.empty() && m_aiOriginalSongKey == curKey) {
       applyRestored31(m_aiOriginalGains31);
-      SetStatus(u8"EQ 복원 완료.", Theme::COLOR_GREEN);
+      SetStatus(Lang::T(Lang::EQ_RESTORED), Theme::COLOR_GREEN);
       restored = true;
     }
 
@@ -2831,7 +2829,7 @@ void MainWindow::RenderBottomBar() {
         EQEntry *cached = g_recordManager.GetCachedEQ(title, artist);
         if (cached && cached->gains31.size() == 31) {
           applyRestored31(cached->gains31);
-          SetStatus(u8"EQ 복원 완료.", Theme::COLOR_GREEN);
+          SetStatus(Lang::T(Lang::EQ_RESTORED), Theme::COLOR_GREEN);
           restored = true;
           return true;
         }
@@ -2840,12 +2838,12 @@ void MainWindow::RenderBottomBar() {
     }
 
     if (!restored)
-      SetStatus(u8"복원할 EQ 기록이 없습니다.", Theme::TEXT_GRAY);
+      SetStatus(Lang::T(Lang::EQ_NO_HISTORY_TO_RESTORE), Theme::TEXT_GRAY);
   };
 
   auto resetAutoEq = [&]() {
     if (!hasSong) {
-      SetStatus(u8"현재 곡 정보가 없습니다.", Theme::TEXT_GRAY);
+      SetStatus(Lang::T(Lang::NO_CURRENT_TRACK_INFO), Theme::TEXT_GRAY);
       return;
     }
 
@@ -2868,7 +2866,7 @@ void MainWindow::RenderBottomBar() {
         m_eqGains31Master = cached->gains31;
         SyncCurrentFromMaster();
         ApplyEQNoSave();
-        SetStatus(u8"자동 EQ 재설정 완료.", Theme::COLOR_GREEN);
+        SetStatus(Lang::T(Lang::AUTO_EQ_REBUILT), Theme::COLOR_GREEN);
         appliedCached = true;
         return true;
       }
@@ -2878,12 +2876,12 @@ void MainWindow::RenderBottomBar() {
       return;
 
     if (!aiEligible) {
-      SetStatus(u8"자동 EQ 기록이 없습니다. Pro 플랜에서 다시 분석할 수 있습니다.",
+      SetStatus(Lang::T(Lang::AUTO_EQ_NO_HISTORY_PRO),
                 Theme::COLOR_ORANGE);
       return;
     }
     if (noSongInfo) {
-      SetStatus(u8"곡 정보가 없어 자동 EQ를 다시 만들 수 없습니다.",
+      SetStatus(Lang::T(Lang::AUTO_EQ_NEEDS_TRACK),
                 Theme::TEXT_GRAY);
       return;
     }
@@ -2894,7 +2892,7 @@ void MainWindow::RenderBottomBar() {
 
   auto deleteSongEq = [&]() {
     if (!hasSong) {
-      SetStatus(u8"삭제할 곡 정보가 없습니다.", Theme::TEXT_GRAY);
+      SetStatus(Lang::T(Lang::NO_TRACK_TO_DELETE), Theme::TEXT_GRAY);
       return;
     }
 
@@ -2905,8 +2903,8 @@ void MainWindow::RenderBottomBar() {
 
     m_aiOriginalGains31.clear();
     m_aiOriginalSongKey.clear();
-    SetStatus(removed ? u8"이 곡 EQ 기록을 삭제했습니다."
-                      : u8"삭제할 EQ 기록이 없습니다.",
+    SetStatus(removed ? Lang::T(Lang::TRACK_EQ_DELETED)
+                      : Lang::T(Lang::NO_EQ_TO_DELETE),
               removed ? Theme::COLOR_GREEN : Theme::TEXT_GRAY);
   };
 
@@ -2926,7 +2924,7 @@ void MainWindow::RenderBottomBar() {
     ImGui::BeginDisabled(true);
     char placeholder[160];
     std::snprintf(placeholder, sizeof(placeholder),
-                  u8"곡 정보가 없어서 AI 사용이 불가능 합니다");
+                  Lang::T(Lang::AI_NEEDS_TRACK_INFO));
     ImGui::InputText("##prompt_nosong", placeholder, sizeof(placeholder),
                      ImGuiInputTextFlags_ReadOnly);
     ImGui::EndDisabled();
@@ -2934,7 +2932,7 @@ void MainWindow::RenderBottomBar() {
     ImGui::SameLine(0, gap);
 
     ImGui::BeginDisabled(true);
-    ImGui::Button("입력", UIScale::V(80, 0));
+    ImGui::Button(Lang::T(Lang::BTN_SEND), UIScale::V(80, 0));
     ImGui::EndDisabled();
     ImGui::SameLine(0, gap);
   } else if (!aiEligible) {
@@ -2944,8 +2942,7 @@ void MainWindow::RenderBottomBar() {
     ImGui::BeginDisabled(true);
     char placeholder[160];
     std::snprintf(placeholder, sizeof(placeholder),
-                  u8"Pro 플랜 구독 시 AI 채팅 사용 가능 — 우측 버튼으로 "
-                  u8"업그레이드하세요");
+                  Lang::T(Lang::AI_CHAT_PRO_ONLY_PLACEHOLDER));
     ImGui::InputText("##prompt_locked", placeholder, sizeof(placeholder),
                      ImGuiInputTextFlags_ReadOnly);
     ImGui::EndDisabled();
@@ -2955,7 +2952,7 @@ void MainWindow::RenderBottomBar() {
     ImGui::PushStyleColor(ImGuiCol_Button, Theme::ToU32(Theme::GRAD_START));
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
                           Theme::ToU32(Theme::GRAD_END));
-    if (ImGui::Button(u8"Pro 구독하기", UIScale::V(130, 0))) {
+    if (ImGui::Button(Lang::T(Lang::SUBSCRIBE_PRO), UIScale::V(130, 0))) {
       m_showUpgradePopup = true;
     }
     ImGui::PopStyleColor(2);
@@ -2967,28 +2964,28 @@ void MainWindow::RenderBottomBar() {
     ImGui::SameLine(0, gap);
 
     ImGui::PushStyleColor(ImGuiCol_Button, Theme::ToU32(Theme::BTN_SECONDARY));
-    if (ImGui::Button("입력", UIScale::V(80, 0)) || enter)
+    if (ImGui::Button(Lang::T(Lang::BTN_SEND), UIScale::V(80, 0)) || enter)
       TriggerAIGeneration();
     ImGui::PopStyleColor();
     ImGui::SameLine(0, gap);
   }
 
   ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(61, 61, 61, 255));
-  if (ImGui::Button(u8"EQ 관리", UIScale::V(104, 0)))
+  if (ImGui::Button(Lang::T(Lang::EQ_MANAGE), UIScale::V(104, 0)))
     ImGui::OpenPopup("##eq_manage_menu");
   ImGui::PopStyleColor();
 
   if (ImGui::BeginPopup("##eq_manage_menu")) {
-    if (ImGui::MenuItem(u8"플랫 EQ"))
+    if (ImGui::MenuItem(Lang::T(Lang::FLAT_EQ)))
       flatEq();
 
     ImGui::BeginDisabled(!hasSong);
-    if (ImGui::MenuItem(u8"EQ 복원"))
+    if (ImGui::MenuItem(Lang::T(Lang::RESTORE_EQ)))
       restoreEq();
     ImGui::Separator();
-    if (ImGui::MenuItem(u8"자동 EQ 재설정"))
+    if (ImGui::MenuItem(Lang::T(Lang::REBUILD_AUTO_EQ)))
       resetAutoEq();
-    if (ImGui::MenuItem(u8"이 곡 EQ 기록 삭제"))
+    if (ImGui::MenuItem(Lang::T(Lang::DELETE_TRACK_EQ)))
       deleteSongEq();
     ImGui::EndDisabled();
 
@@ -3019,7 +3016,7 @@ void MainWindow::RenderStatusBar() {
 //   선택한 앱에만     — 체크한 앱에만 걸고 나머지는 원음.
 //
 // [왜 기본이 "모든 소리"인가] 이 창을 한 번도 안 여는 사용자에게는 아무것도
-//   바뀌지 않아야 한다. "선택한 앱에만" 이 기본이면 처음 켰을 때 어디에도
+//   바뀌지 않아야 한다. Lang::T(Lang::TO_SELECTED_APPS) 이 기본이면 처음 켰을 때 어디에도
 //   EQ 가 안 걸려 고장으로 읽힌다.
 //
 // [왜 앱이 안 보일 수 있는가] 신원은 시각 대조로 맞춘다. 세션이 Active 로
@@ -3036,7 +3033,7 @@ void MainWindow::RenderAppEqWindow() {
   ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, UIScale::Px(8.0f));
   ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, UIScale::Px(6.0f));
 
-  const bool open = ImGui::Begin(u8"앱별 EQ##app_eq", &m_appEqOpen,
+  const bool open = ImGui::Begin(Lang::T(Lang::WIN_PER_APP_EQ), &m_appEqOpen,
                                  ImGuiWindowFlags_NoCollapse);
   if (!open) {
     ImGui::End();
@@ -3045,9 +3042,9 @@ void MainWindow::RenderAppEqWindow() {
   }
 
   if (!m_appEq.Available()) {
-    ImGui::TextColored(Theme::TEXT_GRAY, u8"오디오 세션을 감시할 수 없습니다.");
+    ImGui::TextColored(Theme::TEXT_GRAY, Lang::T(Lang::SESSION_WATCH_FAILED));
     ImGui::Spacing();
-    ImGui::TextWrapped(u8"앱을 다시 시작하면 복구될 수 있습니다.");
+    ImGui::TextWrapped(Lang::T(Lang::SESSION_WATCH_RESTART_HINT));
     ImGui::End();
     ImGui::PopStyleVar(4);
     return;
@@ -3059,7 +3056,7 @@ void MainWindow::RenderAppEqWindow() {
   auto included = m_appEq.IncludedApps();
 
   // ── 모드 선택 ──────────────────────────────────────────────────────────
-  ImGui::TextColored(Theme::TEXT_WHITE, u8"EQ 를 어디에 걸까요");
+  ImGui::TextColored(Theme::TEXT_WHITE, Lang::T(Lang::WHERE_TO_APPLY_EQ));
   ImGui::Spacing();
 
   {
@@ -3084,24 +3081,24 @@ void MainWindow::RenderAppEqWindow() {
       ImGui::PopStyleColor(3);
     };
 
-    modeButton(u8"모든 소리에", !perApp, AppEqManager::Mode::All);
+    modeButton(Lang::T(Lang::TO_ALL_SOUND), !perApp, AppEqManager::Mode::All);
     ImGui::SameLine(0, gap);
-    modeButton(u8"선택한 앱에만", perApp, AppEqManager::Mode::Selected);
+    modeButton(Lang::T(Lang::TO_SELECTED_APPS), perApp, AppEqManager::Mode::Selected);
   }
 
   ImGui::Spacing();
   ImGui::TextColored(Theme::TEXT_GRAY,
                      perApp
-                         ? u8"체크한 앱에만 걸립니다. 나머지는 원음."
-                         : u8"모든 소리에 걸립니다. 예전과 같은 방식입니다.");
+                         ? Lang::T(Lang::APPLY_CHECKED_ONLY_HINT)
+                         : Lang::T(Lang::APPLY_ALL_HINT));
 
   ImGui::Spacing();
   ImGui::Spacing();
 
   // ── 앱 목록 ────────────────────────────────────────────────────────────
-  //   "모든 소리에" 모드에서는 고를 이유가 없으므로 통째로 비활성.
+  //   Lang::T(Lang::TO_ALL_SOUND) 모드에서는 고를 이유가 없으므로 통째로 비활성.
   ImGui::TextColored(perApp ? Theme::GRAD_START : Theme::TEXT_GRAY,
-                     u8"재생 중");
+                     Lang::T(Lang::NOW_PLAYING));
   ImGui::Spacing();
 
   ImGui::BeginDisabled(!perApp);
@@ -3120,9 +3117,9 @@ void MainWindow::RenderAppEqWindow() {
     if (playing.empty()) {
       ImGui::Spacing();
       ImGui::Indent(UIScale::Px(6.0f));
-      ImGui::TextColored(Theme::TEXT_GRAY, u8"소리를 내는 앱이 없습니다");
+      ImGui::TextColored(Theme::TEXT_GRAY, Lang::T(Lang::NO_APPS_PLAYING));
       ImGui::Spacing();
-      ImGui::TextWrapped(u8"음악이나 영상을 재생하면 여기 나타납니다.");
+      ImGui::TextWrapped(Lang::T(Lang::NO_APPS_PLAYING_HINT));
       ImGui::Unindent(UIScale::Px(6.0f));
     } else {
       for (const auto &a : playing) {
@@ -3133,7 +3130,7 @@ void MainWindow::RenderAppEqWindow() {
         const ImVec2 rowStart = ImGui::GetCursorScreenPos();
         const float rowW = ImGui::GetContentRegionAvail().x;
 
-        // "모든 소리에" 모드에서는 전부 걸리는 상태로 보여준다.
+        // Lang::T(Lang::TO_ALL_SOUND) 모드에서는 전부 걸리는 상태로 보여준다.
         const bool on = perApp ? a.included : true;
 
         if (ImGui::InvisibleButton("##row", ImVec2(rowW, rowH)) && perApp)
@@ -3185,9 +3182,9 @@ void MainWindow::RenderAppEqWindow() {
         //   붙인다 — 숨기면 "왜 딴 앱에 걸리지?" 를 영영 알 수 없다.
         const bool applied = perApp ? a.eqApplied : true;
         const char *badge =
-            a.confirmed ? (applied ? u8"EQ 적용" : u8"원음")
-                        : (applied ? u8"EQ 적용 · 구분 불가"
-                                   : u8"원음 · 구분 불가");
+            a.confirmed ? (applied ? Lang::T(Lang::EQ_APPLIED) : Lang::T(Lang::LBL_BYPASS))
+                        : (applied ? Lang::T(Lang::EQ_APPLIED_AMBIGUOUS)
+                                   : Lang::T(Lang::BYPASS_AMBIGUOUS));
         const ImVec2 bs = ImGui::CalcTextSize(badge);
         dl->AddText(ImVec2(rowStart.x + rowW - bs.x - UIScale::Px(10.0f), tp.y),
                     fade(applied ? Theme::GRAD_START : Theme::TEXT_GRAY),
@@ -3205,9 +3202,9 @@ void MainWindow::RenderAppEqWindow() {
   // ── 기억된 앱 ──────────────────────────────────────────────────────────
   //   지금 소리를 안 내도 목록에 남는다. 다시 소리를 내면 자동으로 적용된다.
   ImGui::TextColored(perApp ? Theme::GRAD_START : Theme::TEXT_GRAY,
-                     u8"기억된 앱");
+                     Lang::T(Lang::REMEMBERED_APPS));
   ImGui::SameLine();
-  ImGui::TextColored(Theme::TEXT_GRAY, u8"— 다시 켜면 자동 적용");
+  ImGui::TextColored(Theme::TEXT_GRAY, Lang::T(Lang::REMEMBERED_APPS_HINT));
   ImGui::Spacing();
 
   {
@@ -3215,7 +3212,7 @@ void MainWindow::RenderAppEqWindow() {
     if (included.empty()) {
       ImGui::Spacing();
       ImGui::Indent(UIScale::Px(6.0f));
-      ImGui::TextColored(Theme::TEXT_GRAY, u8"없습니다");
+      ImGui::TextColored(Theme::TEXT_GRAY, Lang::T(Lang::LBL_NONE));
       ImGui::Unindent(UIScale::Px(6.0f));
     } else {
       for (const auto &name : included) {
@@ -3228,7 +3225,7 @@ void MainWindow::RenderAppEqWindow() {
                         ImGui::GetCursorPosX());
         ImGui::PushStyleColor(ImGuiCol_Button,
                               Theme::ToU32(Theme::BTN_SECONDARY));
-        if (ImGui::SmallButton(u8"삭제"))
+        if (ImGui::SmallButton(Lang::T(Lang::BTN_DELETE)))
           m_appEq.ForgetApp(name);
         ImGui::PopStyleColor();
         ImGui::PopID();
@@ -3240,7 +3237,7 @@ void MainWindow::RenderAppEqWindow() {
 
   ImGui::Spacing();
   ImGui::TextColored(Theme::TEXT_GRAY,
-                     u8"앱이 안 보이면 곡을 넘기거나 멈췄다 재생해 보세요.");
+                     Lang::T(Lang::APP_MISSING_HINT));
 
   // [진단] 앱이 목록에 안 뜰 때 어느 단계에서 끊겼는지 보여준다.
   //   SHM   : 공유 메모리 연결 + 버전 (스트림 표는 3 이상)
@@ -3255,13 +3252,13 @@ void MainWindow::RenderAppEqWindow() {
     ImGui::Spacing();
     ImGui::TextColored(
         Theme::TEXT_GRAY,
-        u8"진단  SHM %s(v%u)  스트림 %d  콜백 %lu  알림 %lu  대기 %d  대응 %d",
+        Lang::T(Lang::DIAG_LINE1_FMT),
         d.shmMapped ? "O" : "X", d.shmVersion, d.activeSlots, d.rawCallbacks,
         d.sessionEvents, d.pendingEvents, d.matched);
     // 좀비 : 죽은 audiodg 가 남기고 간 칸을 거둔 누적 수.
     //        오래 켜둔 채 계속 올라가면 audiodg 가 반복해서 죽는 중이다.
     ImGui::TextColored(Theme::TEXT_GRAY,
-                       u8"      미확인 %d  재생세션 %d  좀비 %lu",
+                       Lang::T(Lang::DIAG_LINE2_FMT),
                        d.unidentified, d.freeSessions, d.staleSlots);
   }
 
@@ -3272,7 +3269,7 @@ void MainWindow::RenderAppEqWindow() {
 // ── 백업 스캔 ────────────────────────────────────────────────────────────────
 void MainWindow::ScanBackups() {
   m_backupList.clear();
-  std::string backupDir = "C:\\Program Files\\SoundMate Equalizer\\backups";
+  const std::string backupDir = SoundMatePaths::BackupsDirA();
   if (!std::filesystem::exists(backupDir))
     return;
 
@@ -3336,12 +3333,12 @@ void MainWindow::RenderRestorePopup() {
   ImGui::PushStyleColor(ImGuiCol_WindowBg, Theme::ToU32(Theme::PANEL_COLOR));
   ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, UIScale::Px(12.0f));
 
-  ImGui::Begin("백업 복원##restore_popup", &m_restorePopupOpen,
+  ImGui::Begin(Lang::T(Lang::WIN_RESTORE_BACKUP), &m_restorePopupOpen,
                ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize |
                    ImGuiWindowFlags_NoTitleBar);
 
   // 제목
-  ImGui::TextColored(Theme::TEXT_WHITE, "  백업에서 복원");
+  ImGui::TextColored(Theme::TEXT_WHITE, Lang::T(Lang::RESTORE_FROM_BACKUP));
   ImDrawList *dl = ImGui::GetWindowDrawList();
   ImVec2 p = ImGui::GetCursorScreenPos();
   float cw = ImGui::GetContentRegionAvail().x;
@@ -3350,17 +3347,17 @@ void MainWindow::RenderRestorePopup() {
   ImGui::Dummy(UIScale::V(0, 8));
 
   if (m_backupList.empty()) {
-    ImGui::TextColored(Theme::TEXT_GRAY, "저장된 백업이 없습니다.");
-    ImGui::TextColored(Theme::TEXT_GRAY, "먼저 '자동 설정'을 실행하세요.");
+    ImGui::TextColored(Theme::TEXT_GRAY, Lang::T(Lang::NO_BACKUPS));
+    ImGui::TextColored(Theme::TEXT_GRAY, Lang::T(Lang::RUN_AUTO_SETUP_FIRST));
   } else {
-    ImGui::TextColored(Theme::TEXT_GRAY, "복원할 백업을 선택하세요 (최신순):");
+    ImGui::TextColored(Theme::TEXT_GRAY, Lang::T(Lang::PICK_BACKUP));
     ImGui::Spacing();
 
     // 백업 목록 (스크롤 가능)
     ImGui::BeginChild("##backup_list", UIScale::V(0, 240), true);
     for (int i = 0; i < (int)m_backupList.size(); i++) {
       bool isSelected = (m_selectedBackup == i);
-      std::string label = (i == 0) ? m_backupList[i].displayName + " (최신)"
+      std::string label = (i == 0) ? m_backupList[i].displayName + Lang::T(Lang::BACKUP_NEWEST_SUFFIX)
                                    : m_backupList[i].displayName;
 
       if (isSelected) {
@@ -3393,7 +3390,7 @@ void MainWindow::RenderRestorePopup() {
     ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(80, 80, 80, 255));
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(80, 80, 80, 255));
   }
-  if (ImGui::Button("복원하기", ImVec2(btnW, UIScale::Px(36))) && hasSelection) {
+  if (ImGui::Button(Lang::T(Lang::BTN_RESTORE), ImVec2(btnW, UIScale::Px(36))) && hasSelection) {
     if (m_selectedBackup >= 0 && m_selectedBackup < (int)m_backupList.size()) {
       ExecuteRestore(m_backupList[m_selectedBackup].fullPath);
     }
@@ -3406,7 +3403,7 @@ void MainWindow::RenderRestorePopup() {
   // 취소 버튼
   ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(60, 60, 60, 255));
   ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(90, 90, 90, 255));
-  if (ImGui::Button("취소", ImVec2(btnW, UIScale::Px(36)))) {
+  if (ImGui::Button(Lang::T(Lang::BTN_CANCEL), ImVec2(btnW, UIScale::Px(36)))) {
     m_restorePopupOpen = false;
   }
   ImGui::PopStyleColor(2);
@@ -3428,8 +3425,8 @@ void MainWindow::ExecuteRestore(const std::string &filePath) {
     // render device's FxProperties, restores Realtek originals from the
     // PreMixChild/PostMixChild backups, deletes CLSID + AudioProcessingObjects
     // entries, and restarts the audio services.
-    const char *installed =
-        "C:\\Program Files\\SoundMate Equalizer\\SoundMate_reset.exe";
+    const std::string installed =
+        SoundMatePaths::UnderA("SoundMate_reset.exe");
     if (std::filesystem::exists(installed)) {
       cleanupExe = installed;
     } else {
@@ -3448,11 +3445,11 @@ void MainWindow::ExecuteRestore(const std::string &filePath) {
     }
 
     if (cleanupExe.empty()) {
-      SetStatus("SoundMate_reset.exe를 찾을 수 없습니다", Theme::COLOR_RED);
+      SetStatus(Lang::T(Lang::RESET_EXE_NOT_FOUND), Theme::COLOR_RED);
       return;
     }
 
-    SetStatus("시스템 복구 및 순정화 작업 중...", Theme::TEXT_WHITE);
+    SetStatus(Lang::T(Lang::RECOVERY_RUNNING), Theme::TEXT_WHITE);
 
     SHELLEXECUTEINFOA sei = {sizeof(sei)};
     sei.cbSize = sizeof(sei);
@@ -3464,11 +3461,11 @@ void MainWindow::ExecuteRestore(const std::string &filePath) {
     if (ShellExecuteExA(&sei)) {
       WaitForSingleObject(sei.hProcess, INFINITE);
       CloseHandle(sei.hProcess);
-      SetStatus("복구 완료! 순정 오디오로 복원되었습니다.",
+      SetStatus(Lang::T(Lang::RECOVERY_DONE),
                 Theme::ACCENT_COLOR);
       FetchAudioDevices();
     } else {
-      SetStatus("복구 도구 실행 실패 (권한 거부)", Theme::COLOR_RED);
+      SetStatus(Lang::T(Lang::RECOVERY_DENIED), Theme::COLOR_RED);
     }
   }).detach();
 }
@@ -3497,15 +3494,15 @@ void MainWindow::RenderHealthDot() {
   switch (m_healthReport.status) {
   case SoundMate::EngineHealthMonitor::Status::Green:
     color = IM_COL32(80, 220, 100, 255);
-    label = "정상";
+    label = Lang::T(Lang::STATUS_OK);
     break;
   case SoundMate::EngineHealthMonitor::Status::Yellow:
     color = IM_COL32(240, 200, 60, 255);
-    label = "대기";
+    label = Lang::T(Lang::STATUS_IDLE);
     break;
   default:
     color = IM_COL32(230, 70, 70, 255);
-    label = "문제 있음";
+    label = Lang::T(Lang::STATUS_PROBLEM);
     break;
   }
 
@@ -3523,20 +3520,20 @@ void MainWindow::RenderHealthDot() {
 
   if (ImGui::IsItemHovered()) {
     ImGui::BeginTooltip();
-    ImGui::Text("엔진 상태: %s", label);
+    ImGui::Text(Lang::T(Lang::ENGINE_STATE_FMT), label);
     ImGui::Separator();
-    ImGui::Text("현재 장치:   %s", m_healthReport.currentDeviceTargeted
-                                       ? "SoundMate 설치됨"
-                                       : "미설치");
+    ImGui::Text(Lang::T(Lang::CURRENT_DEVICE_FMT), m_healthReport.currentDeviceTargeted
+                                       ? Lang::T(Lang::SOUNDMATE_INSTALLED)
+                                       : Lang::T(Lang::NOT_INSTALLED));
     if (!m_healthReport.currentDeviceName.empty()) {
       ImGui::TextDisabled("(%s)", m_healthReport.currentDeviceName.c_str());
     }
-    ImGui::Text("오디오 흐름: %s  (%s)",
-                m_healthReport.audioFlowing ? "감지됨" : "없음",
+    ImGui::Text(Lang::T(Lang::AUDIO_FLOW_FMT),
+                m_healthReport.audioFlowing ? Lang::T(Lang::LBL_DETECTED) : Lang::T(Lang::NONE_SHORT),
                 m_healthReport.normLogLastSeen.c_str());
     if constexpr (SoundMate::Features::kG1_2_DiagnosticPanel_Effective) {
       ImGui::Separator();
-      ImGui::TextDisabled("클릭하면 상세 진단");
+      ImGui::TextDisabled(Lang::T(Lang::CLICK_FOR_DIAGNOSTICS));
     }
     ImGui::EndTooltip();
   }
@@ -3554,43 +3551,43 @@ void MainWindow::RenderHealthDot() {
 void MainWindow::RenderDiagnosticPanel() {
   ImGui::SetNextWindowSize(UIScale::ClampPopupSize(UIScale::V(520, 360)),
                            ImGuiCond_FirstUseEver);
-  if (ImGui::Begin("엔진 진단", &m_diagnosticOpen,
+  if (ImGui::Begin(Lang::T(Lang::WIN_DIAGNOSTICS), &m_diagnosticOpen,
                    ImGuiWindowFlags_NoCollapse)) {
-    ImGui::Text("종합 상태");
+    ImGui::Text(Lang::T(Lang::OVERALL_STATE));
     ImGui::Separator();
     const char *statusName = "?";
     switch (m_healthReport.status) {
     case SoundMate::EngineHealthMonitor::Status::Green:
-      statusName = "🟢 정상";
+      statusName = Lang::T(Lang::STATE_GREEN);
       break;
     case SoundMate::EngineHealthMonitor::Status::Yellow:
-      statusName = "🟡 대기";
+      statusName = Lang::T(Lang::STATE_YELLOW);
       break;
     case SoundMate::EngineHealthMonitor::Status::Red:
-      statusName = "🔴 문제";
+      statusName = Lang::T(Lang::STATE_RED);
       break;
     }
     ImGui::TextUnformatted(statusName);
     ImGui::Spacing();
 
-    ImGui::Text("개별 체크");
+    ImGui::Text(Lang::T(Lang::INDIVIDUAL_CHECKS));
     ImGui::Separator();
-    ImGui::BulletText("현재 장치:    %s", m_healthReport.currentDeviceTargeted
-                                              ? "SoundMate 설치됨"
-                                              : "SoundMate 없음");
-    ImGui::BulletText("오디오 흐름:  %s  (마지막: %s)",
-                      m_healthReport.audioFlowing ? "흐름 감지" : "정지",
+    ImGui::BulletText(Lang::T(Lang::CURRENT_DEVICE_WIDE_FMT), m_healthReport.currentDeviceTargeted
+                                              ? Lang::T(Lang::SOUNDMATE_INSTALLED)
+                                              : Lang::T(Lang::SOUNDMATE_ABSENT));
+    ImGui::BulletText(Lang::T(Lang::AUDIO_FLOW_LAST_FMT),
+                      m_healthReport.audioFlowing ? Lang::T(Lang::FLOW_DETECTED) : Lang::T(Lang::FLOW_STOPPED),
                       m_healthReport.normLogLastSeen.c_str());
     if (!m_healthReport.currentDeviceName.empty()) {
       ImGui::Indent();
-      ImGui::TextDisabled("이름: %s", m_healthReport.currentDeviceName.c_str());
+      ImGui::TextDisabled(Lang::T(Lang::NAME_FMT), m_healthReport.currentDeviceName.c_str());
       ImGui::TextDisabled("GUID: %s", m_healthReport.currentDeviceGuid.c_str());
       ImGui::Unindent();
     }
     ImGui::Spacing();
 
     if (!m_healthReport.issues.empty()) {
-      ImGui::Text("진단 결과");
+      ImGui::Text(Lang::T(Lang::LBL_DIAGNOSIS));
       ImGui::Separator();
       for (const auto &issue : m_healthReport.issues) {
         ImGui::TextWrapped("• %s", issue.c_str());
@@ -3598,11 +3595,10 @@ void MainWindow::RenderDiagnosticPanel() {
       ImGui::Spacing();
     }
 
-    ImGui::TextDisabled("(Phase 2 에서 [현재 장치 재설치] / [모두 복원] 버튼 + "
-                        "WASAPI Exclusive 탐지 + FAQ 링크 추가 예정)");
+    ImGui::TextDisabled(Lang::T(Lang::DIAG_PHASE2_NOTE));
 
     ImGui::Spacing();
-    if (ImGui::Button("닫기", UIScale::V(120, 0)))
+    if (ImGui::Button(Lang::T(Lang::BTN_CLOSE), UIScale::V(120, 0)))
       m_diagnosticOpen = false;
   }
   ImGui::End();
@@ -3630,7 +3626,7 @@ int MainWindow::GetPresetLimit() {
 
 // ── 프리셋 파일 경로 ───────────────────────────────────────────────────────
 static std::string PresetFilePath() {
-  return "C:\\Program Files\\SoundMate Equalizer\\config\\user_presets.json";
+  return SoundMatePaths::ConfigDirA() + "\\user_presets.json";
 }
 
 // ── JSON에서 프리셋 목록 로드 ──────────────────────────────────────────────
@@ -3744,7 +3740,7 @@ void MainWindow::RenderPresetPopups() {
                              ImGuiWindowFlags_NoTitleBar |
                                  ImGuiWindowFlags_NoResize |
                                  ImGuiWindowFlags_AlwaysAutoResize)) {
-    ImGui::TextColored(Theme::TEXT_WHITE, "프리셋 저장");
+    ImGui::TextColored(Theme::TEXT_WHITE, Lang::T(Lang::SAVE_PRESET));
     ImDrawList *dl = ImGui::GetWindowDrawList();
     ImVec2 p = ImGui::GetCursorScreenPos();
     float cw = ImGui::GetContentRegionAvail().x;
@@ -3753,9 +3749,9 @@ void MainWindow::RenderPresetPopups() {
     ImGui::Dummy(UIScale::V(0, 8));
 
     ImGui::TextColored(Theme::TEXT_GRAY,
-                       "현재 슬라이더 값을 프리셋으로 저장합니다.");
+                       Lang::T(Lang::SAVE_PRESET_DESC));
     ImGui::Spacing();
-    ImGui::TextColored(Theme::TEXT_GRAY, "이름:");
+    ImGui::TextColored(Theme::TEXT_GRAY, Lang::T(Lang::NAME_LABEL));
     ImGui::SetNextItemWidth(cw);
     bool enter = ImGui::InputText("##preset_name_input", m_newPresetName,
                                   sizeof(m_newPresetName),
@@ -3765,10 +3761,10 @@ void MainWindow::RenderPresetPopups() {
     // 플랜 제한 표시
     int limit = GetPresetLimit();
     if (limit == -1) {
-      ImGui::TextColored(Theme::COLOR_CYAN, "Expert: 무제한 저장 가능");
+      ImGui::TextColored(Theme::COLOR_CYAN, Lang::T(Lang::PRESET_EXPERT_UNLIMITED));
     } else {
       char limitMsg[64];
-      snprintf(limitMsg, sizeof(limitMsg), "현재 %d / %d 개",
+      snprintf(limitMsg, sizeof(limitMsg), Lang::T(Lang::PRESET_COUNT_FMT),
                (int)m_userPresets.size(), limit);
       ImGui::TextColored(Theme::TEXT_DARK_GRAY, "%s", limitMsg);
     }
@@ -3780,14 +3776,14 @@ void MainWindow::RenderPresetPopups() {
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
                           Theme::ToU32(Theme::GRAD_END));
     ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(0, 0, 0, 255));
-    bool doSave = ImGui::Button("저장", ImVec2(btnW, UIScale::Px(36))) || enter;
+    bool doSave = ImGui::Button(Lang::T(Lang::BTN_SAVE), ImVec2(btnW, UIScale::Px(36))) || enter;
     ImGui::PopStyleColor(3);
     ImGui::SameLine(0, UIScale::Px(8));
 
     // 취소 버튼
     ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(60, 60, 60, 255));
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(90, 90, 90, 255));
-    bool doCancel = ImGui::Button("취소", ImVec2(btnW, UIScale::Px(36)));
+    bool doCancel = ImGui::Button(Lang::T(Lang::BTN_CANCEL), ImVec2(btnW, UIScale::Px(36)));
     ImGui::PopStyleColor(2);
 
     if (doSave) {
@@ -3809,7 +3805,7 @@ void MainWindow::RenderPresetPopups() {
       SaveUserPresets();
       m_selectedPresetIdx = (int)m_userPresets.size() - 1;
       m_presetModeActive = true;
-      SetStatus("프리셋 저장됨: " + name, Theme::COLOR_GREEN);
+      SetStatus(Lang::T(Lang::PRESET_SAVED_PREFIX) + name, Theme::COLOR_GREEN);
       ImGui::CloseCurrentPopup();
     }
     if (doCancel)
@@ -3842,9 +3838,9 @@ void MainWindow::RenderPresetPopups() {
                            m_selectedPresetIdx < (int)m_userPresets.size())
                               ? m_userPresets[m_selectedPresetIdx].name
                               : "";
-    ImGui::TextColored(Theme::TEXT_WHITE, "프리셋 삭제");
+    ImGui::TextColored(Theme::TEXT_WHITE, Lang::T(Lang::DELETE_PRESET));
     ImGui::Spacing();
-    ImGui::TextColored(Theme::TEXT_GRAY, "\"%s\" 를 삭제하시겠습니까?",
+    ImGui::TextColored(Theme::TEXT_GRAY, Lang::T(Lang::DELETE_PRESET_CONFIRM_FMT),
                        delName.c_str());
     ImGui::Spacing();
 
@@ -3853,14 +3849,14 @@ void MainWindow::RenderPresetPopups() {
 
     ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(180, 40, 40, 255));
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(220, 60, 60, 255));
-    if (ImGui::Button("삭제", ImVec2(btnW2, UIScale::Px(36)))) {
+    if (ImGui::Button(Lang::T(Lang::BTN_DELETE), ImVec2(btnW2, UIScale::Px(36)))) {
       if (m_selectedPresetIdx >= 0 &&
           m_selectedPresetIdx < (int)m_userPresets.size()) {
         m_userPresets.erase(m_userPresets.begin() + m_selectedPresetIdx);
         SaveUserPresets();
         m_selectedPresetIdx = -1;
         m_presetModeActive = false;
-        SetStatus("프리셋 삭제됨: " + delName, Theme::TEXT_GRAY);
+        SetStatus(Lang::T(Lang::PRESET_DELETED_PREFIX) + delName, Theme::TEXT_GRAY);
       }
       ImGui::CloseCurrentPopup();
     }
@@ -3869,7 +3865,7 @@ void MainWindow::RenderPresetPopups() {
 
     ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(60, 60, 60, 255));
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(90, 90, 90, 255));
-    if (ImGui::Button("취소", ImVec2(btnW2, UIScale::Px(36))))
+    if (ImGui::Button(Lang::T(Lang::BTN_CANCEL), ImVec2(btnW2, UIScale::Px(36))))
       ImGui::CloseCurrentPopup();
     ImGui::PopStyleColor(2);
 
@@ -3898,7 +3894,7 @@ void MainWindow::RenderExitPopup() {
                              ImGuiWindowFlags_NoTitleBar |
                                  ImGuiWindowFlags_NoResize |
                                  ImGuiWindowFlags_AlwaysAutoResize)) {
-    ImGui::TextColored(Theme::TEXT_WHITE, "SoundMate EQ 종료");
+    ImGui::TextColored(Theme::TEXT_WHITE, Lang::T(Lang::EXIT_TITLE));
     ImDrawList *dl = ImGui::GetWindowDrawList();
     ImVec2 p = ImGui::GetCursorScreenPos();
     float cw = ImGui::GetContentRegionAvail().x;
@@ -3906,7 +3902,7 @@ void MainWindow::RenderExitPopup() {
                 UIScale::Px(1.0f));
     ImGui::Dummy(UIScale::V(0, 8));
 
-    ImGui::TextColored(Theme::TEXT_GRAY, "프로그램을 완전히 종료하시겠습니까,\n아니면 트레이 아이콘으로 최소화하시겠습니까?");
+    ImGui::TextColored(Theme::TEXT_GRAY, Lang::T(Lang::EXIT_QUESTION));
     ImGui::Spacing();
     ImGui::Dummy(UIScale::V(0, 8));
 
@@ -3914,13 +3910,13 @@ void MainWindow::RenderExitPopup() {
     extern void AppMinimizeToTray();
     extern void AppExit();
 
-    if (PurpleButton("트레이 최소화", ImVec2(cw, UIScale::Px(36)))) {
+    if (PurpleButton(Lang::T(Lang::MINIMIZE_TO_TRAY_BTN), ImVec2(cw, UIScale::Px(36)))) {
       AppMinimizeToTray();
       ImGui::CloseCurrentPopup();
     }
     ImGui::Spacing();
 
-    if (ImGui::Button("프로그램 종료", ImVec2(cw, UIScale::Px(36)))) {
+    if (ImGui::Button(Lang::T(Lang::QUIT_APP), ImVec2(cw, UIScale::Px(36)))) {
       AppExit();
       ImGui::CloseCurrentPopup();
     }
@@ -3928,7 +3924,7 @@ void MainWindow::RenderExitPopup() {
 
     ImGui::PushStyleColor(ImGuiCol_Button, Theme::ToU32(Theme::COLOR_RED));
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(255, 100, 100, 255));
-    if (ImGui::Button("취소", ImVec2(cw, UIScale::Px(36)))) {
+    if (ImGui::Button(Lang::T(Lang::BTN_CANCEL), ImVec2(cw, UIScale::Px(36)))) {
       ImGui::CloseCurrentPopup();
     }
     ImGui::PopStyleColor(2);
@@ -4115,7 +4111,7 @@ void MainWindow::DownloadAndExecuteUpdate() {
     // 부분 다운로드 잔재 삭제 — 다음 retry 가 깨끗하게 받도록.
     std::error_code ec;
     std::filesystem::remove(installerPath, ec);
-    SetStatus(u8"업데이트 다운로드 실패", Theme::COLOR_RED);
+    SetStatus(Lang::T(Lang::UPDATE_DOWNLOAD_FAILED), Theme::COLOR_RED);
   }
 }
 
@@ -4141,22 +4137,22 @@ void MainWindow::RenderUpdatePopup() {
 
     // [강제 업데이트] mandatory 모드에서는 제목을 강조 + 경고 문구 추가
     if (m_isMandatoryUpdate) {
-      ImGui::TextColored(Theme::COLOR_RED, u8"⚠ 필수 업데이트");
+      ImGui::TextColored(Theme::COLOR_RED, Lang::T(Lang::UPDATE_REQUIRED_TITLE));
       ImGui::Spacing();
       ImGui::TextColored(Theme::TEXT_GRAY,
-                         u8"이 버전은 더 이상 지원되지 않습니다.");
+                         Lang::T(Lang::UPDATE_VERSION_UNSUPPORTED));
       ImGui::TextColored(Theme::TEXT_GRAY,
-                         u8"업데이트 후 사용할 수 있습니다.");
+                         Lang::T(Lang::UPDATE_MUST_UPDATE));
     } else {
-      ImGui::TextColored(Theme::COLOR_CYAN, u8"🚀 새로운 업데이트 가능!");
+      ImGui::TextColored(Theme::COLOR_CYAN, Lang::T(Lang::UPDATE_AVAILABLE_TITLE));
     }
     ImGui::Spacing();
-    ImGui::TextColored(Theme::TEXT_WHITE, u8"최신 버전: %s (현재: %s)",
+    ImGui::TextColored(Theme::TEXT_WHITE, Lang::T(Lang::UPDATE_VERSIONS_FMT),
                        m_latestVersion.c_str(), APP_VERSION);
     ImGui::Spacing();
 
     if (!m_releaseNotes.empty()) {
-      ImGui::TextColored(Theme::TEXT_GRAY, u8"업데이트 내용:");
+      ImGui::TextColored(Theme::TEXT_GRAY, Lang::T(Lang::UPDATE_NOTES_LABEL));
       ImGui::TextWrapped("%s", m_releaseNotes.c_str());
       ImGui::Spacing();
     }
@@ -4170,7 +4166,7 @@ void MainWindow::RenderUpdatePopup() {
       uint64_t total = m_updateBytesTotal.load();
 
       ImGui::Spacing();
-      ImGui::TextColored(Theme::COLOR_CYAN, u8"⏳ 업데이트 다운로드 중...");
+      ImGui::TextColored(Theme::COLOR_CYAN, Lang::T(Lang::UPDATE_DOWNLOADING_TITLE));
       ImGui::Spacing();
 
       if (total > 0) {
@@ -4182,27 +4178,27 @@ void MainWindow::RenderUpdatePopup() {
                     (double)total / 1048576.0,
                     progress * 100.0);
       } else if (got > 0) {
-        ImGui::Text("%.1f MB 다운로드 중...", (double)got / 1048576.0);
+        ImGui::Text(Lang::T(Lang::UPDATE_DOWNLOADED_FMT), (double)got / 1048576.0);
       } else {
-        ImGui::TextColored(Theme::TEXT_GRAY, u8"서버 연결 중...");
+        ImGui::TextColored(Theme::TEXT_GRAY, Lang::T(Lang::UPDATE_CONNECTING));
       }
       ImGui::Spacing();
       ImGui::TextColored(Theme::TEXT_GRAY,
-                         u8"네트워크 환경에 따라 1-3분 정도 걸릴 수 있습니다.");
+                         Lang::T(Lang::UPDATE_TIME_HINT));
       ImGui::TextColored(Theme::TEXT_GRAY,
-                         u8"완료되면 자동으로 설치가 시작됩니다.");
+                         Lang::T(Lang::UPDATE_AUTOSTART_HINT));
       ImGui::Spacing();
     }
     // ── 다운로드 실패 시 재시도 버튼 ──
     else if (m_updateDownloadFailed) {
-      ImGui::TextColored(Theme::COLOR_RED, u8"다운로드에 실패했습니다.");
+      ImGui::TextColored(Theme::COLOR_RED, Lang::T(Lang::UPDATE_DOWNLOAD_FAILED_MSG));
       ImGui::Spacing();
 
       ImGui::PushStyleColor(ImGuiCol_Button, Theme::ToU32(Theme::GRAD_START));
       ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
                             Theme::ToU32(Theme::GRAD_END));
       ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(0, 0, 0, 255));
-      if (ImGui::Button(u8"다시 시도", ImVec2(cw, UIScale::Px(36)))) {
+      if (ImGui::Button(Lang::T(Lang::BTN_RETRY), ImVec2(cw, UIScale::Px(36)))) {
         m_updateDownloadFailed = false;
         m_updateDownloading = true;
         std::thread([this]() {
@@ -4221,7 +4217,7 @@ void MainWindow::RenderUpdatePopup() {
                             Theme::ToU32(Theme::GRAD_END));
       ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(0, 0, 0, 255));
 
-      if (ImGui::Button(u8"지금 업데이트", ImVec2(btnW, UIScale::Px(36)))) {
+      if (ImGui::Button(Lang::T(Lang::UPDATE_NOW), ImVec2(btnW, UIScale::Px(36)))) {
         // [v0.0.3] 강제/선택적 모두 동일 UX — 팝업 유지하고 진행률 표시.
         //   기존 비강제는 팝업 즉시 닫고 백그라운드 다운로드 → 실패 시 사용자
         //   인지 못 함. 이제 둘 다 popup 안에서 progress + retry.
@@ -4237,13 +4233,13 @@ void MainWindow::RenderUpdatePopup() {
       }
       ImGui::PopStyleColor(3);
 
-      // 선택적 업데이트일 때만 "나중에" 버튼 표시
+      // 선택적 업데이트일 때만 Lang::T(Lang::BTN_LATER) 버튼 표시
       if (!m_isMandatoryUpdate) {
         ImGui::SameLine(0, UIScale::Px(8));
         ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(60, 60, 60, 255));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
                               IM_COL32(90, 90, 90, 255));
-        if (ImGui::Button(u8"나중에", ImVec2(btnW, UIScale::Px(36)))) {
+        if (ImGui::Button(Lang::T(Lang::BTN_LATER), ImVec2(btnW, UIScale::Px(36)))) {
           ImGui::CloseCurrentPopup();
         }
         ImGui::PopStyleColor(2);
@@ -4278,7 +4274,7 @@ void MainWindow::NotifyDeviceLimitExceeded(int limit, int activeCount,
     m_deviceLimitPlan = plan;
   }
   m_showDeviceLimitPopup = true;
-  SetStatus(u8"이 플랜의 기기 등록 한도를 초과했습니다.", Theme::COLOR_RED);
+  SetStatus(Lang::T(Lang::DEVICE_LIMIT_STATUS), Theme::COLOR_RED);
 }
 
 void MainWindow::OpenDeviceManagementPage() {
@@ -4303,7 +4299,7 @@ void MainWindow::RenderDeviceLimitPopup() {
   int flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
               ImGuiWindowFlags_AlwaysAutoResize;
   if (ImGui::BeginPopupModal("##device_limit_popup", nullptr, flags)) {
-    ImGui::TextColored(Theme::COLOR_RED, u8"⚠ 기기 등록 한도 초과");
+    ImGui::TextColored(Theme::COLOR_RED, Lang::T(Lang::DEVICE_LIMIT_TITLE));
     ImGui::Spacing();
 
     std::string planText;
@@ -4314,10 +4310,7 @@ void MainWindow::RenderDeviceLimitPopup() {
       planText = m_deviceLimitPlan;
     }
     ImGui::TextWrapped(
-        u8"현재 플랜(%s)의 기기 등록 한도(%d대)를 초과했습니다.\n"
-        u8"활성 기기: %d대\n\n"
-        u8"기존 기기 중 사용하지 않는 기기를 웹 대시보드에서\n"
-        u8"해제하면 이 PC를 사용할 수 있습니다.",
+        Lang::T(Lang::DEVICE_LIMIT_BODY_FMT),
         planText.empty() ? "free" : planText.c_str(), limit, count);
     ImGui::Spacing();
     ImGui::Separator();
@@ -4330,7 +4323,7 @@ void MainWindow::RenderDeviceLimitPopup() {
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
                           Theme::ToU32(Theme::GRAD_END));
     ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(0, 0, 0, 255));
-    if (ImGui::Button(u8"기존 기기 관리하기", ImVec2(btnW, UIScale::Px(36)))) {
+    if (ImGui::Button(Lang::T(Lang::MANAGE_DEVICES), ImVec2(btnW, UIScale::Px(36)))) {
       OpenDeviceManagementPage();
       ImGui::CloseCurrentPopup();
     }
@@ -4339,7 +4332,7 @@ void MainWindow::RenderDeviceLimitPopup() {
     ImGui::SameLine(0, UIScale::Px(8));
     ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(60, 60, 60, 255));
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(90, 90, 90, 255));
-    if (ImGui::Button(u8"닫기", ImVec2(btnW, UIScale::Px(36)))) {
+    if (ImGui::Button(Lang::T(Lang::BTN_CLOSE), ImVec2(btnW, UIScale::Px(36)))) {
       ImGui::CloseCurrentPopup();
     }
     ImGui::PopStyleColor(2);
@@ -4369,15 +4362,10 @@ void MainWindow::RenderUpgradePopup() {
   int flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
               ImGuiWindowFlags_AlwaysAutoResize;
   if (ImGui::BeginPopupModal("##upgrade_popup", nullptr, flags)) {
-    ImGui::TextColored(Theme::COLOR_CYAN, u8"✨ Pro 플랜으로 업그레이드");
+    ImGui::TextColored(Theme::COLOR_CYAN, Lang::T(Lang::UPGRADE_TITLE));
     ImGui::Spacing();
     ImGui::TextWrapped(
-        u8"SoundMate의 AI EQ 자동 매핑 / 프롬프트 기반 EQ 생성 기능은\n"
-        u8"Pro 플랜 이상에서 사용하실 수 있습니다.\n\n"
-        u8"Pro 플랜:\n"
-        u8"  • AI 자동 EQ: 월 300회\n"
-        u8"  • 프롬프트 EQ: 월 100회\n"
-        u8"  • 사용자 프리셋 저장 3개");
+        Lang::T(Lang::UPGRADE_BODY));
     ImGui::Spacing();
     ImGui::Separator();
     ImGui::Spacing();
@@ -4389,7 +4377,7 @@ void MainWindow::RenderUpgradePopup() {
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
                           Theme::ToU32(Theme::GRAD_END));
     ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(0, 0, 0, 255));
-    if (ImGui::Button(u8"Pro 구독하기", ImVec2(btnW, UIScale::Px(36)))) {
+    if (ImGui::Button(Lang::T(Lang::SUBSCRIBE_PRO), ImVec2(btnW, UIScale::Px(36)))) {
       OpenPricingPage();
       ImGui::CloseCurrentPopup();
     }
@@ -4398,7 +4386,7 @@ void MainWindow::RenderUpgradePopup() {
     ImGui::SameLine(0, UIScale::Px(8));
     ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(60, 60, 60, 255));
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(90, 90, 90, 255));
-    if (ImGui::Button(u8"닫기", ImVec2(btnW, UIScale::Px(36)))) {
+    if (ImGui::Button(Lang::T(Lang::BTN_CLOSE), ImVec2(btnW, UIScale::Px(36)))) {
       ImGui::CloseCurrentPopup();
     }
     ImGui::PopStyleColor(2);

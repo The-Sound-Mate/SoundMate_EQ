@@ -1,6 +1,7 @@
 // src/core/GenreManager.cpp
 #include "GenreManager.h"
 #include "RecordManager.h"
+#include "../../../engine/SoundMate_APO/include/SoundMate_InstallPaths.h"
 #include <algorithm>
 #include <chrono>
 #include <ctime>
@@ -17,11 +18,11 @@ using json = nlohmann::json;
 GenreManager g_genreManager;
 
 // ── [PR-2D] 정규화 로그 ────────────────────────────────────────────────────
-// 위치: C:\Program Files\SoundMate Equalizer\record\normalize_log.jsonl
+// 위치: <설치 폴더>\record\normalize_log.jsonl (SoundMatePaths::RecordDirA)
 // 정규화 알고리즘을 바꿀 때 "이런 입력에서 이런 결과가 나왔다"를 추적해
 // 회귀(regression)를 잡기 위한 append-only 로그.
 std::string GenreManager::GetNormalizeLogPath() {
-  return "C:\\Program Files\\SoundMate Equalizer\\record\\normalize_log.jsonl";
+  return SoundMatePaths::RecordDirA() + "\\normalize_log.jsonl";
 }
 
 namespace {

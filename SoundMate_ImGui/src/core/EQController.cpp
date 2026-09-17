@@ -1,6 +1,7 @@
 // src/core/EQController.cpp
 #include "EQController.h"
 #include "../../../engine/SoundMate_APO/include/SoundMate_Shared.h"
+#include "../../../engine/SoundMate_APO/include/SoundMate_InstallPaths.h"
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
@@ -18,25 +19,10 @@ static const char *CONFIG_FILENAME = "config.txt";
 // 레지스트리 헬퍼: 64비트 우선 조회 (Python get_real_install_path 동일)
 // ──────────────────────────────────────────────────────────────────────────
 std::string EQController::GetRealInstallPath() {
-  const char *subkeys[] = {"SOFTWARE\\SoundMateAPO",
-                           "SOFTWARE\\WOW6432Node\\SoundMateAPO"};
-  DWORD flags = KEY_READ | KEY_WOW64_64KEY;
-
-  for (auto &subkey : subkeys) {
-    HKEY hKey;
-    if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, subkey, 0, flags, &hKey) ==
-        ERROR_SUCCESS) {
-      char buf[MAX_PATH] = {};
-      DWORD sz = sizeof(buf);
-      LONG res = RegQueryValueExA(hKey, "InstallPath", nullptr, nullptr,
-                                  (LPBYTE)buf, &sz);
-      RegCloseKey(hKey);
-      if (res == ERROR_SUCCESS && std::filesystem::exists(buf))
-        return buf;
-    }
-  }
-  // 폴백
-  return "C:\\Program Files\\SoundMate Equalizer";
+  // 해석 규칙은 SoundMate_InstallPaths.h 하나에만 둔다. 예전에는 여기서 직접
+  // 레지스트리를 읽고 실패하면 Program Files 를 반환했는데, 같은 규칙이 앱과
+  // 엔진 여러 곳에 흩어져 있어서 서로 다른 답을 낼 수 있었다.
+  return SoundMatePaths::RootA();
 }
 
 std::string EQController::GetRealConfigDir() {
@@ -57,16 +43,13 @@ std::string EQController::GetRealConfigDir() {
         return buf;
     }
   }
-  return GetRealInstallPath() + "\\config";
+  return SoundMatePaths::ConfigDirA();
 }
 
 std::string EQController::GetOfficialConfigDir() {
-  // SoundMate Equalizer 정식 설치 경로 (Controller 가 감시하는 위치와 동일)
-  for (auto &path : {"C:\\Program Files\\SoundMate Equalizer\\config"}) {
-    if (std::filesystem::exists(path))
-      return path;
-  }
-  return "";
+  // Controller 가 실제로 감시하는 위치. 설치 루트 아래 config 폴더로 고정이다.
+  const std::string dir = SoundMatePaths::ConfigDirA();
+  return std::filesystem::exists(dir) ? dir : std::string();
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -77,7 +60,7 @@ bool EQController::Initialize() {
 
   // 레지스트리 경로가 유효하지 않을 때만 정식 설치 경로로 폴백
   if (configDir.empty() || !std::filesystem::exists(configDir)) {
-    std::string appPath = "C:\\Program Files\\SoundMate Equalizer\\config";
+    const std::string appPath = SoundMatePaths::ConfigDirA();
     if (std::filesystem::exists(appPath)) {
       configDir = appPath;
     }
@@ -131,8 +114,7 @@ float EQController::CalculateQ(int numBands) {
 bool EQController::ApplyEQ(const std::vector<float> &gains,
                            const std::vector<int> &freqs,
                            const std::string &deviceName) {
-  // [v12.0] 전용 엔진 경로로 고정 (C:\Program Files\SoundMate\config.txt)
-  std::string targetPath = "C:\\Program Files\\SoundMate Equalizer\\config.txt";
+  const std::string targetPath = SoundMatePaths::ConfigTxtA();
 
   float q = CalculateQ((int)freqs.size());
 
@@ -165,7 +147,7 @@ bool EQController::ApplyEQ(const std::vector<float> &gains,
 
 bool EQController::LoadEQFromFile(std::vector<float> &outGains,
                                   int &outBandCount) {
-  std::string targetPath = "C:\\Program Files\\SoundMate Equalizer\\config.txt";
+  const std::string targetPath = SoundMatePaths::ConfigTxtA();
   std::ifstream file(targetPath);
   if (!file.is_open())
     return false;
@@ -252,8 +234,7 @@ bool EQController::EnsureShmMapped() {
 bool EQController::ResetPreampToDefault() {
   m_preampDb.store(kDefaultPreampDb);
 
-  const std::string path =
-      "C:\\Program Files\\SoundMate Equalizer\\config.txt";
+  const std::string path = SoundMatePaths::ConfigTxtA();
   std::ifstream in(path);
   if (!in.is_open())
     return false;  // 아직 없으면 다음 ApplyEQ 가 기본값으로 만든다
@@ -289,7 +270,7 @@ bool EQController::IsLimiterActive() {
 // = (activeBands != 0 || masterGain != 1.f)). 진정한 패스스루 보장.
 // ──────────────────────────────────────────────────────────────────────────
 bool EQController::ApplyBypass() {
-  std::string targetPath = "C:\\Program Files\\SoundMate Equalizer\\config.txt";
+  const std::string targetPath = SoundMatePaths::ConfigTxtA();
   return WriteEQFile(targetPath, "Preamp: 0.0 dB\n");
 }
 
@@ -297,7 +278,7 @@ bool EQController::ApplyBypass() {
 // Python의 _ensure_include_linked() 완전 이식
 // ──────────────────────────────────────────────────────────────────────────
 static void EnsureIncludeInFile(const std::string &configPath) {
-  std::string officialRoot = "C:\\Program Files\\SoundMate Equalizer\\config\\";
+  const std::string officialRoot = SoundMatePaths::ConfigDirA() + "\\";
   std::string fullAiPath = officialRoot + std::string(AI_EQ_CONFIG_FILENAME);
   std::string includeLine = "Include: " + fullAiPath;
   std::string deviceLine = "Device: all";
@@ -385,8 +366,8 @@ void EQController::EnsureIncludeLinked() {
     return;
 
   // 1) 공식 경로의 config.txt를 최우선으로 관리
-  std::string officialPath = "C:\\Program Files\\SoundMate Equalizer\\config\\" +
-                             std::string(CONFIG_FILENAME);
+  const std::string officialPath =
+      SoundMatePaths::ConfigDirA() + "\\" + std::string(CONFIG_FILENAME);
   EnsureIncludeInFile(officialPath);
 
   // 2) 레지스트리에 등록된 경로가 있다면 그곳도 함께 관리 (이중 안전 장치)

@@ -1,9 +1,11 @@
 // src/ui/LoginWindow.cpp
 #include "LoginWindow.h"
+#include "Lang.h"
 #include "Theme.h"
 #include "UIScale.h"
 #include "../core/RecordManager.h"
 #include "../core/FeatureFlags.h"
+#include "../../../engine/SoundMate_APO/include/SoundMate_InstallPaths.h"
 #include <windows.h>
 #include <shellapi.h>
 #include <winsock2.h>
@@ -27,7 +29,7 @@ LoginWindow::~LoginWindow() {
 
 // [Phase 2-A] 토큰 경로 — Program Files 통합. RecordManager::m_tokenFile 과 동일.
 std::string LoginWindow::GetTokenFilePath() {
-    return "C:\\Program Files\\SoundMate Equalizer\\record\\session_token.json";
+    return SoundMatePaths::RecordDirA() + "\\session_token.json";
 }
 
 // [Phase 2-A] DPAPI 암호화 — user-bound 키. 다른 user 계정에서 복호화 불가.
@@ -89,7 +91,7 @@ void LoginWindow::Open(LoginSuccessCallback cb) {
 
     m_onSuccess = cb;
     m_open      = true;
-    m_statusMsg = "이전 세션 확인 중...";
+    m_statusMsg = Lang::T(Lang::LOGIN_CHECKING_SESSION);
     m_autoLoginBusy = true;
     m_autoLoginThread = std::thread([this]{
         TryAutoLogin();
@@ -128,7 +130,7 @@ void LoginWindow::TryAutoLogin() {
                 // 토큰 silent delete 후 명시적 재로그인 UX.
                 std::error_code ec;
                 std::filesystem::remove(tokenPath, ec);
-                m_statusMsg = "세션이 만료되었습니다. 다시 로그인해주세요.";
+                m_statusMsg = Lang::T(Lang::LOGIN_SESSION_EXPIRED);
                 m_statusIsErr = true;
                 return;
             }
@@ -166,7 +168,7 @@ void LoginWindow::TryAutoLogin() {
         // 만료 + refresh 실패 — 토큰 정리 후 명시적 재로그인 안내.
         std::error_code ec;
         std::filesystem::remove(tokenPath, ec);
-        m_statusMsg = "세션이 만료되었습니다. 다시 로그인해주세요.";
+        m_statusMsg = Lang::T(Lang::LOGIN_SESSION_EXPIRED);
         m_statusIsErr = true;
         return;
     }
@@ -318,7 +320,7 @@ void LoginWindow::OpenBrowser() {
     std::string url = "https://soundmate.kro.kr/login?redirect=http://localhost:8080&force_login=1";
     ShellExecuteA(nullptr, "open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
     m_waiting   = true;
-    m_statusMsg = "브라우저에서 로그인 대기 중...";
+    m_statusMsg = Lang::T(Lang::LOGIN_WAITING_BROWSER);
     m_statusIsErr = false;
 }
 
@@ -357,17 +359,22 @@ void LoginWindow::HandleWebLogin(const std::string& at, const std::string& rt) {
         auto claims = json::parse(decoded);
         std::string uid   = claims.value("sub","");
         std::string email = claims.value("email","");
-        if (uid.empty()) { m_statusMsg="인증 실패"; m_statusIsErr=true; return; }
+        if (uid.empty()) { m_statusMsg=Lang::T(Lang::LOGIN_AUTH_FAILED); m_statusIsErr=true; return; }
         SaveToken(at, rt);
         g_recordManager.SetUserId(uid);
         m_open = false;
         if (m_onSuccess) m_onSuccess(uid, email, false);
-    } catch(...) { m_statusMsg="토큰 처리 오류"; m_statusIsErr=true; }
+    } catch(...) { m_statusMsg=Lang::T(Lang::LOGIN_TOKEN_ERROR); m_statusIsErr=true; }
 }
 
 void LoginWindow::LoginAsGuest() {
     if constexpr (SoundMate::Features::kBetaTestRestriction) {
-        MessageBoxW(nullptr, L"베타테스트 기간에는 로그인한 유저만 프로그램을 이용할 수 있습니다.", L"SoundMate EQ", MB_OK | MB_ICONWARNING);
+        // 문자열 표는 UTF-8 이고 MessageBoxW 는 와이드만 받는다. 여기서만 변환.
+        const char* msg = Lang::T(Lang::LOGIN_BETA_REQUIRES_ACCOUNT);
+        const int wlen = MultiByteToWideChar(CP_UTF8, 0, msg, -1, nullptr, 0);
+        std::wstring wmsg(wlen > 1 ? wlen - 1 : 0, L'\0');
+        if (wlen > 1) MultiByteToWideChar(CP_UTF8, 0, msg, -1, &wmsg[0], wlen);
+        MessageBoxW(nullptr, wmsg.c_str(), L"SoundMate EQ", MB_OK | MB_ICONWARNING);
         extern void AppExit();
         AppExit();
         return;
@@ -403,15 +410,15 @@ void LoginWindow::Render() {
     ImGui::Spacing(); ImGui::Spacing();
 
     // 안내 텍스트
-    float tw = ImGui::CalcTextSize("웹 브라우저를 통해 로그인을 진행해주세요.").x;
+    float tw = ImGui::CalcTextSize(Lang::T(Lang::LOGIN_USE_BROWSER)).x;
     ImGui::SetCursorPosX((cw - tw) * 0.5f);
-    ImGui::TextColored(Theme::TEXT_WHITE, "웹 브라우저를 통해 로그인을 진행해주세요.");
+    ImGui::TextColored(Theme::TEXT_WHITE, Lang::T(Lang::LOGIN_USE_BROWSER));
 
     ImGui::Spacing(); ImGui::Spacing();
 
     // 브라우저 로그인 버튼
     ImGui::SetCursorPosX(UIScale::Px(30));
-    if (ImGui::Button("웹 브라우저에서 로그인", ImVec2(cw - UIScale::Px(60), UIScale::Px(46))))
+    if (ImGui::Button(Lang::T(Lang::LOGIN_BTN_BROWSER), ImVec2(cw - UIScale::Px(60), UIScale::Px(46))))
         OpenBrowser();
 
     ImGui::Spacing();
@@ -421,7 +428,7 @@ void LoginWindow::Render() {
         ImGui::SetCursorPosX(UIScale::Px(30));
         ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(0,0,0,0));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Theme::ToU32(Theme::BTN_SECONDARY));
-        if (ImGui::Button("로그인하지 않고 실행하기", ImVec2(cw - UIScale::Px(60), UIScale::Px(38))))
+        if (ImGui::Button(Lang::T(Lang::LOGIN_BTN_SKIP), ImVec2(cw - UIScale::Px(60), UIScale::Px(38))))
             LoginAsGuest();
         ImGui::PopStyleColor(2);
     }
