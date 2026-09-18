@@ -1,5 +1,5 @@
 /*
-    SoundMate APO v29.1 - Phoenix Edition
+    SoundMate APO v29.2 - Phoenix Edition
     Mirrors Equalizer APO architecture EXACTLY.
 */
 
@@ -72,7 +72,7 @@ SoundMateAPO::SoundMateAPO(IUnknown* pUnkOuter)
 	isPostMix = true;
 	myInstanceId = 0;
 	InterlockedIncrement(&instCount);
-	WriteAPOLog("SoundMateAPO v29.1 Constructor");
+	WriteAPOLog("SoundMateAPO v29.2 Constructor");
 }
 
 SoundMateAPO::~SoundMateAPO()
@@ -609,6 +609,33 @@ void SoundMateAPO::APOProcess(
 	const bool applyEq = isPostMix;
 #endif
 
+	// [무음 실측] BUFFER_SILENT 플래그만 믿으면 안 된다.
+	//   스트림을 열어둔 채 **디지털 0 을 계속 밀어 넣는** 앱(소리 안 내는
+	//   크롬 탭, 디스코드, 게임)의 버퍼는 클라이언트가 실제로 쓴 데이터라
+	//   플래그가 BUFFER_VALID 다. 그걸 "소리 내는 중" 으로 판정하면
+	//     - tapEligible 의 연속 발음 문턱을 영구히 통과하고,
+	//     - AudioTapWriter 의 무음 반납이 영영 안 걸려 heartbeat 가 계속 갱신돼
+	//   그 조용한 스트림이 탭 소유권을 끝까지 붙잡는다. 곡이 바뀌어 새로 생긴
+	//   진짜 음악 스트림은 tryClaim 이 살아 있는 소유자 앞에서 물러나므로
+	//   영영 탭을 못 받고, UI 스펙트럼이 기본 애니메이션에 머문다.
+	//   (근거: APO 로그에 "owned by another instance" 가 14분간 연속.)
+	//
+	//   RT 안전: 할당도 락도 없다. 문턱을 넘는 **첫 샘플에서 즉시 빠져나오므로**
+	//   실제 음악에서는 비교 한두 번으로 끝난다. 전수 주사가 되는 경우는 진짜
+	//   무음일 때뿐이고, 그때는 필터가 놀고 있어 여유가 충분하다.
+	//   NaN 은 두 비교가 모두 거짓이라 "무음" 으로 떨어지는데, 쓰레기 신호로
+	//   탭을 잡는 것보다 안전한 쪽이라 의도한 동작이다.
+	auto buffersSilent = [](const float *buf, unsigned frames,
+			unsigned channels) -> bool {
+		const unsigned n = frames * channels;
+		for (unsigned i = 0; i < n; ++i) {
+			const float v = buf[i];
+			if (v >  SOUNDMATE_AUDIO_SILENCE_FLOOR) return false;
+			if (v < -SOUNDMATE_AUDIO_SILENCE_FLOOR) return false;
+		}
+		return true;
+	};
+
 	// [탭 소유권] 이 인스턴스가 탭을 떠야 하는지 판정하고, 필요하면 소유권을
 	//   가져오거나 놓는다. write() 는 소유권이 있어야만 동작하므로 이 단계를
 	//   빠뜨리면 지목이 아무 효과가 없다.
@@ -693,9 +720,11 @@ void SoundMateAPO::APOProcess(
 		if (applyEq) {
 			// [탭] engine.process 직전 = 이 앱이 방금 낸 **순수 원음**.
 			//   EQ 를 SFX 로 옮긴 덕에 여기가 진짜 pre-EQ 지점이 됐다.
-			if (acquireTapIfNeeded(flags == BUFFER_SILENT))
+			const bool tapSilent = (flags == BUFFER_SILENT) ||
+				buffersSilent(outputFrames, frameCount, engine.outChannels);
+			if (acquireTapIfNeeded(tapSilent))
 				audioTap.write(outputFrames, frameCount, engine.outChannels,
-					flags == BUFFER_SILENT);
+					tapSilent);
 			engine.updateFromSharedMemory();
 			engine.process(outputFrames, outputFrames, frameCount);
 		} else if (isPostMix) {
@@ -707,9 +736,11 @@ void SoundMateAPO::APOProcess(
 		}
 	} else {
 		if (applyEq) {
-			if (acquireTapIfNeeded(flags == BUFFER_SILENT))
+			const bool tapSilent = (flags == BUFFER_SILENT) ||
+				buffersSilent(inputFrames, frameCount, engine.inChannels);
+			if (acquireTapIfNeeded(tapSilent))
 				audioTap.write(inputFrames, frameCount, engine.inChannels,
-					flags == BUFFER_SILENT);
+					tapSilent);
 			engine.updateFromSharedMemory();
 			engine.process(outputFrames, inputFrames, frameCount);
 		} else if (isPostMix) {

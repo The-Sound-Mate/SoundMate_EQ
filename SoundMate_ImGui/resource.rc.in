@@ -1,1 +1,41 @@
+// Generated from resource.rc.in by CMake. Do not edit the generated copy.
+//
+// ASCII-only on purpose: rc.exe reads this in the OEM/ANSI codepage (949 here),
+// so UTF-8 Korean would be mis-decoded and can break the parse, not just the
+// display -- the same trap the .bat files have.
+#include <windows.h>
+
 101 ICON "@LOGO_ICO_PATH@"
+
+// [PR-C] Version metadata derives from project(... VERSION ...) in
+// CMakeLists.txt, the single source of truth, exactly like Version.h and the
+// .iss. Without this block the shipped exe reports an empty FileVersion, so
+// Explorer's properties page, the installer's upgrade detection fallback and
+// any support request that asks "which build are you on" all come up blank.
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION    @PROJECT_VERSION_MAJOR@,@PROJECT_VERSION_MINOR@,@PROJECT_VERSION_PATCH@,0
+ PRODUCTVERSION @PROJECT_VERSION_MAJOR@,@PROJECT_VERSION_MINOR@,@PROJECT_VERSION_PATCH@,0
+ FILEFLAGSMASK  VS_FFI_FILEFLAGSMASK
+ FILEFLAGS      0x0L
+ FILEOS         VOS_NT_WINDOWS32
+ FILETYPE       VFT_APP
+ FILESUBTYPE    VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName",      "SoundMate"
+            VALUE "FileDescription",  "SoundMate Equalizer"
+            VALUE "FileVersion",      "@PROJECT_VERSION@"
+            VALUE "InternalName",     "SoundMate Equalizer"
+            VALUE "OriginalFilename", "SoundMate Equalizer.exe"
+            VALUE "ProductName",      "SoundMate Equalizer"
+            VALUE "ProductVersion",   "@PROJECT_VERSION@"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

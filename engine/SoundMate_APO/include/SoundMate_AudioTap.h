@@ -53,6 +53,26 @@
 // 다중 출력 장치 환경에서 실제로 소리가 나는 장치로 소유권이 옮겨가게 하는 장치.
 #define SOUNDMATE_AUDIO_SILENCE_RELEASE_MS 2000u
 
+// "무음" 으로 볼 진폭 상한 (선형, ≈ -100 dBFS).
+//
+// [왜 BUFFER_SILENT 플래그만으로는 안 되는가 — 실측으로 밝힌 것]
+//   스트림을 열어둔 채 **디지털 0 을 계속 밀어 넣는** 앱이 흔하다 (소리를
+//   안 내는 크롬 탭, 디스코드, 게임). 그런 버퍼는 클라이언트가 실제로 쓴
+//   데이터라 플래그가 BUFFER_VALID 다. 그래서 탭 입장에서는 "계속 소리를
+//   내는 중" 으로 보여:
+//     (1) tapEligible 의 연속 발음 문턱을 영구히 통과하고,
+//     (2) write() 의 무음 반납(SOUNDMATE_AUDIO_SILENCE_RELEASE_MS)이 영영
+//         걸리지 않아 ownerHeartbeat 가 계속 갱신된다.
+//   결과: 그 조용한 스트림이 탭 소유권을 붙잡고 놓지 않는다. 실제 음악
+//   스트림은 곡이 바뀔 때마다 새로 생기지만 tryClaim 이 "살아 있는 소유자"
+//   앞에서 물러나므로 **영영** 탭을 못 가져가고, UI 스펙트럼은 기본
+//   애니메이션에 머문다 (APO 로그에 "owned by another instance" 가 14분간
+//   10개 스트림에 걸쳐 연속으로 찍혔다).
+//
+//   그래서 무음 판정은 플래그가 아니라 **실제 진폭**으로 한다. -100 dBFS 는
+//   16비트 LSB(-96 dBFS) 보다도 아래라 실제 음악이 여기에 걸릴 일은 없다.
+#define SOUNDMATE_AUDIO_SILENCE_FLOOR 1.0e-5f
+
 #pragma pack(push, 8)
 
 struct SoundMateAudioTap {
