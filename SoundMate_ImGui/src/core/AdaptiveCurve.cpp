@@ -456,7 +456,14 @@ std::vector<float> ComputeTasteDelta(const std::vector<float>& measuredDb,
   //    만들어 둔 끝 밴드만 mean 만큼 어긋나 계단이 되살아난다. 대신 평균을
   //    Σ(L·delta) / Σ(L·edgeW) 로 잡으면 Σ L·(delta - edgeW·mean) = 0 이
   //    정확히 성립해서, 연속성과 라우드니스 중립을 동시에 만족한다.
-  if (haveFreqs) {
+  //
+  //    [두 번 부르는 이유] 7단계의 곡률 상한이 델타를 다시 움직이므로 중립이
+  //    깨진다. 같은 연산을 그대로 한 번 더 건다 — 첫 호출이 이미 0 을 맞춰
+  //    놓았으니 두 번째가 빼는 양은 상한이 움직인 몫뿐이고, 그래서 수렴을
+  //    반복할 필요가 없다. 마지막 클램프도 여기에 들어 있다.
+  auto neutralize = [&]() {
+    if (!haveFreqs)
+      return;
     float wsum = 0.f, acc = 0.f;
     for (size_t i = 0; i < n; ++i) {
       if (!corrected[i])
@@ -465,16 +472,55 @@ std::vector<float> ComputeTasteDelta(const std::vector<float>& measuredDb,
       acc  += delta[i] * w;
       wsum += w * edgeW[i];
     }
-    if (wsum > 1e-6f) {
-      const float mean = acc / wsum;
-      for (size_t i = 0; i < n; ++i) {
-        if (!corrected[i])
-          continue;
-        delta[i] = std::max(
-            -kDevClampDb, std::min(kDevClampDb, delta[i] - edgeW[i] * mean));
-      }
+    if (wsum <= 1e-6f)
+      return;
+    const float mean = acc / wsum;
+    for (size_t i = 0; i < n; ++i) {
+      if (!corrected[i])
+        continue;
+      delta[i] = std::max(
+          -kDevClampDb, std::min(kDevClampDb, delta[i] - edgeW[i] * mean));
+    }
+  };
+  neutralize();
+
+  // 7) 저역 국소 곡률 상한 — '한 밴드만 툭 튀어나온' 성분만 눌러 담는다.
+  //
+  //  [무엇을 재는가] res = delta[i] - (delta[i-1] + delta[i+1])/2.
+  //  공통 오프셋과 균일한 기울기에 대해 0 이므로 셸프도 가장자리 경사도
+  //  걸리지 않는다. 이웃과 어긋난 성분만 남고, 그 초과분만 avg 쪽으로 당긴다.
+  //  |res| <= 상한이면 delta[i] = avg + res = 원래 값 — 통과 시 완전한 항등이다.
+  //
+  //  [스냅샷으로 읽는 이유] src 를 따로 떠서 읽는다. 제자리에서 훑으면 i 의
+  //  결과가 i+1 의 입력이 되어 처리 순서가 결과를 바꾸고, 낮은 쪽에서 눌린
+  //  값이 위로 전파돼 저역 전체가 조금씩 평탄해진다. 상한은 밴드마다 독립
+  //  판정이어야 한다.
+  //
+  //  [가장자리 밴드는 건너뛴다] edgeW[i] == 0 인 밴드는 5-b 가 정확히 0 으로
+  //  만들어 둔 끝단이다. 여기를 avg 쪽으로 당기면 끝단 보호가 깨진다 —
+  //  E6 에서 고친 계단이 반대 방향으로 되살아난다.
+  //
+  //  적용 폭을 왜 저역으로 한정했는지, 왜 1.0dB 인지는 AdaptiveCurve.h 의
+  //  kLowCurvatureLimitDb 주석 참조.
+  if (haveFreqs && n >= 3) {
+    const std::vector<float> src = delta;
+    for (size_t i = 1; i + 1 < n; ++i) {
+      if (freqs[i] < kLowCurvatureLoHz || freqs[i] > kLowCurvatureHiHz)
+        continue;
+      if (edgeW[i] <= 0.f)
+        continue;
+      if (!corrected[i - 1] || !corrected[i] || !corrected[i + 1])
+        continue;
+      const float avg = 0.5f * (src[i - 1] + src[i + 1]);
+      const float res = src[i] - avg;
+      const float lim = std::max(-kLowCurvatureLimitDb,
+                                 std::min(kLowCurvatureLimitDb, res));
+      delta[i] = avg + lim;
     }
   }
+
+  // 8) 상한이 흔든 만큼 중립을 다시 맞추고 클램프한다.
+  neutralize();
 
   return delta;
 }

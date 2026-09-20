@@ -240,6 +240,40 @@ static std::vector<float> Corrected(const std::vector<float>& taste,
   return c;
 }
 
+// 적응 델타의 **저역 국소 곡률** 최댓값.
+//   curv[i] = |delta[i] - (delta[i-1] + delta[i+1])/2|
+// 공통 오프셋과 균일한 기울기에 대해 0 이므로 셸프도 가장자리 경사도 걸리지
+// 않는다. '한 밴드만 이웃과 어긋난' 성분만 남는 지표다.
+//
+// [반드시 델타에 대해 재야 한다] 최종 커브(taste+delta)로 재면 취향 커브
+// 자체의 모양이 섞여 들어온다. 상한은 델타에만 걸리므로 지표도 델타여야 한다.
+static float LowCurvature(const std::vector<float>& delta, int* atBand) {
+  float worst = 0.f;
+  if (atBand) *atBand = 0;
+  if (delta.size() != 31) return 0.f;
+  for (int b = 1; b < 30; ++b) {
+    if (kF31[b] < AdaptiveCurve::kLowCurvatureLoHz ||
+        kF31[b] > AdaptiveCurve::kLowCurvatureHiHz)
+      continue;
+    const float c = std::fabs(delta[b] - 0.5f * (delta[b - 1] + delta[b + 1]));
+    if (c > worst) {
+      worst = c;
+      if (atBand) *atBand = b;
+    }
+  }
+  return worst;
+}
+
+// pop LTAS 에 폭 w 밴드 / 중심 c / 진폭 amp 의 좁은 융기를 얹는다.
+// 808·킥의 기본파처럼 저역 한 구간에만 에너지가 몰린 곡을 흉내 낸 것.
+static std::vector<float> Bump(const float* ltas, int c, int w, float amp) {
+  std::vector<float> m(ltas, ltas + 31);
+  const int half = (w - 1) / 2;
+  for (int b = c - half; b <= c - half + w - 1; ++b)
+    if (b >= 0 && b < 31) m[b] += amp;
+  return m;
+}
+
 static void PrintCurve(const char* tag, const std::vector<float>& g,
                        const std::vector<float>& m, const std::vector<bool>& u,
                        const std::vector<int>& f) {
@@ -450,6 +484,109 @@ static int CheckControlLaw() {
         OkTag(okMono), worstUp);
   }
 
+  // ── A5. 저역 국소 곡률 상한 ──────────────────────────────────────────────
+  //
+  // 현장에서 "툭 튀어나온다"고 보고된 성분을 합성으로 재현한다. 저역 한
+  // 구간에만 에너지가 몰린 곡(808/킥 기본파)을 폭 1~4밴드로 만들어 훑는다.
+  //
+  // [폭에 따라 다르다] 폭 1~2밴드는 5단계 ±1밴드 평활이 이미 평탄한 고원으로
+  //   펴버려서 곡률이 거의 안 생긴다. 상한이 실제로 일할 자리는 폭 3~4밴드다 —
+  //   평활 커널보다 넓어서 살아남고, 그러면서도 한 밴드가 이웃 대비 꺾인다.
+  //   현장 실측 재현값은 쌈디 50Hz 에서 1.40dB 였다.
+  //
+  // 위아래를 모두 고정한다. 상한만 보면 "델타를 전부 0 으로 만들어도 통과"가
+  // 되고, 하한만 보면 상한이 풀린 것을 못 잡는다.
+  {
+    const int kWidths[4] = {1, 2, 3, 4};
+    const float kAmps[2] = {12.f, -12.f};
+    const float* ltases[3] = {kLtasPop, kLtasBass, kLtasLight};
+    const char* ltasNames[3] = {"pop", "bass", "light"};
+
+    float worst = 0.f;
+    int wB = 0, wW = 0, wC = 0, wL = 0;
+    float wA = 0.f;
+    for (int li = 0; li < 3; ++li)
+      for (int wi = 0; wi < 4; ++wi)
+        for (int c = 2; c <= 7; ++c)  // 31Hz~100Hz
+          for (int ai = 0; ai < 2; ++ai) {
+            const std::vector<float> m =
+                Bump(ltases[li], c, kWidths[wi], kAmps[ai]);
+            const std::vector<float> d =
+                AdaptiveCurve::ComputeTasteDelta(m, Usable(), Freqs(), taste);
+            if (d.size() != 31) continue;
+            int at = 0;
+            const float cv = LowCurvature(d, &at);
+            if (cv > worst) {
+              worst = cv;
+              wB = at;
+              wW = kWidths[wi];
+              wC = c;
+              wA = kAmps[ai];
+              wL = li;
+            }
+          }
+
+    // 상한 + 여유. 여유가 필요한 이유는 곡률 상한 **뒤에** 라우드니스 중립화가
+    // 한 번 더 돌기 때문이다. 중립화는 edgeW·mean 을 빼는데 edgeW 는 감쇠
+    // 무릎에서 꺾이므로 mean/(2·kEdgeTaperBands) 만큼의 곡률을 되돌려 놓는다.
+    const float kCeil = AdaptiveCurve::kLowCurvatureLimitDb + 0.30f;
+    const bool okCeil = (worst <= kCeil);
+    // 상한이 실제로 개입하는 표본이 있어야 A5 가 공허하지 않다.
+    const float kFloor = AdaptiveCurve::kLowCurvatureLimitDb * 0.80f;
+    const bool okEngage = (worst >= kFloor);
+    if (!okCeil) ++fails;
+    if (!okEngage) ++fails;
+    std::printf(
+        "  %s A5 곡률 상한  : 좁은 융기 %d케이스 중 최대 저역 곡률 %.3f dB "
+        "@ %dHz  (상한 %.2f, 허용 %.2f)\n",
+        OkTag(okCeil), 3 * 4 * 6 * 2, worst, kF31[wB],
+        AdaptiveCurve::kLowCurvatureLimitDb, kCeil);
+    std::printf(
+        "        최악 표본: LTAS %s / 폭 %d밴드 / 중심 %dHz / 진폭 %+.0fdB\n",
+        ltasNames[wL], wW, kF31[wC], wA);
+    std::printf(
+        "  %s A5b 실개입    : 최대 곡률이 상한의 %.0f%% — 상한까지만 깎고 "
+        "평탄화하지 않았다  (기준 %.0f%% 이상)\n",
+        OkTag(okEngage),
+        worst / AdaptiveCurve::kLowCurvatureLimitDb * 100.f, 80.f);
+
+    // 일상적인 모양(곡 전체가 기울어진 경우)에는 상한이 **물지 않아야** 한다.
+    // 여기서 물리면 넓은 대역의 의도된 보정까지 깎이고 있다는 뜻이다.
+    //
+    // [기준을 무엇으로 잡는가] "곡률이 작다"가 아니라 "상한에 닿지 않았다"를
+    //   묻는 검사다. 기울기가 있으면 가장자리 감쇠의 무릎(delta/(2·W))과
+    //   α·클램프의 꺾임이 더해져 곡률이 구조적으로 남는다 — 실측 +9dB 기울기
+    //   에서 0.710dB 이고, 이론 무릎 성분만 3.9/8 = 0.49dB 다. 이 값을 더
+    //   낮추는 것은 이 상한의 일이 아니라 감쇠 폭(kEdgeTaperBands)의 일이다.
+    //   상한에 걸렸다면 곡률이 정확히 상한 근처에 고정되므로, 그 아래로
+    //   여유가 남아 있는 것이 곧 '개입하지 않았다'의 증거가 된다.
+    float broad = 0.f;
+    int bB = 0;
+    float bT = 0.f;
+    for (int k = -4; k <= 4; ++k) {
+      if (k == 0) continue;
+      const float amp = (float)k * 3.f;
+      const std::vector<float> d = AdaptiveCurve::ComputeTasteDelta(
+          MeasuredFromDev(Tilt(amp), -20.f), Usable(), Freqs(), taste);
+      if (d.size() != 31) continue;
+      int at = 0;
+      const float cv = LowCurvature(d, &at);
+      if (cv > broad) {
+        broad = cv;
+        bB = at;
+        bT = amp;
+      }
+    }
+    const float kBroadCeil = AdaptiveCurve::kLowCurvatureLimitDb - 0.10f;
+    const bool okBroad = (broad <= kBroadCeil);
+    if (!okBroad) ++fails;
+    std::printf(
+        "  %s A5c 항등 통과 : 전대역 기울기 ±3~12dB 에서 최대 저역 곡률 "
+        "%.3f dB @ %dHz (기울기 %+.0f) — 상한 %.2f 에 닿지 않음 (기준 %.2f)\n",
+        OkTag(okBroad), broad, kF31[bB], bT,
+        AdaptiveCurve::kLowCurvatureLimitDb, kBroadCeil);
+  }
+
   return fails;
 }
 
@@ -525,6 +662,13 @@ static long Sweep() {
   std::string boostDesc, cutDesc;
   float maxDelta = 0.f;
   std::string deltaDesc;
+  // 저역 곡률 — A5 는 합성 융기만 본다. 여기서는 실제로 나갈 수 있는 모든
+  // 조합에서 상한이 지켜지는지를 본다. 여유 0.30 의 근거는 A5 주석 참조.
+  const float kLowCurvCeil = AdaptiveCurve::kLowCurvatureLimitDb + 0.30f;
+  float maxLowCurv = 0.f;
+  int lowCurvBand = 0;
+  long lowCurvBad = 0;
+  std::string lowCurvDesc;
 
   for (const std::string& b : SurveyMapping::kBassIds)
     for (const std::string& v : SurveyMapping::kVocalIds)
@@ -564,6 +708,21 @@ static long Sweep() {
                   }
                   if (corr[bb] > kBoostCeilDb || corr[bb] < kCutFloorDb)
                     ++capBad;
+                }
+
+                // 저역 곡률은 **델타**에 대해 잰다 (LowCurvature 주석 참조).
+                {
+                  std::vector<float> dl(31, 0.f);
+                  for (int bb = 0; bb < 31; ++bb)
+                    dl[bb] = corr[bb] - taste[bb];
+                  int at = 0;
+                  const float cv = LowCurvature(dl, &at);
+                  if (cv > maxLowCurv) {
+                    maxLowCurv = cv;
+                    lowCurvBand = at;
+                    lowCurvDesc = desc;
+                  }
+                  if (cv > kLowCurvCeil) ++lowCurvBad;
                 }
 
                 std::vector<float> oldv = taste, newv = corr;
@@ -643,9 +802,16 @@ static long Sweep() {
   else
     std::printf("  [OK] 신판도 모든 케이스에서 에너지 예산 %.1fdB 준수\n",
                 AdaptiveCurve::kEnergyBudgetDb);
+  std::printf("  최대 저역 곡률 : %.3fdB @ %dHz (상한 %.2f, 허용 %.2f)\n     @ %s\n",
+              maxLowCurv, kF31[lowCurvBand],
+              AdaptiveCurve::kLowCurvatureLimitDb, kLowCurvCeil,
+              lowCurvDesc.c_str());
   if (capBad > 0)
     std::printf("  [FAIL] 설계 상한 위반 %ld 밴드 — 클램프가 풀렸다\n", capBad);
-  return overNew + capBad;
+  if (lowCurvBad > 0)
+    std::printf("  [FAIL] 저역 곡률 상한 초과 %ld건 — 상한이 풀렸다\n",
+                lowCurvBad);
+  return overNew + capBad + lowCurvBad;
 }
 
 int main() {
