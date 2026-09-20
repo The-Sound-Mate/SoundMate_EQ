@@ -345,7 +345,7 @@ std::vector<float> ComputeTasteDelta(const std::vector<float>& measuredDb,
     offset = acc / wsum;
   }
 
-  // 3) 유효 구간의 가장자리는 보정하지 않는다.
+  // 3) 유효 구간의 가장자리는 보정을 서서히 놓는다.
   //
   //  [왜 필요한가] refDb 의 양 끝(20Hz, 20kHz)은 표본 4곡의 아티팩트가 가장
   //  큰 지점이고(원본 기준 -3.9dB / -7.5dB), 코덱이 고역을 잘라낸 곡은 유효
@@ -362,19 +362,30 @@ std::vector<float> ComputeTasteDelta(const std::vector<float>& measuredDb,
   if (firstActive < 0)
     return delta;
 
+  //  [v0.1.1-b] 보호를 이진 차단이 아니라 감쇠 가중치로 건다. 유효 구간의
+  //  끝 밴드는 정확히 0, 안쪽으로 kEdgeTaperBands 밴드에 걸쳐 선형으로 1 이
+  //  된다. 구판의 이진 차단은 경계에 델타 전량만큼의 계단을 남겼다 — 실측
+  //  25Hz/31Hz 사이 3.6dB. (docs/ALGORITHM_CHANGES.md E6)
+  std::vector<float> edgeW(n, 0.f);
+  for (size_t i = 0; i < n; ++i) {
+    const int e = std::min((int)i - firstActive, lastActive - (int)i);
+    if (e <= 0)
+      continue;  // 유효 구간 밖이거나 맨 끝 밴드 — 0 유지
+    edgeW[i] = (e >= kEdgeTaperBands) ? 1.f
+                                      : (float)e / (float)kEdgeTaperBands;
+  }
+
   // 4) 취향 가중 편차 보정.
   //
-  //  corrected[] 로 "실제로 보정한 밴드"를 따로 기록한다 — 6단계에서 필요하다.
-  //  active 만으로는 부족하다: 가장자리 밴드는 active 이지만 의도적으로
-  //  보정하지 않았고, 거기에 오프셋을 뿌리면 끝단 보호가 깨진다.
+  //  corrected[] 로 "보정 대상 밴드"를 따로 기록한다 — 6단계에서 필요하다.
+  //  [v0.1.1-b] 가장자리를 여기서 잘라내지 않는다. 유효 밴드 전체에 대해
+  //  계산해 두고, 5단계 평활까지 끝낸 뒤 edgeW 를 곱한다. 잘라낸 다음 평활
+  //  하면 경계가 평활 구간 **밖**이라 계단이 끝내 남는다 — 그게 E6 이었다.
   const float kAgreeDen = kAgreeScaleDb * kAgreeScaleDb;
   std::vector<bool> corrected(n, false);
   for (size_t i = 0; i < n; ++i) {
     if (!active[i])
       continue;  // 0 유지
-    if ((int)i < firstActive + kSmoothHalfWidth ||
-        (int)i > lastActive - kSmoothHalfWidth)
-      continue;  // 가장자리 — 기준을 신뢰할 수 없다
 
     const float dev   = (measuredDb[i] - refDb[i]) - offset;
     const float taste = haveTaste ? taste31[i] : 0.f;
@@ -409,10 +420,11 @@ std::vector<float> ComputeTasteDelta(const std::vector<float>& measuredDb,
   //  [왜 평활이 옳은가] 이 계층의 목적은 **완만한 스펙트럼 경향** 보정이다.
   //  좁은 노치/피크는 녹음이나 방 특성이지 곡의 음색 성향이 아니고, Q=4.32
   //  필터 한 개로 쫓아가면 위상만 흔들고 이득이 없다.
-  //  가장자리는 여전히 건드리지 않는다.
+  //  가장자리는 아래 5-b 의 감쇠가 따로 맡는다 — 여기서는 유효 구간 전체를
+  //  고르게 평활해야 경계에 평활 이음매가 생기지 않는다.
   {
-    const int lo = firstActive + kSmoothHalfWidth;
-    const int hi = lastActive - kSmoothHalfWidth;
+    const int lo = firstActive;
+    const int hi = lastActive;
     if (hi > lo) {
       std::vector<float> sm = delta;
       for (int i = lo; i <= hi; ++i) {
@@ -429,10 +441,21 @@ std::vector<float> ComputeTasteDelta(const std::vector<float>& measuredDb,
     }
   }
 
+  // 5-b) 가장자리 감쇠. 끝 밴드는 정확히 0 이고 안쪽으로 선형 복귀한다.
+  //      평활 **뒤에** 곱해야 한다 — 먼저 곱하면 평활이 경사를 다시 뭉개서
+  //      끝 밴드가 0 이 아니게 되고 끝단 보호가 깨진다.
+  for (size_t i = 0; i < n; ++i)
+    delta[i] *= edgeW[i];
+
   // 6) 라우드니스 중립화 — 이 계층이 전체 음량을 바꾸지 않도록 보장한다.
   //    실제로 보정한 밴드만 대상으로 가중평균을 빼고 다시 클램프한다.
-  //    2단계의 offset 은 '곡의 음량'을 걷어낸 것이고, 여기는 가장자리 제외와
+  //    2단계의 offset 은 '곡의 음량'을 걷어낸 것이고, 여기는 가장자리 감쇠와
   //    클램프 때문에 델타에 남은 치우침을 걷어내는 것이다 — 목적이 다르다.
+  //
+  //    [v0.1.1-b] 빼는 양에도 edgeW 를 곱한다. 균일하게 빼면 감쇠로 0 을
+  //    만들어 둔 끝 밴드만 mean 만큼 어긋나 계단이 되살아난다. 대신 평균을
+  //    Σ(L·delta) / Σ(L·edgeW) 로 잡으면 Σ L·(delta - edgeW·mean) = 0 이
+  //    정확히 성립해서, 연속성과 라우드니스 중립을 동시에 만족한다.
   if (haveFreqs) {
     float wsum = 0.f, acc = 0.f;
     for (size_t i = 0; i < n; ++i) {
@@ -440,14 +463,15 @@ std::vector<float> ComputeTasteDelta(const std::vector<float>& measuredDb,
         continue;
       const float w = LoudnessWeight((float)freqs[i]);
       acc  += delta[i] * w;
-      wsum += w;
+      wsum += w * edgeW[i];
     }
     if (wsum > 1e-6f) {
       const float mean = acc / wsum;
       for (size_t i = 0; i < n; ++i) {
         if (!corrected[i])
           continue;
-        delta[i] = std::max(-kDevClampDb, std::min(kDevClampDb, delta[i] - mean));
+        delta[i] = std::max(
+            -kDevClampDb, std::min(kDevClampDb, delta[i] - edgeW[i] * mean));
       }
     }
   }

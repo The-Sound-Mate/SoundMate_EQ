@@ -1559,19 +1559,20 @@ void MainWindow::Render() {
           }
         } else {
           // 캐시 없음 — mode에 따라 분기
-          // [작업 C] iTunes 매칭 실패(빈 장르) 시 AI/Global 모두 호출 안 함.
-          // m_currentGenre.empty() = 트랙 미발견 or 장르 태그 없음 → 어차피
-          // 의미있는 결과 못 받음. Flat(0dB) 적용 + 저장 X.
-          // [작업 3-a] AI 호출 자체가 불가능 → 안전한 기본값으로.
-          if (m_currentGenre.empty()) {
-            std::lock_guard<std::mutex> lk(m_eqUpdateMutex);
-            m_queuedGains.assign(m_currentBands.size(), 0.0f);
-            m_pendingEQUpdate = true;
-            m_eqOrigin = EqOrigin::Flat;
-            SetStatus(
-                Lang::T(Lang::NO_TRACK_INFO_FLAT),
-                Theme::COLOR_YELLOW);
-          } else if (mode != EqMode::Off && m_ai) {
+          //
+          // [v0.1.1] 장르가 비었다고 Flat 을 박지 않는다.
+          //   예전에는 m_currentGenre.empty() 면 "어차피 의미있는 결과 못
+          //   받음" 이라며 0dB 를 걸었다. 커브가 장르에서 나오던 v0.1.0
+          //   기준으로는 맞는 판단이었지만, v0.1.1 은 장르 축을 지웠다 —
+          //   자동 경로의 커브는 LocalCurve::Generate("", userPref) 로
+          //   설문에서만 나온다. 곡을 못 찾아도 커브는 똑같이 나온다.
+          //
+          //   피해가 커브 하나로 끝나지도 않았다. origin=Flat 은 :542 의
+          //   델타 가드에 걸려 적응 보정까지 같이 버린다. 적응 보정은 실측
+          //   오디오만 쓰므로 곡 정보와 완전히 무관한데도 함께 죽어서,
+          //   상태바는 "곡 분석 완료 — 보정 적용" 인데 엔진에 나가는 값은
+          //   0dB 였다. 배경: docs/ALGORITHM_CHANGES.md (E5)
+          if (mode != EqMode::Off && m_ai) {
             TriggerAIGeneration();
           }
         }
