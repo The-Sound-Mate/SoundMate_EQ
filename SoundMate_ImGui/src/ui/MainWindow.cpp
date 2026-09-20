@@ -2936,12 +2936,19 @@ void MainWindow::RenderBottomBar() {
                 Theme::COLOR_ORANGE);
       return;
     }
-    if (noSongInfo) {
-      SetStatus(Lang::T(Lang::AUTO_EQ_NEEDS_TRACK),
-                Theme::TEXT_GRAY);
-      return;
-    }
 
+    // [v0.1.1] 곡 해석 게이트(noSongInfo)를 제거했다.
+    //
+    //   이 아래는 AI 경로가 아니다. 바로 다음 줄이 프롬프트 버퍼를 비우므로
+    //   TriggerAIGeneration 은 useLocalCurve(:758) 로 들어가고, 커브는
+    //   LocalCurve::Generate("", userPref) + AdaptiveCurve 델타 — 전부 수식
+    //   연산이다. 네트워크도 iTunes 도 타지 않는다. 곡 제목조차 쓰지 않는다
+    //   (입력은 설문 성향과 실측 스펙트럼뿐).
+    //
+    //   자동 진입 경로에서는 E5 로 이미 이 게이트를 걷어냈다. 메뉴로 들어올
+    //   때만 남겨 두면 같은 함수가 입구에 따라 다른 답을 낸다.
+    //   곡이 있는지는 위 hasSong(:2901) 과 TriggerAIGeneration 자신(:683)이
+    //   이미 본다.
     memset(m_promptBuf, 0, sizeof(m_promptBuf));
     TriggerAIGeneration();
   };
