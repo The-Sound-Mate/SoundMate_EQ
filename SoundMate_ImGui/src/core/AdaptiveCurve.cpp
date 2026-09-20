@@ -347,10 +347,11 @@ std::vector<float> ComputeTasteDelta(const std::vector<float>& measuredDb,
 
   // 3) 유효 구간의 가장자리는 보정을 서서히 놓는다.
   //
-  //  [왜 필요한가] refDb 의 양 끝(20Hz, 20kHz)은 표본 4곡의 아티팩트가 가장
-  //  큰 지점이고(원본 기준 -3.9dB / -7.5dB), 코덱이 고역을 잘라낸 곡은 유효
-  //  구간의 끝 자체가 안쪽으로 들어온다. 배열 끝이 아니라 **유효 구간의 끝**
-  //  기준이어야 두 경우 모두 같은 보호가 걸린다.
+  //  [왜 필요한가] 코덱이 고역을 잘라낸 곡은 유효 구간의 끝 자체가 안쪽으로
+  //  들어오고, 배열의 양 끝(20Hz, 20kHz)은 어느 곡에서도 측정이 가장 불안한
+  //  자리다. 배열 끝이 아니라 **유효 구간의 끝** 기준이어야 두 경우 모두 같은
+  //  보호가 걸린다. (refDb 는 v0.1.1 에서 해석 곡선이 되어 표본 아티팩트
+  //  자체가 사라졌지만, 측정 쪽 불안정은 그대로라 이 보호는 남는다.)
   int firstActive = -1, lastActive = -1;
   for (size_t i = 0; i < n; ++i) {
     if (!active[i])
@@ -373,6 +374,22 @@ std::vector<float> ComputeTasteDelta(const std::vector<float>& measuredDb,
       continue;  // 유효 구간 밖이거나 맨 끝 밴드 — 0 유지
     edgeW[i] = (e >= kEdgeTaperBands) ? 1.f
                                       : (float)e / (float)kEdgeTaperBands;
+  }
+
+  //  [v0.1.1-c] 3-b) 프레즌스 게이트 — '위치'가 아니라 '존재량'으로 깎는다.
+  //  edgeW 와 역할이 다르다: edgeW 는 유효 구간의 끝을 보고, 이쪽은 구간
+  //  **안쪽**이면서도 사실상 비어 있는 밴드를 본다. 근거는 AdaptiveCurve.h 의
+  //  kPresenceSoftDb 주석.
+  //
+  //  위 1단계의 바닥 판정은 floorDb 에서 보정을 통째로 끊는 이진 계단이다.
+  //  여기서 그 경계를 kPresenceSoftDb 에 걸쳐 펴 준다 — 바닥에서 0, 그 위로
+  //  올라오며 1. 피크가 아니라 **중앙값** 기준인 이유는 1단계 주석과 같다.
+  std::vector<float> presence(n, 0.f);
+  for (size_t i = 0; i < n; ++i) {
+    if (!active[i])
+      continue;
+    presence[i] = std::max(
+        0.f, std::min(1.f, (measuredDb[i] - floorDb) / kPresenceSoftDb));
   }
 
   // 4) 취향 가중 편차 보정.
@@ -399,7 +416,8 @@ std::vector<float> ComputeTasteDelta(const std::vector<float>& measuredDb,
     // 편차와 취향의 방향이 같으면 +1(동조), 반대면 -1(상충) 쪽으로 간다.
     const float agree = std::tanh(dev * taste / kAgreeDen);
     const float alpha =
-        kAlphaAgree + (kAlphaOppose - kAlphaAgree) * (1.f - agree) * 0.5f;
+        (kAlphaAgree + (kAlphaOppose - kAlphaAgree) * (1.f - agree) * 0.5f) *
+        presence[i];
 
     float d = -alpha * devq;
     d = std::max(-kDevClampDb, std::min(kDevClampDb, d));

@@ -31,10 +31,15 @@ public:
     // Python generate_all_bands_eq() 대응
     // 한 번 API를 호출해 31밴드를 받고, 나머지는 보간으로 계산
     // accessToken: Supabase JWT. 빈 문자열이면 anon 키 사용(서버에서 401 반환).
+    //
+    // [v0.1.1] genre 인자 삭제. 곡의 음색은 장르 라벨이 아니라 실측 스펙트럼이
+    //   말한다 — 자동 경로에서 뺀 축을 자유 프롬프트 경로에만 남겨 둘 이유가
+    //   없다. 서버는 body.genre 가 없으면 sanitize() 가 "" 로 처리해
+    //   <genre>Unknown</genre> 을 쓰므로, 모든 요청이 같은 상수를 받는다.
+    //   즉 장르는 더 이상 곡마다 다른 결과를 만들지 않는다.
     EQBands GenerateAllBandsEQ(
         const std::string& title,
         const std::string& artist,
-        const std::string& genre       = "Unknown",
         const std::string& userPref    = "",
         const std::string& systemPref  = "Balanced and clear sound",
         const std::string& accessToken = "",
@@ -66,7 +71,6 @@ private:
     std::string CallProxyAPI(
         const std::string& title,
         const std::string& artist,
-        const std::string& genre,
         const std::string& userPref,
         const std::string& systemPref,
         const std::string& accessToken,

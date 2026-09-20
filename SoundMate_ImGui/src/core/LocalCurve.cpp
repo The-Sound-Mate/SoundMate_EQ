@@ -407,30 +407,63 @@ void AddDimension(std::vector<Shape>& dst,
 
 } // namespace
 
-// 선언부(LocalCurve.h)에 이 함수가 왜 평활을 거치는지 적어 뒀다.
+// 선언부(LocalCurve.h)에 이 함수가 왜 해석 곡선인지 적어 뒀다.
+//
+// [v0.1.1-c] 4곡 평균(kRefBlob)의 평활본에서 해석적 3구간 곡선으로 교체했다.
+//   사용자 지시가 "장르로 정해지는 건 전부 빼라"였고, 4곡(발라드/재즈/K-pop/
+//   첼로)의 평균은 그 자체가 장르 표본이다. 평활은 굴곡만 뭉갤 뿐 표본이
+//   어느 장르였는지는 못 지운다. 파라미터 5개(무릎 2개 + 기울기 3개)에는
+//   장르가 들어앉을 자리가 없다 — 그게 이 교체의 요점이다.
+//
+// [왜 이 5개 값인가] tools/ltas_fit_main.cpp 로 실측 적합한 결과다.
+//   20Hz~12.5kHz 전 대역 rms: 2구간 2.126dB → 3구간 0.797dB.
+//   최대오차 8.53dB@20Hz → 2.77dB@40Hz 로 떨어지고, 남은 최대오차가 40Hz 라는
+//   점이 중요하다 — 그건 표본 4곡의 베이스라인 아티팩트(+3.93dB)이고 우리가
+//   버리려던 바로 그 성분이다. 즉 이 모델은 물리는 담고 장르는 버렸다.
+//   반올림 내성도 확인했다: 적합치(203.1Hz/+1.51/-3.10) rms 0.838 vs
+//   반올림값(200Hz/+1.5/-3.0) rms 0.854 — 소수점 뒤는 표본 고유 정보라 버린다.
+//   비교용으로 기울기 0(핑크노이즈)은 rms 5.772 로 완패한다. 기울기는 실재한다.
+//
+// [40Hz 아래를 왜 따로 꺾는가] 2구간 직선은 20Hz 에서 8.5dB 어긋나고, 그
+//   어긋남의 부호가 "기준이 실제보다 높다" 쪽이라 초저역이 있는 곡마다 상시
+//   부스트가 걸린다. 마스터링 하이패스(20~30Hz)는 장르가 아니라 제작 관행이므로
+//   기준에 넣는 게 맞다. 무릎은 40Hz 가 뚜렷하다 — 50/63/80Hz 는 전부 악화됐다.
+//
+// [DC 는 자유] AdaptiveCurve 의 offset 이 (measured-ref) 의 가중평균을 빼므로
+//   ref 의 상수항은 dev 에서 정확히 상쇄된다. 100Hz~5kHz 평균을 0 으로 두는 건
+//   순전히 사람이 읽기 좋으라고 고른 값이다 — 음색에는 영향이 없다.
 const std::vector<float>& ReferenceShapeDb() {
   static const std::vector<float> t = [] {
-    const std::array<float, 31>& ref = RefSpectrum();
-    std::array<float, 31> db{};
-    for (std::size_t b = 0; b < 31; ++b)
-      db[b] = (ref[b] > 1e-12f) ? (float)(10.0 * std::log10((double)ref[b]))
-                                : -120.f;
+    // 1/3 옥타브라 밴드 인덱스가 곧 로그축이다: x = (i-17)/3 [옥타브, 1kHz 기준].
+    // 덕분에 주파수 표 없이 무릎을 밴드 3(40Hz)·밴드 10(200Hz)에 정확히 놓는다.
+    constexpr float kKneeLoIdx = 3.f;    //  40Hz — 마스터링 하이패스
+    constexpr float kKneeIdx   = 10.f;   // 200Hz — 음악 에너지 정점
+    constexpr float kSlopeSub  = 10.0f;  // 40Hz 아래: 옥타브당 10dB 로 급락
+    constexpr float kSlopeLow  = 1.5f;   // 40~200Hz: 완만한 어깨
+    constexpr float kSlopeHigh = -3.0f;  // 200Hz 위: 옥타브당 3dB 롤오프
 
-    // 로그주파수 ±2밴드 이동평균. 밴드 인덱스가 곧 로그축이므로 인덱스
-    // 평균이 곧 로그축 평균이다 (AdaptiveCurve 의 추세 계산과 같은 창).
-    std::vector<float> sm(31, 0.f);
+    const float xk  = (kKneeIdx - 17.f) / 3.f;
+    const float xkl = (kKneeLoIdx - 17.f) / 3.f;
+
+    std::vector<float> sh(31, 0.f);
     for (int i = 0; i < 31; ++i) {
-      float sum = 0.f;
-      int   cnt = 0;
-      const int lo = std::max(0, i - 2);
-      const int hi = std::min(30, i + 2);
-      for (int k = lo; k <= hi; ++k) {
-        sum += db[k];
-        ++cnt;
-      }
-      sm[i] = sum / (float)cnt;
+      const float x = ((float)i - 17.f) / 3.f;
+      if (x >= xk)
+        sh[i] = kSlopeHigh * (x - xk);
+      else if (x >= xkl)
+        sh[i] = kSlopeLow * (x - xk);
+      else
+        sh[i] = kSlopeLow * (xkl - xk) + kSlopeSub * (x - xkl);
     }
-    return sm;
+
+    // 코어(100Hz~5kHz, 밴드 7~24) 평균을 0 으로. DC 는 상쇄되므로 임의값이다.
+    float acc = 0.f;
+    for (int i = 7; i <= 24; ++i)
+      acc += sh[i];
+    const float dc = acc / 18.f;
+    for (int i = 0; i < 31; ++i)
+      sh[i] -= dc;
+    return sh;
   }();
   return t;
 }

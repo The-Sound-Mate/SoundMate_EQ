@@ -802,7 +802,12 @@ void MainWindow::TriggerAIGeneration() {
         SetStatus("AI: Sending request to Proxy...", Theme::TEXT_WHITE);
       }
 
-      result = m_ai->GenerateAllBandsEQ(aiTitle, aiArtist, m_currentGenre,
+      // [v0.1.1] m_currentGenre 를 더 이상 보내지 않는다. 두 가지 이유다.
+      //   1) 자동 경로에서 제거한 장르 축이 여기에만 살아 있었다.
+      //   2) 이 멤버는 곡 해석 스레드(:1512)가 쓰고 여기서는 AI 워커가
+      //      락 없이 읽었다 — 제목/아티스트는 바로 위(:716)에서 스냅샷을
+      //      뜨는데 장르만 예외였다.
+      result = m_ai->GenerateAllBandsEQ(aiTitle, aiArtist,
                                         prompt, userPref, accessToken,
                                         abortFlagPtr.get());
 
@@ -1405,6 +1410,17 @@ void MainWindow::Render() {
       // [EQ 복원용] 곡 바뀜 → 이전 곡 원본 스냅샷 무효화.
       m_aiOriginalGains31.clear();
       m_aiOriginalSongKey.clear();
+      // [v0.1.1] 곡 해석 결과도 같이 무효화한다. 대입은 해석이 끝난 뒤
+      //   (:1527) 한 곳뿐이라, 지우지 않으면 디바운스 3초 + 네트워크 왕복
+      //   동안 "이전 곡은 해석됐다" 는 상태가 새 곡의 것으로 읽힌다.
+      //   :2799 의 프롬프트 게이트가 이 값을 보므로 지금은 정확도 문제다.
+      {
+        std::lock_guard<std::mutex> lk(m_canonicalMutex);
+        m_canonicalTitle.clear();
+        m_canonicalArtist.clear();
+        m_canonicalTrackId = 0;
+      }
+      m_currentGenre.clear();  // 정보 패널 표시 전용 — 이전 곡 장르 잔상 제거
       // [LOG] 정규화 결과 + 메타 출력
       std::string logMsg =
           artist + " - " + title +
@@ -2795,8 +2811,18 @@ void MainWindow::RenderBottomBar() {
   // [Phase 3] Free 플랜은 프롬프트 입력 자체를 비활성. 안내 + 구독 버튼만 노출.
   const bool aiEligible = g_recordManager.IsAIEligible();
   // [작업 C] 곡 정보(정규화 결과)가 없으면 프롬프트도 비활성 + 안내.
-  // m_currentGenre.empty() → iTunes 매칭 실패 or 트랙 자체 미발견.
-  const bool noSongInfo = m_currentGenre.empty();
+  //
+  // [v0.1.1] 판정을 m_currentGenre.empty() 에서 trackId 로 바꿨다. 장르는
+  //   "해석됐는가" 의 대리 변수로 쓰기에 세 가지가 틀렸다.
+  //   - 의미: 해석 성공 신호는 GenreManager 의 info.valid 이고 장르는 그 안의
+  //     선택 속성이다. iTunes 가 장르를 안 주면 해석에 성공하고도 잠겼다.
+  //   - 스레드: 곡 해석 스레드(:1512)가 쓰는 std::string 을 렌더 스레드가
+  //     락 없이 읽었다. m_canonicalTrackId 는 m_canonicalMutex 아래 있다.
+  //   - 신선도: 둘 다 해석 완료 시점에만 대입되므로, 곡이 바뀐 직후에는
+  //     이전 곡의 값이 남았다 — 이건 :1405 의 무효화 블록에서 같이 고쳤다.
+  //   m_canonicalTitle 은 쓸 수 없다. 미해석 시 원본 제목으로 폴백하므로
+  //   (:1518) "해석됨" 이 아니라 "곡이 있음" 을 뜻한다.
+  const bool noSongInfo = SnapshotCanonical().trackId == 0;
   const bool hasSong = !m_currentTitle.empty();
 
   auto withSongKeys = [&](auto fn) {

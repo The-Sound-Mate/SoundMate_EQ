@@ -164,10 +164,13 @@ private:
   std::string m_currentArtist;
   std::string m_rawTitle;          // UI 표시용 원본 제목
   std::string m_rawArtist;         // UI 표시용 원본 아티스트
+  // [v0.1.1] 정보 패널 표시 전용. 커브 산출에도, AI 프롬프트에도 쓰지 않는다.
+  //   판정에 쓰지 말 것 — "해석됐는가" 는 m_canonicalTrackId 가 답한다.
+  //   (iTunes 가 장르를 안 주는 해석 성공 케이스가 있다.)
   std::string m_currentGenre;
   // [v0.1.0] 서버(resolve-track)가 준 31밴드 커브. 비어 있으면 LocalCurve 폴백.
-  //   m_currentGenre 와 같은 스레드에서 쓰이고(곡 변경 스레드), AI 스레드는
-  //   그 뒤에 생성되므로 happens-before 로 보호된다 — 별도 락 불필요.
+  //   곡 변경 스레드에서만 쓰이고, AI 스레드는 그 뒤에 생성되므로
+  //   happens-before 로 보호된다 — 별도 락 불필요.
   std::vector<float> m_serverCurve31;
   // [EQ on/off 음량 일치] 그 곡의 실측 스펙트럼 스냅샷.
   //   m_adaptiveMutex 로 보호. 델타를 받을 때만 갱신된다.

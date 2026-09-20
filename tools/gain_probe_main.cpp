@@ -587,6 +587,165 @@ static int CheckControlLaw() {
         AdaptiveCurve::kLowCurvatureLimitDb, kBroadCeil);
   }
 
+  // ── A6. 프레즌스 게이트 (v0.1.1-c) ────────────────────────────────────────
+  // [왜 따로 묻는가] 이 게이트는 정상 음원에서 항등이다. 그래서 A1~A5 를 다
+  //   통과해도 "발동해도 옳아서 통과"인지 "한 번도 발동을 안 해서 통과"인지
+  //   구분되지 않는다. 발동 조건을 인위적으로 만들어 셋을 나눠 묻는다.
+  {
+    // 게이트가 보는 것과 같은 방식으로 바닥을 구한다 (중앙값 - kFloorRangeDb).
+    auto floorOf = [](const std::vector<float>& m) {
+      std::vector<float> s(m);
+      std::sort(s.begin(), s.end());
+      return s[s.size() / 2] - AdaptiveCurve::kFloorRangeDb;
+    };
+
+    // 5-b 의 가장자리 감쇠를 그대로 재현한다. edgeW 가 0 인 밴드는 델타가
+    // 정확히 0 으로 덮어씌워지므로, 그 자리에서 게이트가 무슨 값이든 출력에
+    // 닿지 못한다 — 항등 검사에서 빼는 근거가 이것이다.
+    auto edgeWOf = [](const std::vector<float>& m, float fl) {
+      const int n = (int)m.size();
+      std::vector<float> w((size_t)n, 0.f);
+      int first = -1, last = -1;
+      for (int i = 0; i < n; ++i) {
+        if (!(m[i] > fl)) continue;
+        if (first < 0) first = i;
+        last = i;
+      }
+      if (first < 0) return w;
+      for (int i = 0; i < n; ++i) {
+        const int e = std::min(i - first, last - i);
+        if (e <= 0) continue;
+        w[(size_t)i] = (e >= AdaptiveCurve::kEdgeTaperBands)
+                           ? 1.f
+                           : (float)e / (float)AdaptiveCurve::kEdgeTaperBands;
+      }
+      return w;
+    };
+
+    // A6a 항등 — 실음악 LTAS 에서 **보정이 실제로 나가는** 밴드는 전부
+    //   바닥+kPresenceSoftDb 위여야 한다. 그래야 곱해지는 값이 1 이고 기존
+    //   동작과 완전히 같아진다.
+    //
+    //   유효 구간의 양 끝(edgeW == 0)은 제외한다. 실측 light LTAS 의 20Hz 는
+    //   중앙값보다 31dB 아래라 게이트가 0.9 로 닫히지만, 그 밴드는 5-b 가
+    //   어차피 0 으로 덮으므로 음색이 바뀌지 않는다. 그 자리까지 항등을
+    //   요구하면 게이트가 아니라 LTAS 의 저역 절벽을 시험하는 꼴이 된다.
+    {
+      const float* lt[] = {kLtasPop, kLtasBass, kLtasLight, kLtasFlat,
+                           kLtasBright};
+      const char* ln[] = {"pop", "bass", "light", "flat", "bright"};
+      float worst = 1e9f;
+      int wl = 0, wb = 0, tested = 0;
+      for (int L = 0; L < 5; ++L) {
+        const std::vector<float> m(lt[L], lt[L] + 31);
+        const float fl = floorOf(m);
+        const std::vector<float> ew = edgeWOf(m, fl);
+        for (int b = 0; b < 31; ++b) {
+          if (!(m[b] > fl) || ew[(size_t)b] <= 0.f) continue;
+          ++tested;
+          const float margin = m[b] - (fl + AdaptiveCurve::kPresenceSoftDb);
+          if (margin < worst) { worst = margin; wl = L; wb = b; }
+        }
+      }
+      const bool ok = (tested >= 100) && (worst >= 0.f);
+      if (!ok) ++fails;
+      std::printf(
+          "  %s A6a 게이트 항등: 실음악 5종 %d 밴드에서 최저 여유 %+.2f dB "
+          "@ %dHz (%s) — 보정이 나가는 밴드는 게이트 완전 개방 (기준 0 이상)\n",
+          OkTag(ok), tested, worst, kF31[wb], ln[wl]);
+    }
+
+    //  아래 두 검사는 유효 구간 **안쪽**의 밴드만 판다 — 63Hz(5번) / 8kHz(26번)
+    //  는 양쪽 끝에서 kEdgeTaperBands 이상 떨어져 있어 edgeW 가 정확히 1 이다.
+    //  끝단(edgeW 0.25~0.5)에서 재면 게이트가 일한 건지 가장자리 감쇠가 일한
+    //  건지 구분되지 않는다. 이 두 밴드에서 델타가 사라진다면 그건 게이트다.
+    //
+    //  판 밴드를 바닥 아래로 깊이 내려 두면 정렬 순서상 계속 최하위라서
+    //  중앙값이 움직이지 않는다 — 그래서 floorDb 를 한 번만 구해 놓고 쓴다.
+    const int kProbe[] = {5, 26};  // 63Hz, 8kHz
+
+    // A6b 소멸 — 바닥 바로 위 밴드는 보정이 0 으로 수렴해야 하고, 바닥에서
+    //   멀어질수록 단조로 살아나야 한다. 이게 코덱 절벽(16k 힙노이즈 부스트)과
+    //   첼로 독주 31Hz 부스트를 동시에 막는 지점이다.
+    {
+      float worstNear = 0.f;   // δ 가 가장 작을 때 남아 있는 |delta|
+      int wnb = 0;
+      float worstDrop = 0.f;   // 단조 증가를 거스른 최대량
+      int wdb = 0;
+      float wdd = 0.f;
+      int tested = 0;
+      for (size_t pi = 0; pi < sizeof(kProbe) / sizeof(kProbe[0]); ++pi) {
+        const int b = kProbe[pi];
+        std::vector<float> base =
+            MeasuredFromDev(std::vector<float>(31, 0.f), -20.f);
+        base[b] = -400.f;
+        const float fl = floorOf(base);
+        float prev = 0.f;
+        bool have = false;
+        for (float dep = 0.05f;
+             dep <= AdaptiveCurve::kPresenceSoftDb + 1e-4f; dep += 0.05f) {
+          std::vector<float> m = base;
+          m[b] = fl + dep;
+          const std::vector<float> d =
+              AdaptiveCurve::ComputeTasteDelta(m, Usable(), Freqs(), taste);
+          if (d.size() != 31) continue;
+          ++tested;
+          const float mag = std::fabs(d[b]);
+          if (!have && mag > worstNear) { worstNear = mag; wnb = b; }
+          if (have && prev - mag > worstDrop) {
+            worstDrop = prev - mag; wdb = b; wdd = dep;
+          }
+          prev = mag;
+          have = true;
+        }
+      }
+      const bool ok =
+          (tested >= 200) && (worstNear <= 0.10f) && (worstDrop <= 0.01f);
+      if (!ok) ++fails;
+      std::printf(
+          "  %s A6b 빈 밴드 소멸: %d 케이스, 바닥+0.05dB 잔량 %.4f dB @ %dHz "
+          "(기준 0.10) / 단조 역행 %.4f dB @ %dHz (δ %.2f, 기준 0.01)\n",
+          OkTag(ok), tested, worstNear, kF31[wnb], worstDrop, kF31[wdb], wdd);
+    }
+
+    // A6c 연속 — 바닥을 가로질러 쓸어도 계단이 없어야 한다. 이진 차단으로
+    //   만들면 경계에 델타 전량만큼의 단차가 남는다(E6 에서 겪은 실패).
+    //   구판의 바닥 판정 자체가 그 이진 계단이었고, 이 게이트가 그걸 편다.
+    {
+      float worst = 0.f;
+      int wb = 0;
+      float wd = 0.f;
+      for (size_t pi = 0; pi < sizeof(kProbe) / sizeof(kProbe[0]); ++pi) {
+        const int b = kProbe[pi];
+        std::vector<float> base =
+            MeasuredFromDev(std::vector<float>(31, 0.f), -20.f);
+        base[b] = -400.f;
+        const float fl = floorOf(base);
+        float prev = 0.f;
+        bool have = false;
+        for (float dep = -3.f; dep <= 13.f + 1e-4f; dep += 0.05f) {
+          std::vector<float> m = base;
+          m[b] = fl + dep;
+          const std::vector<float> d =
+              AdaptiveCurve::ComputeTasteDelta(m, Usable(), Freqs(), taste);
+          if (d.size() != 31) continue;
+          if (have) {
+            const float step = std::fabs(d[b] - prev);
+            if (step > worst) { worst = step; wb = b; wd = dep; }
+          }
+          prev = d[b];
+          have = true;
+        }
+      }
+      const bool ok = (worst <= 0.15f);
+      if (!ok) ++fails;
+      std::printf(
+          "  %s A6c 게이트 연속: 바닥 기준 -3~+13dB 를 0.05dB 씩 가로지를 때 "
+          "최대 계단 %.4f dB @ %dHz (바닥+%.2f)  기준 0.15\n",
+          OkTag(ok), worst, kF31[wb], wd);
+    }
+  }
+
   return fails;
 }
 

@@ -50,7 +50,6 @@ AIClient::AIClient() {
 std::string AIClient::CallProxyAPI(
     const std::string& title,
     const std::string& artist,
-    const std::string& genre,
     const std::string& userPref,
     const std::string& systemPref,
     const std::string& accessToken,
@@ -70,10 +69,12 @@ std::string AIClient::CallProxyAPI(
     // 비어있으면 빈 토큰 그대로 보내 401을 받게 한다 (UI에서 재로그인 유도).
     const std::string& userJwt = accessToken;
 
+    // [v0.1.1] genre 필드를 보내지 않는다. 서버는 구버전 클라이언트를 위해
+    //   body.genre 를 계속 읽지만(sanitize 가 없는 값을 "" 로 만든다), 우리는
+    //   더 이상 채우지 않는다 — 서버 재배포 없이 축만 끊는다.
     json body = {
         {"title",      title},
         {"artist",     artist},
-        {"genre",      genre},
         {"userPref",   userPref},
         {"systemPref", systemPref}
     };
@@ -153,7 +154,6 @@ std::vector<float> AIClient::ParseGainsFromResponse(const std::string& jsonText)
 EQBands AIClient::GenerateAllBandsEQ(
     const std::string& title,
     const std::string& artist,
-    const std::string& genre,
     const std::string& userPref,
     const std::string& systemPref,
     const std::string& accessToken,
@@ -172,7 +172,7 @@ EQBands AIClient::GenerateAllBandsEQ(
     auto tryOnce = [&](const std::string& tok) -> std::string {
         httpCode = 0;
         body.clear();
-        return CallProxyAPI(title, artist, genre, userPref,
+        return CallProxyAPI(title, artist, userPref,
                             systemPref, tok, &httpCode, &body, abortFlag);
     };
 
