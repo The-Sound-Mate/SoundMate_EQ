@@ -1,34 +1,66 @@
 // src/core/AdaptiveCurve.h
 //
-// 측정한 곡의 장기 평균 스펙트럼(LTAS)에서 31밴드 보정 델타를 산출한다.
+// 곡의 장기 평균 스펙트럼(LTAS)과 사용자 취향 커브에서 31밴드 보정 델타를
+// 산출한다.
 //
 // ─────────────────────────────────────────────────────────────────────────────
-// [무엇을 보정하고 무엇을 건드리지 않는가 — 이 모듈의 핵심 설계 결정]
+// [v0.1.1 제어식 — 이 모듈의 핵심 설계 결정]
 //
-// 순진한 방식은 "측정 스펙트럼을 고정 타겟 커브에 맞추는" 것이다. 그건 스펙트럼
-// 화이트닝이고, 잘 마스터링된 곡일수록 망가진다. 힙합의 묵직한 저역은 엔지니어가
-// 의도한 것인데 "저역이 많다"는 이유로 깎아버리기 때문이다.
+// 이전 버전은 **곡 자신의 완만한 추세로부터의 이탈**만 깎았다. 곡의 의도는
+// 보존됐지만 사용자 취향이 개입할 자리가 없었고, 설문 커브는 이 계층 밖에서
+// 따로 더해졌다 — 제어 루프가 둘이라 서로 싸웠다.
 //
-// 그래서 여기서는 **곡 자신의 완만한 추세(smoothed trend)로부터의 이탈**만
-// 보정한다:
+// v0.1.1 은 둘을 하나의 식으로 합친다. 기준(refDb)은 "평균적인 음악은 이렇게
+// 생겼다"를 담은 LocalCurve::ReferenceShapeDb(), 목표(taste)는 설문이 말하는
+// 음색이다.
 //
-//     delta[i] = -(measured[i] - smoothed[i]) * strength     (±clamp)
+//     dev[b]   = (measured[b] - refDb[b]) - offset        // 이 곡의 편차
+//     offset   = 라우드니스 가중 평균(measured - refDb)    // 재생 음량 제거
+//     dev'[b]  = sign(dev)·max(0, |dev| - kTasteDeadzoneDb)
+//     agree[b] = tanh( dev[b]·taste[b] / kAgreeScaleDb² )  // +1 동조, -1 상충
+//     α[b]     = kAlphaAgree + (kAlphaOppose - kAlphaAgree)·(1 - agree[b])/2
 //
-//   - smoothed = 로그 주파수 축에서 ±2밴드(약 1.3옥타브) 이동평균
-//   - 넓은 기울기(= 곡의 음색적 의도)는 smoothed 에 그대로 남아 상쇄된다
-//   - 좁은 봉우리/골(부밍한 80Hz, 거슬리는 3kHz)만 델타로 잡힌다
+//     corr[b]  = taste[b] - clamp( α[b]·dev'[b], ±kDevClampDb )
 //
-// 결과적으로:
-//   * 곡의 예술적 톤 밸런스는 보존된다
-//   * 좁은 대역의 불균형만 완만하게 다듬는다
-//   * 이미 매끈한 곡에서는 델타가 자연히 0 에 가깝다 (과잉 개입 없음)
-//   * 그러면서도 곡마다 값이 달라진다 (장르 커브만으로는 불가능했던 차별화)
+// 이 헤더의 ComputeTasteDelta 가 돌려주는 것은 `corr - taste`, 즉 **취향 커브에
+// 더하면 corr 이 되는 상대량**이다. 덕분에 MainWindow 의 합성 코드
+// (master31[i] += delta[i]) 는 한 줄도 바뀌지 않는다.
+//
+// [왜 α 가 두 개인가 — 비대칭이 요점이다]
+//   저음이 강한 곡을 저음 좋아하는 사람에게 틀면 깎을 이유가 없다. 같은 저음
+//   이라도 저음을 싫어하는 사람에게는 깎아야 한다. 편차와 취향의 방향이 같으면
+//   (동조) 약하게, 반대면(상충) 강하게 민다.
+//
+//     평범한 곡     dev= 0, taste=+4.0                → corr=+4.0  취향 그대로
+//     저음 강한 곡  dev=+6, taste=+4.0 (동조 α=0.25)  → corr=+2.5  개성 보존
+//     고음 강한 곡  dev=+6, taste=-2.5 (상충 α=0.70)  → corr=-6.7  확실히 깎음
+//     저음 약한 곡  dev=-5, taste=+4.0 (상충 α=0.70)  → corr=+7.5  목표로 끌어올림
+//     어두운 곡     dev=-5, taste=-2.5 (동조 α=0.25)  → corr=-1.25 어둠 유지
+//
+//   taste 항의 가중치는 1 로 **고정한다**. α 를 taste 에도 곱하면 편차가 0 인
+//   평범한 곡에서 설문 반영이 절반 이하로 줄어든다 — 조용한 회귀다.
+//
+// [왜 데드존이 있는가]
+//   ±kTasteDeadzoneDb 안쪽의 편차는 '곡의 개성'으로 보고 건드리지 않는다.
+//   빼기 방식이라 경계에서 계단이 생기지 않는다.
+//
+// [곡 중간에 분위기가 바뀌면]
+//   AdaptiveEngine 이 25초 EMA 로 LTAS 를 따라가며 5초마다 재산출하고,
+//   MainWindow 가 3초 지수 평활을 건다. 시간상수는 v0.1.1 에서 건드리지
+//   않았다 — 더 빠르게 하면 매크로 컴프레서처럼 들린다.
 //
 // [측정 불가 대역 보호]
 //   MP3/AAC 는 15~16kHz 위를 잘라내고, 많은 곡은 30Hz 아래에 실질 내용이 없다.
-//   그런 밴드는 측정값이 바닥이라 추세 대비 "부족"으로 보이고, 그대로 두면
-//   존재하지 않는 신호(사실상 노이즈 플로어)를 부스트하게 된다.
-//   피크 밴드보다 kFloorRangeDb 이상 낮은 밴드는 델타를 0 으로 만든다.
+//   그런 밴드는 측정값이 바닥이라 기준 대비 "부족"으로 보이고, 그대로 두면
+//   존재하지 않는 신호(사실상 노이즈 플로어)를 부스트하게 된다. 유효 밴드
+//   중앙값보다 kFloorRangeDb 이상 낮은 밴드와 유효 구간 가장자리 ±2밴드는
+//   델타를 0 으로 둔다.
+//
+// [기준 스펙트럼의 표본 부채]
+//   ReferenceShapeDb() 의 원본 배열은 4곡 평균이라 40Hz +3.9dB, 20kHz -7.5dB
+//   의 표본 아티팩트가 있다. 그래서 LocalCurve 쪽에서 ±2밴드 평활을 걸어
+//   넘어온다 — docs/ALGORITHM_CHANGES.md 의 E1 참조. 평활은 잡음을 덮을 뿐
+//   표본을 늘려주지 않는다. 로그가 쌓이면 원본 배열을 재산출할 것.
 // ─────────────────────────────────────────────────────────────────────────────
 #pragma once
 
@@ -36,20 +68,31 @@
 
 namespace AdaptiveCurve {
 
-// 추세 계산용 이동평균 반폭(밴드 수). 2 = 총 5밴드 ≈ 1.3옥타브.
+// 유효 구간 가장자리 보호 폭(밴드 수). 2 = 양 끝 2밴드씩 보정하지 않는다.
+// LocalCurve::ReferenceShapeDb() 의 평활 창과 같은 폭이다.
 constexpr int kSmoothHalfWidth = 2;
 
-// 보정 강도. 1.0 이면 이탈을 완전히 상쇄.
-// [0.5 -> 0.7] 원래 0.5 는 "20초 표본이 곡 전체를 대표하지 못한다"는 이유였다.
-//   지금은 5초마다 재산출 + 3초 지수 평활이 붙어 표본이 틀려도 곧 따라잡으므로
-//   그만큼 보수적일 이유가 줄었다. 곡 중간에 분위기가 크게 바뀌는 구간에서
-//   반응이 눈에 띄게 커진다.
-constexpr float kDefaultStrength = 0.7f;
+// [v0.1.1] 편차 보정 계수 — 비대칭이 요점이다 (상단 설계 노트 참조).
+//   동조(편차가 취향과 같은 방향): 곡의 개성을 남긴다.
+//   상충(반대 방향): 싫은 것은 확실히 깎는다.
+// 청취 확인 전 초기값. 올리면 곡마다 음색이 균질해지고(화이트닝에 가까워지고),
+// 내리면 곡의 원본 밸런스가 그대로 남는다.
+constexpr float kAlphaAgree  = 0.25f;
+constexpr float kAlphaOppose = 0.70f;
 
-// 델타 상한 (dB). 원곡 밸런스를 훼손하지 않는 범위.
+// 동조/상충 판정의 부드러움 (dB). agree = tanh(dev·taste / 이 값²) 이므로
+// 편차와 취향이 각각 이 크기일 때 판정이 76% 진행된다. 작게 잡을수록 부호만
+// 보는 하드 스위치에 가까워져 이웃 밴드 사이에 계단이 생긴다.
+constexpr float kAgreeScaleDb = 3.0f;
+
+// 이만큼의 편차는 '곡의 개성'으로 보고 건드리지 않는다 (dB).
+// 빼기 방식(소프트)이라 경계에서 불연속이 생기지 않는다.
+constexpr float kTasteDeadzoneDb = 1.5f;
+
+// 편차 보정량 상한 (dB). 구판 kDefaultClampDb 와 같은 값이다.
 // [3.0 -> 5.0] "보정 적용 (최대 N dB)" 의 N 이 너무 작다는 피드백. 곡 안에서
 //   분위기가 확 바뀌는 구간을 따라가려면 3dB 로는 자주 상한에 걸린다.
-constexpr float kDefaultClampDb = 5.0f;
+constexpr float kDevClampDb = 5.0f;
 
 // 유효 밴드 **중앙값** 대비 이만큼 아래면 "내용 없음"으로 보고 보정하지 않는다.
 // 최댓값이 아니라 중앙값 기준인 이유는 AdaptiveCurve.cpp 의 해당 주석 참조.
@@ -66,17 +109,6 @@ constexpr float kFloorRangeDb = 40.0f;
 std::vector<float> RenderedAtBands(const std::vector<float>& gains,
                                    const std::vector<int>& freqs);
 
-// measuredDb : SpectrumAnalyzer::BandLevelsDb() 결과
-// usable     : SpectrumAnalyzer::BandUsable() (나이퀴스트 제외 밴드)
-// freqs      : 밴드 중심주파수 (AIClient::F31). 라우드니스 가중 중립화에 쓴다.
-//              비워서 넘기면 중립화를 건너뛴다.
-// 반환       : measuredDb 와 같은 크기의 dB 델타. 입력이 비면 빈 벡터.
-//
-// [라우드니스 중립화] 델타의 가중평균을 0 으로 맞춘다.
-//   이탈 보정은 구조상 합이 0 근처지만 **보장은 아니다** — 가장자리 제외와
-//   클램프 때문에 한쪽으로 치우칠 수 있다. 치우치면 곡이 바뀔 때마다 음량이
-//   미묘하게 오르내린다. 보정의 '모양'은 그대로 두고 공통 오프셋만 빼므로
-//   부작용이 없다. LocalCurve 의 중립화와 같은 가중치를 쓴다.
 // [에너지 예산] EQ 가 원곡에 더해도 되는 총에너지 상한(dB).
 //
 // 리미터 개입을 통제하는 유일한 실질 변수다. 실측: 커브가 +3.74dB 를 더했을
@@ -85,7 +117,7 @@ std::vector<float> RenderedAtBands(const std::vector<float>& gains,
 // [2.5 -> 1.5 원복] 2.5 는 "EQ 효과가 약하다"를 전체 커브 강도로 잘못 읽고
 // 올린 값이었다. 실제 요구는 **곡 안에서 반응하는 폭**(적응 델타)이었고,
 // 전체 강도는 오히려 과했다. 여기는 리미터 여유를 지키는 자리이므로
-// 보수적으로 둔다 — 곡 내 반응은 kDefaultClampDb / kDefaultStrength 가 맡는다.
+// 보수적으로 둔다 — 곡 내 반응은 kDevClampDb / kAlphaAgree&kAlphaOppose 가 맡는다.
 //
 // [다시 올리지 말 것] "EQ 가 풍부하지 않다"는 체감이 또 나오면 이 숫자를
 // 건드리고 싶어진다. 확인된 원인은 셋 다 예산의 **크기**가 아니었다 —
@@ -120,8 +152,14 @@ constexpr float kEnergyBudgetDb = 1.5f;
 //      의도의 약 1.5배다. 그래서 1단계 정렬도 2단계 예산도 전부
 //      RenderedAtBands 를 통과시킨 뒤에 잰다.
 //
-//      지분 가중 + 컷 보존 + 렌더 기준으로 바꾼 뒤 전수 81920 케이스에서
+//      지분 가중 + 컷 보존 + 렌더 기준으로 바꾼 뒤 v0.1.0 전수 81920 케이스에서
 //      평균 렌더 스팬 잔존 87.9% -> 94.1%, 예산 초과 38953건 -> 0건.
+//
+//      [v0.1.1] 장르 축이 빠지고 편차 축이 들어와 스윕은 15360 케이스다
+//      (설문 1024 x LTAS 5 x 편차 3). 정규화에 넣는 입력도 취향만이 아니라
+//      **취향+델타**로 바뀌었다 — 구판은 델타가 예산 밖에 있어 게이트가
+//      초록인데 실제 경로는 예산을 넘을 수 있었다. 같은 1.5dB 예산에서
+//      구판 2942건 초과 -> 신판 0건.
 //      (검증: tools/gain_probe_main.cpp)
 //
 // 크기가 안 맞거나 측정이 없으면 아무것도 하지 않는다.
@@ -130,10 +168,26 @@ void NormalizeForPlayback(std::vector<float>& gains,
                           const std::vector<bool>& usable,
                           const std::vector<int>& freqs);
 
-std::vector<float> ComputeDelta(const std::vector<float>& measuredDb,
-                                const std::vector<bool>&  usable,
-                                const std::vector<int>&   freqs,
-                                float strength = kDefaultStrength,
-                                float clampDb  = kDefaultClampDb);
+// measuredDb : SpectrumAnalyzer::BandLevelsDb() / SlowLevelsDb() 결과 (dBFS)
+// usable     : SpectrumAnalyzer::BandUsable() (나이퀴스트 제외 밴드)
+// freqs      : 밴드 중심주파수 (AIClient::F31). 라우드니스 가중에 쓴다.
+//              크기가 안 맞으면 가중치 없이(균등) 음량 오프셋만 걷고 마지막
+//              중립화는 건너뛴다.
+// taste31    : LocalCurve::Generate("", tendency) 결과. 크기가 안 맞거나
+//              비어 있으면 전부 0 으로 본다 — 설문 전이면 순수 기준 정규화.
+// 반환       : measuredDb 와 같은 크기의 dB 델타 = `corr - taste`.
+//              **취향 커브에 더하면 최종 커브가 된다.** 입력이 비면 빈 벡터.
+//
+// 제어식 전문은 이 파일 상단 설계 노트에 있다.
+//
+// [라우드니스 중립화] 마지막에 델타의 가중평균을 0 으로 맞춘다.
+//   편차 보정은 구조상 합이 0 근처지만 **보장은 아니다** — 가장자리 제외와
+//   클램프 때문에 한쪽으로 치우칠 수 있다. 치우치면 곡이 바뀔 때마다 음량이
+//   미묘하게 오르내린다. 보정의 '모양'은 그대로 두고 공통 오프셋만 빼므로
+//   부작용이 없다. LocalCurve 의 중립화와 같은 가중치를 쓴다.
+std::vector<float> ComputeTasteDelta(const std::vector<float>& measuredDb,
+                                     const std::vector<bool>&  usable,
+                                     const std::vector<int>&   freqs,
+                                     const std::vector<float>& taste31);
 
 } // namespace AdaptiveCurve

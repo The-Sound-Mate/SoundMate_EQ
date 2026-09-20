@@ -128,6 +128,18 @@ public:
   // outIsFirst: 이 곡에서 처음 적용되는 델타인가 (상태 표시 억제용).
   bool TryTakeDelta(std::vector<float>& out, bool* outIsFirst = nullptr);
 
+  // [v0.1.1] 이 곡에 적용될 **취향 커브**(LocalCurve::Generate 결과, 31밴드).
+  //
+  //   제어식의 α 가 "편차가 취향과 같은 방향인가"를 보므로 워커가 취향을
+  //   알아야 한다. 델타는 `corr - taste` 로 반환되니, 호출부는 여기에 넘긴
+  //   것과 **같은 커브**에 델타를 더해야 한다.
+  //
+  //   [무엇을 넘겨야 하는가] 곡 전환 보간 중인 값이 아니라 **확정된 목표값**
+  //   이다. m_eqGains31Master 는 2초 ease-in-out 의 목적지이면서 동시에
+  //   제어식 입력이라, 그걸 읽으면 곡이 바뀐 직후 2초간 setpoint 가 움직인다.
+  //   (docs/ALGORITHM_CHANGES.md 의 E3)
+  void SetTasteCurve(const std::vector<float>& taste31);
+
   // 헤드룸 서보가 프리앰프를 내렸으면 true 를 반환하고 out 을 채운다.
   // 호출부가 EQController::SetPreampDb + 재적용을 담당한다.
   bool TryTakePreamp(float& outDb);
@@ -184,6 +196,7 @@ private:
   std::string        m_songTitle;   // 무드 로그 라벨
   std::string        m_songArtist;
   std::vector<float> m_liveLevels;
+  std::vector<float> m_taste31;     // [v0.1.1] 제어식의 목표 음색 (SetTasteCurve)
   bool               m_deltaIsFirst = false;  // 이 곡의 첫 델타인가
   // 마지막으로 오디오가 들어온 시각(GetTickCount). 오래되면 시각화를 끈다.
   std::atomic<uint32_t> m_lastAudioTick{0};

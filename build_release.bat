@@ -29,11 +29,15 @@ rem VERIFICATION GATES - two things that directly change what the user hears.
 rem   curve_equiv : obfuscated LocalCurve must match the pre-obfuscation
 rem                 implementation exhaustively (bit-exact).
 rem   gain_probe  : the playback path must never exceed the energy budget for
-rem                 any genre/survey/LTAS combination. Exceeding it makes the
-rem                 limiter duck broadband, which is the "muffled" complaint.
-rem                 Before the budget was measured on the RENDERED response,
-rem                 this check failed 38953 of 81920 cases - it had been broken
-rem                 the whole time we had no gate.
+rem                 any survey/LTAS/deviation combination. Exceeding it makes
+rem                 the limiter duck broadband, which is the "muffled" complaint.
+rem                 It also gates the v0.1.1 control law itself: taste is
+rem                 preserved at zero deviation, and a deviation that opposes
+rem                 the taste is corrected harder than one that agrees.
+rem                 History - before the budget was measured on the RENDERED
+rem                 response this failed 38953 of 81920 cases (v0.1.0 sweep);
+rem                 before taste+delta was normalized instead of taste alone
+rem                 it failed 2942 of 15360 (v0.1.1 sweep). Both are 0 now.
 rem Both return non-zero on failure, so the build stops here. The probes compile
 rem their own sources, so they always verify the current code.
 rem

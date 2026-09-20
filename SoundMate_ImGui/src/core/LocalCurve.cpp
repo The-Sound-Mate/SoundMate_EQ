@@ -5,7 +5,6 @@
 
 #include <algorithm>
 #include <array>
-#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <string>
@@ -113,12 +112,10 @@ float Dec(std::uint32_t e, std::uint32_t slot) {
 // 평문 형태 — constexpr 함수 안에서만 존재한다.
 struct RShape { int t; float fc, g, w; };
 struct RGroup { int n; RShape s[3]; };
-struct RGenre { char key[12]; int n; RShape s[4]; };
 
 // 저장 형태 — 실제로 .rdata 에 앉는다.
 struct EShape { std::uint32_t t, fc, g, w; };
 struct EGroup { std::uint32_t n; EShape s[3]; };
-struct EGenre { std::uint32_t key[3]; std::uint32_t n; EShape s[4]; };
 
 constexpr RShape RS(Shape::Type t, float fc, float g, float w) {
   return {(int)t, fc, g, w};
@@ -128,18 +125,6 @@ template <class... S>
 constexpr RGroup RGr(S... sh) {
   static_assert(sizeof...(S) <= 3, "LocalCurve: group holds at most 3 shapes");
   RGroup r{};
-  r.n = (int)sizeof...(S);
-  const RShape tmp[sizeof...(S) + 1] = {sh...};
-  for (std::size_t i = 0; i < sizeof...(S); ++i) r.s[i] = tmp[i];
-  return r;
-}
-
-template <std::size_t K, class... S>
-constexpr RGenre RG(const char (&k)[K], S... sh) {
-  static_assert(K <= 12, "LocalCurve: genre keyword too long");
-  static_assert(sizeof...(S) <= 4, "LocalCurve: genre holds at most 4 shapes");
-  RGenre r{};
-  for (std::size_t i = 0; i < K; ++i) r.key[i] = k[i];
   r.n = (int)sizeof...(S);
   const RShape tmp[sizeof...(S) + 1] = {sh...};
   for (std::size_t i = 0; i < sizeof...(S); ++i) r.s[i] = tmp[i];
@@ -181,28 +166,6 @@ std::vector<Shape> UnsealGroup(const EGroup& e, std::uint32_t slot) {
   for (std::uint32_t s = 0; s < n && s < 3; ++s)
     v.push_back(UnsealShape(e.s[s], slot + s * 4u));
   return v;
-}
-
-// 장르 슬롯 배치: base + i*32 안에서 셰이프 4개가 0/4/8/12, 키워드가 20~22,
-// 개수가 24.
-template <class... G>
-constexpr std::array<EGenre, sizeof...(G)> SealGenres(std::uint32_t base,
-                                                      G... gs) {
-  const RGenre in[sizeof...(G)] = {gs...};
-  std::array<EGenre, sizeof...(G)> out{};
-  for (std::size_t i = 0; i < sizeof...(G); ++i) {
-    const std::uint32_t slot = base + (std::uint32_t)i * 32u;
-    for (std::size_t w = 0; w < 3; ++w) {
-      std::uint32_t v = 0u;
-      for (std::size_t b = 0; b < 4; ++b)
-        v |= (std::uint32_t)(unsigned char)in[i].key[w * 4 + b] << (b * 8);
-      out[i].key[w] = v ^ Mask(slot + 20u + (std::uint32_t)w);
-    }
-    out[i].n = (std::uint32_t)in[i].n ^ Mask(slot + 24u);
-    for (std::size_t s = 0; s < 4; ++s)
-      out[i].s[s] = SealShape(in[i].s[s], slot + (std::uint32_t)s * 4u);
-  }
-  return out;
 }
 
 // 로그 주파수 축의 가우시안 피크.
@@ -318,161 +281,8 @@ float SoftKnee(float g) {
                            std::tanh((g - kSoftKneeDb) / kSoftKneeRangeDb);
 }
 
-std::string ToLower(std::string s) {
-  std::transform(s.begin(), s.end(), s.begin(),
-                 [](unsigned char c) { return (char)std::tolower(c); });
-  return s;
-}
-
 void AddAll(std::vector<Shape>& dst, const std::vector<Shape>& src) {
   dst.insert(dst.end(), src.begin(), src.end());
-}
-
-// ─── 장르 커브 ──────────────────────────────────────────────────────────────
-// iTunes Search API 가 돌려주는 장르 문자열을 키워드 부분일치로 분류한다.
-// (예: "Hip-Hop/Rap", "K-Pop", "Alternative", "Dance", "Soundtrack")
-// 매칭 실패 시 DefaultGenre() — 완만한 스마일 커브.
-struct GenreCurve {
-  std::string keyword;
-  std::vector<Shape> shapes;
-};
-
-// [튜닝 노트] 게인 크기는 "중립화 이후"를 기준으로 잡아야 한다.
-//   저역/고역 셸프만 올리면 그 대부분이 공통 오프셋이라 중립화 단계에서
-//   걷혀나가고 거의 평탄한 커브가 남는다. 그래서 모든 장르가 중역 딥
-//   (300~500Hz)을 함께 갖는다 — 오프셋이 아니라 윤곽을 만드는 성분.
-constexpr std::uint32_t kDefaultBase = 0x0080u;
-
-constexpr std::array<EGroup, 1> kDefaultBlob = SealGroups(
-    kDefaultBase,
-      RGr(RS(Shape::kLowShelf,     90.f, +3.0f, 1.3f),
-          RS(Shape::kPeak,        500.f, -1.5f, 2.0f),
-          RS(Shape::kHighShelf,  9000.f, +2.5f, 1.4f))
-);
-
-const std::vector<Shape>& DefaultGenre() {
-  static const std::vector<Shape> t = UnsealGroup(kDefaultBlob[0], kDefaultBase);
-  return t;
-}
-
-// 위에서부터 먼저 일치하는 항목을 사용 → 구체적인 키워드를 앞에 둔다.
-// ("hip"/"k-pop" 이 "pop" 보다 먼저 걸리도록 "pop" 은 맨 뒤)
-constexpr std::uint32_t kGenreBase = 0x0100u;
-
-constexpr std::array<EGenre, 23> kGenreBlob = SealGenres(
-    kGenreBase,
-      RG("hip",  RS(Shape::kLowShelf,    90.f, +4.5f, 1.2f),
-                 RS(Shape::kPeak,       500.f, -2.0f, 1.8f),
-                 RS(Shape::kPeak,      3000.f, +2.0f, 1.5f),
-                 RS(Shape::kHighShelf, 8000.f, +2.0f, 1.5f)),
-      RG("rap",  RS(Shape::kLowShelf,    90.f, +4.5f, 1.2f),
-                 RS(Shape::kPeak,       500.f, -2.0f, 1.8f),
-                 RS(Shape::kPeak,      3000.f, +2.0f, 1.5f),
-                 RS(Shape::kHighShelf, 8000.f, +2.0f, 1.5f)),
-      RG("r&b",  RS(Shape::kLowShelf,    85.f, +4.0f, 1.2f),
-                 RS(Shape::kPeak,       500.f, -1.5f, 1.8f),
-                 RS(Shape::kPeak,      2500.f, +2.0f, 1.5f),
-                 RS(Shape::kHighShelf, 9000.f, +1.5f, 1.4f)),
-      RG("soul", RS(Shape::kLowShelf,    85.f, +4.0f, 1.2f),
-                 RS(Shape::kPeak,       500.f, -1.5f, 1.8f),
-                 RS(Shape::kPeak,      2500.f, +2.0f, 1.5f),
-                 RS(Shape::kHighShelf, 9000.f, +1.5f, 1.4f)),
-      RG("dance", RS(Shape::kLowShelf,     80.f, +5.0f, 1.2f),
-                  RS(Shape::kPeak,        400.f, -2.5f, 1.6f),
-                  RS(Shape::kHighShelf, 10000.f, +3.5f, 1.2f)),
-      RG("electronic", RS(Shape::kLowShelf,     80.f, +5.0f, 1.2f),
-                       RS(Shape::kPeak,        400.f, -2.5f, 1.6f),
-                       RS(Shape::kHighShelf, 10000.f, +3.5f, 1.2f)),
-      RG("house", RS(Shape::kLowShelf,     80.f, +5.0f, 1.2f),
-                  RS(Shape::kPeak,        400.f, -2.0f, 1.6f),
-                  RS(Shape::kHighShelf, 10000.f, +3.5f, 1.2f)),
-      RG("techno", RS(Shape::kLowShelf,     80.f, +5.0f, 1.2f),
-                   RS(Shape::kPeak,        400.f, -2.0f, 1.6f),
-                   RS(Shape::kHighShelf, 10000.f, +3.5f, 1.2f)),
-      RG("metal", RS(Shape::kPeak,       100.f, +3.0f, 1.2f),
-                  RS(Shape::kPeak,       400.f, -3.0f, 1.4f),
-                  RS(Shape::kPeak,      4000.f, +3.0f, 1.4f),
-                  RS(Shape::kHighShelf, 9000.f, +1.5f, 1.4f)),
-      RG("rock", RS(Shape::kPeak,       100.f, +2.5f, 1.2f),
-                 RS(Shape::kPeak,       350.f, -2.5f, 1.4f),
-                 RS(Shape::kPeak,      3500.f, +3.0f, 1.4f),
-                 RS(Shape::kHighShelf, 8000.f, +2.0f, 1.5f)),
-      RG("alternative", RS(Shape::kPeak,       100.f, +2.5f, 1.2f),
-                        RS(Shape::kPeak,       350.f, -2.0f, 1.4f),
-                        RS(Shape::kPeak,      3500.f, +2.5f, 1.4f),
-                        RS(Shape::kHighShelf, 9000.f, +1.5f, 1.4f)),
-      RG("punk", RS(Shape::kPeak,  100.f, +2.5f, 1.2f),
-                 RS(Shape::kPeak,  400.f, -2.0f, 1.4f),
-                 RS(Shape::kPeak, 3500.f, +3.0f, 1.4f)),
-      RG("indie", RS(Shape::kPeak,       150.f, +2.0f, 1.2f),
-                  RS(Shape::kPeak,       400.f, -1.5f, 1.6f),
-                  RS(Shape::kPeak,      3500.f, +2.5f, 1.4f),
-                  RS(Shape::kHighShelf, 9000.f, +1.5f, 1.4f)),
-      // 클래식/오페라는 원본 밸런스 존중 — 과한 스마일 금지.
-      RG("classical", RS(Shape::kLowShelf,     60.f, +1.0f, 1.3f),
-                      RS(Shape::kPeak,        250.f, -1.5f, 1.8f),
-                      RS(Shape::kHighShelf, 12000.f, +2.0f, 1.5f)),
-      RG("opera", RS(Shape::kLowShelf,     60.f, +1.0f, 1.3f),
-                  RS(Shape::kPeak,        250.f, -1.5f, 1.8f),
-                  RS(Shape::kHighShelf, 12000.f, +2.0f, 1.5f)),
-      RG("jazz", RS(Shape::kLowShelf,    120.f, +2.0f, 1.3f),
-                 RS(Shape::kPeak,        300.f, -2.0f, 1.6f),
-                 RS(Shape::kPeak,       5000.f, +2.5f, 1.4f),
-                 RS(Shape::kHighShelf, 11000.f, +1.5f, 1.4f)),
-      RG("blues", RS(Shape::kLowShelf,  120.f, +2.0f, 1.3f),
-                  RS(Shape::kPeak,      350.f, -1.5f, 1.6f),
-                  RS(Shape::kPeak,     4000.f, +2.0f, 1.4f)),
-      RG("country", RS(Shape::kLowShelf,     150.f, +1.5f, 1.3f),
-                    RS(Shape::kPeak,         400.f, -1.5f, 1.6f),
-                    RS(Shape::kPeak,        4000.f, +2.5f, 1.4f),
-                    RS(Shape::kHighShelf, 10000.f, +1.5f, 1.4f)),
-      RG("folk", RS(Shape::kLowShelf,     150.f, +1.5f, 1.3f),
-                 RS(Shape::kPeak,         400.f, -1.5f, 1.6f),
-                 RS(Shape::kPeak,        4000.f, +2.5f, 1.4f),
-                 RS(Shape::kHighShelf, 10000.f, +1.5f, 1.4f)),
-      RG("acoustic", RS(Shape::kLowShelf,     150.f, +1.5f, 1.3f),
-                     RS(Shape::kPeak,         400.f, -1.5f, 1.6f),
-                     RS(Shape::kPeak,        4000.f, +2.5f, 1.4f),
-                     RS(Shape::kHighShelf, 10000.f, +1.5f, 1.4f)),
-      RG("soundtrack", RS(Shape::kLowShelf,     70.f, +4.0f, 1.2f),
-                       RS(Shape::kPeak,        500.f, -2.0f, 1.8f),
-                       RS(Shape::kPeak,       1500.f, +1.5f, 1.5f),
-                       RS(Shape::kHighShelf, 10000.f, +2.0f, 1.4f)),
-      RG("anime", RS(Shape::kLowShelf,     90.f, +3.5f, 1.2f),
-                  RS(Shape::kPeak,        400.f, -1.5f, 1.8f),
-                  RS(Shape::kPeak,       3000.f, +2.5f, 1.4f),
-                  RS(Shape::kHighShelf, 10000.f, +2.5f, 1.3f)),
-      RG("pop", RS(Shape::kLowShelf,     90.f, +3.5f, 1.2f),
-                RS(Shape::kPeak,        400.f, -1.5f, 1.8f),
-                RS(Shape::kPeak,       3000.f, +2.5f, 1.4f),
-                RS(Shape::kHighShelf, 10000.f, +2.5f, 1.3f))
-);
-
-const std::vector<GenreCurve>& GenreTable() {
-  static const std::vector<GenreCurve> t = [] {
-    std::vector<GenreCurve> v;
-    v.reserve(kGenreBlob.size());
-    for (std::size_t i = 0; i < kGenreBlob.size(); ++i) {
-      const std::uint32_t slot = kGenreBase + (std::uint32_t)i * 32u;
-      const EGenre& e = kGenreBlob[i];
-
-      char key[13] = {};
-      for (std::size_t w = 0; w < 3; ++w) {
-        const std::uint32_t d = e.key[w] ^ Unmask(slot + 20u + (std::uint32_t)w);
-        for (std::size_t b = 0; b < 4; ++b)
-          key[w * 4 + b] = (char)((d >> (b * 8)) & 0xffu);
-      }
-
-      GenreCurve gc;
-      gc.keyword = key;  // 12바이트 고정 버퍼라 NUL 에서 끊긴다
-      const std::uint32_t n = e.n ^ Unmask(slot + 24u);
-      for (std::uint32_t s = 0; s < n && s < 4; ++s)
-        gc.shapes.push_back(UnsealShape(e.s[s], slot + s * 4u));
-      v.push_back(std::move(gc));
-    }
-    return v;
-  }();
-  return t;
 }
 
 // ─── 설문 성향 커브 ─────────────────────────────────────────────────────────
@@ -597,26 +407,49 @@ void AddDimension(std::vector<Shape>& dst,
 
 } // namespace
 
+// 선언부(LocalCurve.h)에 이 함수가 왜 평활을 거치는지 적어 뒀다.
+const std::vector<float>& ReferenceShapeDb() {
+  static const std::vector<float> t = [] {
+    const std::array<float, 31>& ref = RefSpectrum();
+    std::array<float, 31> db{};
+    for (std::size_t b = 0; b < 31; ++b)
+      db[b] = (ref[b] > 1e-12f) ? (float)(10.0 * std::log10((double)ref[b]))
+                                : -120.f;
+
+    // 로그주파수 ±2밴드 이동평균. 밴드 인덱스가 곧 로그축이므로 인덱스
+    // 평균이 곧 로그축 평균이다 (AdaptiveCurve 의 추세 계산과 같은 창).
+    std::vector<float> sm(31, 0.f);
+    for (int i = 0; i < 31; ++i) {
+      float sum = 0.f;
+      int   cnt = 0;
+      const int lo = std::max(0, i - 2);
+      const int hi = std::min(30, i + 2);
+      for (int k = lo; k <= hi; ++k) {
+        sum += db[k];
+        ++cnt;
+      }
+      sm[i] = sum / (float)cnt;
+    }
+    return sm;
+  }();
+  return t;
+}
+
 std::vector<float> Generate(const std::string& genre,
                             const std::string& tendency) {
   std::vector<Shape> shapes;
 
-  // 1) 장르 베이스 — 키워드 부분일치. 미상이면 기본 스마일 커브.
-  {
-    const std::string g = ToLower(genre);
-    const std::vector<Shape>* picked = &DefaultGenre();
-    if (!g.empty()) {
-      for (const auto& gc : GenreTable()) {
-        if (g.find(gc.keyword) != std::string::npos) {
-          picked = &gc.shapes;
-          break;
-        }
-      }
-    }
-    AddAll(shapes, *picked);
-  }
+  // [v0.1.1] 장르 제거 — 첫 인자는 무시한다.
+  //   track 테이블 284행 중 genre 가 채워진 행이 0개였다. 23개 장르 테이블은
+  //   프로덕션에서 한 번도 선택된 적이 없었고, 모든 사용자가 기본 스마일
+  //   커브(90Hz +3.0 / 500Hz -1.5 / 9kHz +2.5)를 받고 있었다. 사용자가 고른
+  //   적 없는 음색을 기본값으로 얹을 근거가 없어 장르 축을 통째로 뺐다.
+  //   시그니처는 유지한다 — 호출부와 GATE 1 하네스가 무수정으로 남고,
+  //   게이트가 "양쪽이 장르를 똑같이 무시하는지"를 계속 검증한다.
+  //   배경: docs/ALGORITHM_CHANGES.md
+  (void)genre;
 
-  // 2) 사용자 설문 성향 — 5차원을 그대로 가산.
+  // 1) 사용자 설문 성향 — 5차원을 그대로 가산.
   {
     const std::vector<std::string> p = SplitTendency(tendency);
     if (p.size() == 5) {
@@ -628,7 +461,7 @@ std::vector<float> Generate(const std::string& genre,
     }
   }
 
-  // 3) F31 각 주파수에서 합산 후 클램프.
+  // 2) F31 각 주파수에서 합산 후 클램프.
   const std::vector<int>& F31 = AIClient::F31;
   std::vector<float> gains(F31.size(), 0.f);
   for (size_t b = 0; b < F31.size(); ++b) {
@@ -637,12 +470,12 @@ std::vector<float> Generate(const std::string& genre,
     gains[b] = std::max(-kBandClampDb, std::min(kBandClampDb, sum));
   }
 
-  // 4) 과도 부스트 캡 — 세 축(설문 저역 + 볼륨 성향 + 장르)이 선형 합산되어
-  //    20Hz 에서 +8.6dB 까지 치솟는 것을 막는다. 설계 당시 축이 같은 방향으로
-  //    겹치는 경우를 고려하지 않았다.
+  // 3) 과도 부스트 캡 — 설문 저역과 볼륨 성향이 같은 방향으로 겹치면
+  //    저역이 치솟는 것을 막는다 (장르 축이 있던 시절엔 20Hz +8.6dB 까지
+  //    갔다). 설계 당시 축이 겹치는 경우를 고려하지 않았다.
   for (float& g : gains) g = SoftKnee(g);
 
-  // 5) 에너지 보존 중립화 — 실측 기준 스펙트럼에 걸었을 때 총에너지가
+  // 4) 에너지 보존 중립화 — 실측 기준 스펙트럼에 걸었을 때 총에너지가
   //    변하지 않도록 전역 오프셋을 뺀다.
   //
   //    전역 오프셋이므로 커브 **모양은 바뀌지 않는다**. 저역과 중역의 상대

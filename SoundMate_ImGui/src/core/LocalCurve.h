@@ -42,4 +42,22 @@ constexpr float kSoftKneeRangeDb = 3.0f;  // 포화 폭 (최대 kSoftKneeDb + �
 std::vector<float> Generate(const std::string& genre,
                             const std::string& tendency);
 
+// 기준 스펙트럼의 dB 형상. AIClient::F31 순서의 31개 값.
+//
+// [무엇인가] "평균적인 음악은 이렇게 생겼다"를 담은 31밴드 실측 스펙트럼을
+//   dB 로 옮긴 것. 절대 레벨이 아니라 **형상**이다 — 비교하는 쪽에서 공통
+//   오프셋을 빼고 써야 한다.
+//
+// [왜 평활하는가] 원본 배열은 4곡 평균이라 표본 잡음이 있다. 자기 ±2밴드
+//   추세 대비 40Hz 가 +3.93dB, 12.5kHz 가 +2.31dB, 20kHz 가 -7.49dB 튄다.
+//   앞의 둘은 표본 곡의 베이스라인, 마지막은 코덱 컷오프가 평균에 섞인 것.
+//   스칼라 에너지 합(EnergyChangeDb)에서는 상쇄되어 무해했지만, **밴드별
+//   타깃**으로 쓰는 순간 그 잡음이 전 사용자의 보정 목표가 된다. 그래서
+//   여기서만 로그주파수 ±2밴드 이동평균을 걸어 요철을 걷어내고 넓은 기울기만
+//   남긴다. EnergyChangeDb 는 계속 원본을 쓰므로 Generate() 출력은 불변이다.
+//
+// [표본 부채] 평활은 잡음을 덮을 뿐 표본을 늘려주지 않는다. mood_log 가
+//   쌓이면 원본 배열 자체를 재산출할 것.
+const std::vector<float>& ReferenceShapeDb();
+
 } // namespace LocalCurve

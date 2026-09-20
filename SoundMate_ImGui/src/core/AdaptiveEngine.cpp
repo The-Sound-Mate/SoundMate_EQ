@@ -70,6 +70,11 @@ bool AdaptiveEngine::TryTakePreamp(float& outDb) {
   return true;
 }
 
+void AdaptiveEngine::SetTasteCurve(const std::vector<float>& taste31) {
+  std::lock_guard<std::mutex> lk(m_mutex);
+  m_taste31 = taste31;
+}
+
 bool AdaptiveEngine::TryTakeDelta(std::vector<float>& out, bool* outIsFirst) {
   if (m_state.load() != State::Ready)
     return false;
@@ -394,8 +399,13 @@ void AdaptiveEngine::WorkerLoop() {
     if (!firstDone && integrated >= intTarget) {
       const std::vector<float> levels = analyzer.BandLevelsDb();
       LogMood(analyzer, levels, "first", TakeLimiterPct());
-      const std::vector<float> delta = AdaptiveCurve::ComputeDelta(
-          levels, analyzer.BandUsable(), AIClient::F31);
+      std::vector<float> taste;
+      {
+        std::lock_guard<std::mutex> lk(m_mutex);
+        taste = m_taste31;
+      }
+      const std::vector<float> delta = AdaptiveCurve::ComputeTasteDelta(
+          levels, analyzer.BandUsable(), AIClient::F31, taste);
       {
         std::lock_guard<std::mutex> lk(m_mutex);
         m_lastLevels = levels;
@@ -426,8 +436,13 @@ void AdaptiveEngine::WorkerLoop() {
     if (levels.empty())
       continue;
     LogMood(analyzer, levels, "track", TakeLimiterPct());
-    const std::vector<float> delta = AdaptiveCurve::ComputeDelta(
-        levels, analyzer.BandUsable(), AIClient::F31);
+    std::vector<float> taste;
+    {
+      std::lock_guard<std::mutex> lk(m_mutex);
+      taste = m_taste31;
+    }
+    const std::vector<float> delta = AdaptiveCurve::ComputeTasteDelta(
+        levels, analyzer.BandUsable(), AIClient::F31, taste);
 
     {
       std::lock_guard<std::mutex> lk(m_mutex);

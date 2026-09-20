@@ -1,6 +1,8 @@
 // src/core/AdaptiveCurve.cpp
 #include "AdaptiveCurve.h"
 
+#include "LocalCurve.h"  // ReferenceShapeDb() — 편차를 재는 기준
+
 #include <algorithm>
 #include <cmath>
 #include <complex>
@@ -275,23 +277,38 @@ void NormalizeForPlayback(std::vector<float>& gains,
   }
 }
 
-std::vector<float> ComputeDelta(const std::vector<float>& measuredDb,
-                                const std::vector<bool>&  usable,
-                                const std::vector<int>&   freqs,
-                                float strength, float clampDb) {
+// 제어식 전문과 설계 근거는 AdaptiveCurve.h 상단에 있다. 여기서는 단계마다
+// "왜 이 순서인가"만 적는다.
+std::vector<float> ComputeTasteDelta(const std::vector<float>& measuredDb,
+                                     const std::vector<bool>&  usable,
+                                     const std::vector<int>&   freqs,
+                                     const std::vector<float>& taste31) {
   const size_t n = measuredDb.size();
   std::vector<float> delta;
   if (n == 0 || usable.size() != n)
     return delta;
+
+  // 비교할 기준이 없으면 보정을 포기한다. 빈 델타를 돌려주면 상위에서 가산이
+  // 일어나지 않으므로 취향 커브가 그대로 나간다 — 안전한 쪽으로 실패한다.
+  const std::vector<float>& refDb = LocalCurve::ReferenceShapeDb();
+  if (refDb.size() != n)
+    return delta;
+
   delta.assign(n, 0.f);
+
+  // 설문 전이면 취향을 0 으로 본다. 그러면 agree 가 항상 0 이라 α 는 동조와
+  // 상충의 중간(0.475)이 되고, 식은 "기준 대비 편차를 절반 세기로 되돌리는"
+  // 순수 정규화가 된다. 설문이 들어오면 자연히 그쪽으로 기운다.
+  const bool haveTaste = (taste31.size() == n);
+  const bool haveFreqs = (freqs.size() == n);
 
   // 1) 바닥 판정 기준을 유효 밴드의 **중앙값**에서 잡는다.
   //
-    //  [왜 최댓값이 아닌가] peak - 40dB 로 잡으면 한 밴드가 압도적으로 큰
-    //  스펙트럼에서 나머지 전부가 "내용 없음"으로 분류돼 보정이 통째로
-    //  꺼져버린다. 실제 음악에서도 20Hz/20kHz 는 피크보다 40dB 아래인 경우가
-    //  흔하다. 중앙값은 극단값 하나에 흔들리지 않으므로 코덱 절단 같은
-    //  '절벽'만 정확히 걸러낸다.
+  //  [왜 최댓값이 아닌가] peak - 40dB 로 잡으면 한 밴드가 압도적으로 큰
+  //  스펙트럼에서 나머지 전부가 "내용 없음"으로 분류돼 보정이 통째로
+  //  꺼져버린다. 실제 음악에서도 20Hz/20kHz 는 피크보다 40dB 아래인 경우가
+  //  흔하다. 중앙값은 극단값 하나에 흔들리지 않으므로 코덱 절단 같은
+  //  '절벽'만 정확히 걸러낸다.
   std::vector<float> sorted;
   sorted.reserve(n);
   for (size_t i = 0; i < n; ++i)
@@ -300,43 +317,40 @@ std::vector<float> ComputeDelta(const std::vector<float>& measuredDb,
   if (sorted.empty())
     return delta;  // 유효 밴드가 하나도 없음
   std::sort(sorted.begin(), sorted.end());
-  const float median = sorted[sorted.size() / 2];
-
+  const float median  = sorted[sorted.size() / 2];
   const float floorDb = median - kFloorRangeDb;
 
-  // 2) 보정 대상 밴드 판정. 여기서 제외된 밴드는 추세 계산에서도 빼야 한다 —
-  //    코덱이 잘라낸 -80dB 구간을 평균에 넣으면 추세 자체가 끌려 내려간다.
   std::vector<bool> active(n, false);
   for (size_t i = 0; i < n; ++i)
     active[i] = usable[i] && measuredDb[i] > floorDb;
 
-  // 3) 로그 주파수 축 이동평균으로 완만한 추세를 구한다.
-  //    밴드 인덱스가 곧 로그 주파수 축이므로 인덱스 평균이 곧 로그축 평균이다.
-  std::vector<float> smoothed(n, 0.f);
-  for (size_t i = 0; i < n; ++i) {
-    if (!active[i])
-      continue;
-    float sum = 0.f;
-    int   cnt = 0;
-    const int lo = std::max<int>(0, (int)i - kSmoothHalfWidth);
-    const int hi = std::min<int>((int)n - 1, (int)i + kSmoothHalfWidth);
-    for (int k = lo; k <= hi; ++k) {
-      if (!active[k])
+  // 2) 재생 음량 제거.
+  //
+  //  measuredDb 는 dBFS 절대값이고 refDb 는 총합 1 로 정규화된 상대 형상이다.
+  //  둘의 차에는 수십 dB 의 공통 오프셋이 들어 있다 — 그게 곧 "이 곡을 지금
+  //  얼마나 크게 틀고 있는가"다. 음량은 편차가 아니므로 먼저 걷어낸다.
+  //  라우드니스 가중을 쓰는 이유는 사람이 음량을 중역으로 느끼기 때문이다.
+  float offset = 0.f;
+  {
+    float wsum = 0.f, acc = 0.f;
+    for (size_t i = 0; i < n; ++i) {
+      if (!active[i])
         continue;
-      sum += measuredDb[k];
-      ++cnt;
+      const float w = haveFreqs ? LoudnessWeight((float)freqs[i]) : 1.f;
+      acc  += (measuredDb[i] - refDb[i]) * w;
+      wsum += w;
     }
-    smoothed[i] = (cnt > 0) ? (sum / (float)cnt) : measuredDb[i];
+    if (wsum <= 1e-6f)
+      return delta;
+    offset = acc / wsum;
   }
 
-  // 4) 유효 구간의 가장자리는 보정하지 않는다.
+  // 3) 유효 구간의 가장자리는 보정하지 않는다.
   //
-    //  [왜 필요한가] 이동평균 창이 구간 끝에서 잘리면 한쪽 이웃만 평균에
-    //  들어간다. 그러면 단조 롤오프가 '골'로 오인된다 — 실측 예: 20kHz 가
-    //  -72dB, 이웃 12.5k/16k 가 -60.3/-65.1 이라 평균이 -65.8 이 되고
-    //  이탈 -6.2dB -> 델타 +3.0dB(상한). 사실상 아무것도 없는 대역을 최대치로
-    //  부스트하는 셈이다. 배열 끝이 아니라 **유효 구간의 끝** 기준이어야
-    //  코덱이 고역을 잘라낸 경우에도 같은 보호가 걸린다.
+  //  [왜 필요한가] refDb 의 양 끝(20Hz, 20kHz)은 표본 4곡의 아티팩트가 가장
+  //  큰 지점이고(원본 기준 -3.9dB / -7.5dB), 코덱이 고역을 잘라낸 곡은 유효
+  //  구간의 끝 자체가 안쪽으로 들어온다. 배열 끝이 아니라 **유효 구간의 끝**
+  //  기준이어야 두 경우 모두 같은 보호가 걸린다.
   int firstActive = -1, lastActive = -1;
   for (size_t i = 0; i < n; ++i) {
     if (!active[i])
@@ -348,25 +362,41 @@ std::vector<float> ComputeDelta(const std::vector<float>& measuredDb,
   if (firstActive < 0)
     return delta;
 
-  // 5) 추세로부터의 이탈을 반대 방향으로, 강도를 곱해 클램프.
-  //    corrected[] 로 "실제로 보정한 밴드"를 따로 기록한다 — 다음 단계에서
-  //    필요하다. active 만으로는 부족하다: 가장자리 밴드는 active 이지만
-  //    의도적으로 보정하지 않았고, 거기에 오프셋을 뿌리면 끝단 보호가 깨진다.
+  // 4) 취향 가중 편차 보정.
+  //
+  //  corrected[] 로 "실제로 보정한 밴드"를 따로 기록한다 — 6단계에서 필요하다.
+  //  active 만으로는 부족하다: 가장자리 밴드는 active 이지만 의도적으로
+  //  보정하지 않았고, 거기에 오프셋을 뿌리면 끝단 보호가 깨진다.
+  const float kAgreeDen = kAgreeScaleDb * kAgreeScaleDb;
   std::vector<bool> corrected(n, false);
   for (size_t i = 0; i < n; ++i) {
     if (!active[i])
       continue;  // 0 유지
     if ((int)i < firstActive + kSmoothHalfWidth ||
         (int)i > lastActive - kSmoothHalfWidth)
-      continue;  // 가장자리 — 추세를 신뢰할 수 없다
-    const float dev = measuredDb[i] - smoothed[i];
-    float d = -dev * strength;
-    d = std::max(-clampDb, std::min(clampDb, d));
-    delta[i] = d;
+      continue;  // 가장자리 — 기준을 신뢰할 수 없다
+
+    const float dev   = (measuredDb[i] - refDb[i]) - offset;
+    const float taste = haveTaste ? taste31[i] : 0.f;
+
+    // 소프트 데드존 — 안쪽은 0, 바깥은 경계만큼 뺀 값. 경계에서 연속이다.
+    const float mag  = std::fabs(dev);
+    const float devq = (mag <= kTasteDeadzoneDb)
+                           ? 0.f
+                           : std::copysign(mag - kTasteDeadzoneDb, dev);
+
+    // 편차와 취향의 방향이 같으면 +1(동조), 반대면 -1(상충) 쪽으로 간다.
+    const float agree = std::tanh(dev * taste / kAgreeDen);
+    const float alpha =
+        kAlphaAgree + (kAlphaOppose - kAlphaAgree) * (1.f - agree) * 0.5f;
+
+    float d = -alpha * devq;
+    d = std::max(-kDevClampDb, std::min(kDevClampDb, d));
+    delta[i]     = d;
     corrected[i] = true;
   }
 
-  // 5-b) 델타 자체를 이웃 밴드와 평활한다 — 고립 스파이크 제거.
+  // 5) 델타 자체를 이웃 밴드와 평활한다 — 고립 스파이크 제거.
   //
   //  [왜 필요한가] 한 밴드만 이웃과 뚝 떨어져 튀는 현상이 실제로 보였다.
   //  원인이 두 가지 있다.
@@ -379,7 +409,7 @@ std::vector<float> ComputeDelta(const std::vector<float>& measuredDb,
   //  [왜 평활이 옳은가] 이 계층의 목적은 **완만한 스펙트럼 경향** 보정이다.
   //  좁은 노치/피크는 녹음이나 방 특성이지 곡의 음색 성향이 아니고, Q=4.32
   //  필터 한 개로 쫓아가면 위상만 흔들고 이득이 없다.
-  //  가장자리는 여전히 건드리지 않는다(추세를 신뢰할 수 없는 구간).
+  //  가장자리는 여전히 건드리지 않는다.
   {
     const int lo = firstActive + kSmoothHalfWidth;
     const int hi = lastActive - kSmoothHalfWidth;
@@ -401,13 +431,15 @@ std::vector<float> ComputeDelta(const std::vector<float>& measuredDb,
 
   // 6) 라우드니스 중립화 — 이 계층이 전체 음량을 바꾸지 않도록 보장한다.
   //    실제로 보정한 밴드만 대상으로 가중평균을 빼고 다시 클램프한다.
-  if (freqs.size() == n) {
+  //    2단계의 offset 은 '곡의 음량'을 걷어낸 것이고, 여기는 가장자리 제외와
+  //    클램프 때문에 델타에 남은 치우침을 걷어내는 것이다 — 목적이 다르다.
+  if (haveFreqs) {
     float wsum = 0.f, acc = 0.f;
     for (size_t i = 0; i < n; ++i) {
       if (!corrected[i])
         continue;
       const float w = LoudnessWeight((float)freqs[i]);
-      acc += delta[i] * w;
+      acc  += delta[i] * w;
       wsum += w;
     }
     if (wsum > 1e-6f) {
@@ -415,7 +447,7 @@ std::vector<float> ComputeDelta(const std::vector<float>& measuredDb,
       for (size_t i = 0; i < n; ++i) {
         if (!corrected[i])
           continue;
-        delta[i] = std::max(-clampDb, std::min(clampDb, delta[i] - mean));
+        delta[i] = std::max(-kDevClampDb, std::min(kDevClampDb, delta[i] - mean));
       }
     }
   }

@@ -526,10 +526,20 @@ void MainWindow::ApplyEQNoSave() {
   std::vector<float> master31 = m_eqGains31Master;
   {
     std::lock_guard<std::mutex> lk(m_adaptiveMutex);
-    // [EQ on/off 음량 일치] 실측 스펙트럼으로 잰 체감음량 변화를 전 밴드에서
-    //   뺀다. 전역 오프셋이라 음색(커브 모양)은 전혀 안 바뀌고 숫자만
-    //   평행이동한다. 프리앰프는 0 고정이므로 음량 조정은 여기서만 일어난다.
-    if (m_adaptiveDelta.size() == master31.size())
+    // [곡별 적응 보정 가산] AdaptiveCurve::ComputeTasteDelta 가 준
+    //   `corr - taste` 를 더해 최종 커브를 복원한다. master31 이 taste
+    //   (설문 취향 커브)이므로 이 한 줄이 제어식의 합성 단계 전체다.
+    //
+    // [수동/프리셋/평탄 제외 — v0.1.1 에서 추가] 아래 정규화와 같은 기준이다.
+    //   이 가산에만 origin 가드가 빠져 있었다. 사용자가 슬라이더를 직접 잡은
+    //   뒤에도 델타가 계속 더해졌고, 첫 슬라이더 조작에서 델타가 섞인 값이
+    //   SSOT(m_eqGains31Master)로 구워진 뒤에는 같은 델타가 이중으로 얹혔다.
+    //   델타의 의미가 "taste 기준 상대량"이라서, 취향 커브가 아닌 수동 커브에
+    //   더하면 값 자체가 틀린다. 배경: docs/ALGORITHM_CHANGES.md (E2)
+    const EqOrigin deltaOrigin = m_eqOrigin.load();
+    if (m_adaptiveDelta.size() == master31.size() &&
+        deltaOrigin != EqOrigin::Manual && deltaOrigin != EqOrigin::Preset &&
+        deltaOrigin != EqOrigin::Flat)
       for (size_t i = 0; i < master31.size(); ++i)
         master31[i] += m_adaptiveDelta[i];
 
@@ -749,13 +759,21 @@ void MainWindow::TriggerAIGeneration() {
 
     if (useLocalCurve) {
       SetStatus(Lang::T(Lang::LOCAL_ANALYZING), Theme::TEXT_WHITE);
-      // [v0.1.0] 커브는 서버가 산출한 것을 우선 사용한다 (산출식이 바이너리에
-      //   남지 않음 + 규칙 수정 시 클라이언트 재배포 불필요).
-      //   서버에 도달하지 못했을 때만 LocalCurve 로 폴백한다 — 같은 알고리즘
-      //   이므로 결과는 동일하고, 우리 함수가 죽어도 EQ 는 계속 걸린다.
-      std::vector<float> local31 = m_serverCurve31;
-      if (local31.size() != AIClient::F31.size())
-        local31 = LocalCurve::Generate(m_currentGenre, userPref);
+      // [v0.1.1] 서버 커브(m_serverCurve31)를 쓰지 않는다 — 항상 로컬 산출.
+      //   서버 resolve-track 의 curve.ts 는 아직 장르 축을 갖고 있는 v0.1.0
+      //   알고리즘이다. 그걸 고쳐 배포하면 이미 설치된 v0.0.2/v0.1.0 클라이언트
+      //   음색이 그 즉시 바뀐다. 그래서 서버는 손대지 않고, 이 버전의
+      //   클라이언트만 자기 커브를 쓴다. v0.1.1 이 충분히 퍼진 뒤 curve.ts 를
+      //   맞추고 CURVE_VERSION 을 3 으로 올린다.
+      //
+      //   멤버 m_serverCurve31 자체는 남겨둔다 (1494 에서 계속 채워진다) —
+      //   서버를 맞춘 뒤 이 세 줄만 되돌리면 복귀한다.
+      //
+      //   보안상 새로 노출되는 것은 없다. LocalCurve 는 원래 폴백으로 봉인된
+      //   채 바이너리에 들어 있었다.
+      //
+      //   첫 인자(장르)는 무시된다 — LocalCurve::Generate 주석 참조.
+      std::vector<float> local31 = LocalCurve::Generate("", userPref);
       // 5/10/15 밴드는 기존 큐빅 스플라인 보간을 그대로 재사용 (RecordManager
       // 저장 포맷 동일). bands31 은 보간 왕복 없이 원본을 유지.
       result = m_ai->UpsampleToAllBands(local31, AIClient::F31);
@@ -1335,6 +1353,17 @@ void MainWindow::Render() {
     } else {
       m_masterTransitionTarget = m_eqGains31Master; // no-op transition
     }
+
+    // [v0.1.1 제어식 입력] 적응 엔진에 취향 커브(목표 음색)를 주입한다.
+    //   ComputeTasteDelta 가 `α` 를 정하려면 각 밴드에서 곡의 편차가 취향과
+    //   같은 방향인지 반대 방향인지 알아야 한다.
+    //
+    // [왜 m_eqGains31Master 가 아니라 여기인가] m_eqGains31Master 는 바로 위
+    //   전환(2초 ease-in-out)의 **출발점**이고 매 프레임 움직인다. 그걸 읽으면
+    //   곡이 바뀐 직후 2초 동안 제어식의 setpoint 가 흔들린다. 전환의
+    //   **도착점**인 m_masterTransitionTarget 이 확정된 목표값이다.
+    //   배경: docs/ALGORITHM_CHANGES.md (E3)
+    m_adaptive.SetTasteCurve(m_masterTransitionTarget);
 
     // [EQ 복원용] AI/Prompt 시점의 master 스냅샷.
     //   Cache origin 은 manual 값이 캐시에서 반환된 경우도 포함하므로 제외 →

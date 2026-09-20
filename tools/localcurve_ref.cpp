@@ -4,7 +4,6 @@
 #include "SurveyMapping.h"  // 설문 라벨/ID → 인덱스
 
 #include <algorithm>
-#include <cctype>
 #include <cmath>
 
 namespace LocalCurve {
@@ -97,129 +96,8 @@ float SoftKnee(float g) {
                            std::tanh((g - kSoftKneeDb) / kSoftKneeRangeDb);
 }
 
-std::string ToLower(std::string s) {
-  std::transform(s.begin(), s.end(), s.begin(),
-                 [](unsigned char c) { return (char)std::tolower(c); });
-  return s;
-}
-
 void AddAll(std::vector<Shape>& dst, const std::vector<Shape>& src) {
   dst.insert(dst.end(), src.begin(), src.end());
-}
-
-// ─── 장르 커브 ──────────────────────────────────────────────────────────────
-// iTunes Search API 가 돌려주는 장르 문자열을 키워드 부분일치로 분류한다.
-// (예: "Hip-Hop/Rap", "K-Pop", "Alternative", "Dance", "Soundtrack")
-// 매칭 실패 시 DefaultGenre() — 완만한 스마일 커브.
-struct GenreCurve {
-  const char* keyword;
-  std::vector<Shape> shapes;
-};
-
-// [튜닝 노트] 게인 크기는 "중립화 이후"를 기준으로 잡아야 한다.
-//   저역/고역 셸프만 올리면 그 대부분이 공통 오프셋이라 중립화 단계에서
-//   걷혀나가고 거의 평탄한 커브가 남는다. 그래서 모든 장르가 중역 딥
-//   (300~500Hz)을 함께 갖는다 — 오프셋이 아니라 '윤곽'을 만드는 성분.
-const std::vector<Shape>& DefaultGenre() {
-  static const std::vector<Shape> t = {
-      {Shape::kLowShelf,     90.f, +3.0f, 1.3f},
-      {Shape::kPeak,        500.f, -1.5f, 2.0f},
-      {Shape::kHighShelf,  9000.f, +2.5f, 1.4f},
-  };
-  return t;
-}
-
-// 위에서부터 먼저 일치하는 항목을 사용 → 구체적인 키워드를 앞에 둔다.
-// ("hip"/"k-pop" 이 "pop" 보다 먼저 걸리도록 "pop" 은 맨 뒤)
-const std::vector<GenreCurve>& GenreTable() {
-  static const std::vector<GenreCurve> t = {
-      {"hip",  {{Shape::kLowShelf,    90.f, +4.5f, 1.2f},
-                {Shape::kPeak,       500.f, -2.0f, 1.8f},
-                {Shape::kPeak,      3000.f, +2.0f, 1.5f},
-                {Shape::kHighShelf, 8000.f, +2.0f, 1.5f}}},
-      {"rap",  {{Shape::kLowShelf,    90.f, +4.5f, 1.2f},
-                {Shape::kPeak,       500.f, -2.0f, 1.8f},
-                {Shape::kPeak,      3000.f, +2.0f, 1.5f},
-                {Shape::kHighShelf, 8000.f, +2.0f, 1.5f}}},
-      {"r&b",  {{Shape::kLowShelf,    85.f, +4.0f, 1.2f},
-                {Shape::kPeak,       500.f, -1.5f, 1.8f},
-                {Shape::kPeak,      2500.f, +2.0f, 1.5f},
-                {Shape::kHighShelf, 9000.f, +1.5f, 1.4f}}},
-      {"soul", {{Shape::kLowShelf,    85.f, +4.0f, 1.2f},
-                {Shape::kPeak,       500.f, -1.5f, 1.8f},
-                {Shape::kPeak,      2500.f, +2.0f, 1.5f},
-                {Shape::kHighShelf, 9000.f, +1.5f, 1.4f}}},
-      {"dance", {{Shape::kLowShelf,     80.f, +5.0f, 1.2f},
-                 {Shape::kPeak,        400.f, -2.5f, 1.6f},
-                 {Shape::kHighShelf, 10000.f, +3.5f, 1.2f}}},
-      {"electronic", {{Shape::kLowShelf,     80.f, +5.0f, 1.2f},
-                      {Shape::kPeak,        400.f, -2.5f, 1.6f},
-                      {Shape::kHighShelf, 10000.f, +3.5f, 1.2f}}},
-      {"house", {{Shape::kLowShelf,     80.f, +5.0f, 1.2f},
-                 {Shape::kPeak,        400.f, -2.0f, 1.6f},
-                 {Shape::kHighShelf, 10000.f, +3.5f, 1.2f}}},
-      {"techno", {{Shape::kLowShelf,     80.f, +5.0f, 1.2f},
-                  {Shape::kPeak,        400.f, -2.0f, 1.6f},
-                  {Shape::kHighShelf, 10000.f, +3.5f, 1.2f}}},
-      {"metal", {{Shape::kPeak,       100.f, +3.0f, 1.2f},
-                 {Shape::kPeak,       400.f, -3.0f, 1.4f},
-                 {Shape::kPeak,      4000.f, +3.0f, 1.4f},
-                 {Shape::kHighShelf, 9000.f, +1.5f, 1.4f}}},
-      {"rock", {{Shape::kPeak,       100.f, +2.5f, 1.2f},
-                {Shape::kPeak,       350.f, -2.5f, 1.4f},
-                {Shape::kPeak,      3500.f, +3.0f, 1.4f},
-                {Shape::kHighShelf, 8000.f, +2.0f, 1.5f}}},
-      {"alternative", {{Shape::kPeak,       100.f, +2.5f, 1.2f},
-                       {Shape::kPeak,       350.f, -2.0f, 1.4f},
-                       {Shape::kPeak,      3500.f, +2.5f, 1.4f},
-                       {Shape::kHighShelf, 9000.f, +1.5f, 1.4f}}},
-      {"punk", {{Shape::kPeak,  100.f, +2.5f, 1.2f},
-                {Shape::kPeak,  400.f, -2.0f, 1.4f},
-                {Shape::kPeak, 3500.f, +3.0f, 1.4f}}},
-      {"indie", {{Shape::kPeak,       150.f, +2.0f, 1.2f},
-                 {Shape::kPeak,       400.f, -1.5f, 1.6f},
-                 {Shape::kPeak,      3500.f, +2.5f, 1.4f},
-                 {Shape::kHighShelf, 9000.f, +1.5f, 1.4f}}},
-      // 클래식/오페라는 원본 밸런스 존중 — 과한 스마일 금지.
-      {"classical", {{Shape::kLowShelf,     60.f, +1.0f, 1.3f},
-                     {Shape::kPeak,        250.f, -1.5f, 1.8f},
-                     {Shape::kHighShelf, 12000.f, +2.0f, 1.5f}}},
-      {"opera", {{Shape::kLowShelf,     60.f, +1.0f, 1.3f},
-                 {Shape::kPeak,        250.f, -1.5f, 1.8f},
-                 {Shape::kHighShelf, 12000.f, +2.0f, 1.5f}}},
-      {"jazz", {{Shape::kLowShelf,     120.f, +2.0f, 1.3f},
-                {Shape::kPeak,         300.f, -2.0f, 1.6f},
-                {Shape::kPeak,        5000.f, +2.5f, 1.4f},
-                {Shape::kHighShelf, 11000.f, +1.5f, 1.4f}}},
-      {"blues", {{Shape::kLowShelf,  120.f, +2.0f, 1.3f},
-                 {Shape::kPeak,      350.f, -1.5f, 1.6f},
-                 {Shape::kPeak,     4000.f, +2.0f, 1.4f}}},
-      {"country", {{Shape::kLowShelf,     150.f, +1.5f, 1.3f},
-                   {Shape::kPeak,         400.f, -1.5f, 1.6f},
-                   {Shape::kPeak,        4000.f, +2.5f, 1.4f},
-                   {Shape::kHighShelf, 10000.f, +1.5f, 1.4f}}},
-      {"folk", {{Shape::kLowShelf,     150.f, +1.5f, 1.3f},
-                {Shape::kPeak,         400.f, -1.5f, 1.6f},
-                {Shape::kPeak,        4000.f, +2.5f, 1.4f},
-                {Shape::kHighShelf, 10000.f, +1.5f, 1.4f}}},
-      {"acoustic", {{Shape::kLowShelf,     150.f, +1.5f, 1.3f},
-                    {Shape::kPeak,         400.f, -1.5f, 1.6f},
-                    {Shape::kPeak,        4000.f, +2.5f, 1.4f},
-                    {Shape::kHighShelf, 10000.f, +1.5f, 1.4f}}},
-      {"soundtrack", {{Shape::kLowShelf,     70.f, +4.0f, 1.2f},
-                      {Shape::kPeak,        500.f, -2.0f, 1.8f},
-                      {Shape::kPeak,       1500.f, +1.5f, 1.5f},
-                      {Shape::kHighShelf, 10000.f, +2.0f, 1.4f}}},
-      {"anime", {{Shape::kLowShelf,     90.f, +3.5f, 1.2f},
-                 {Shape::kPeak,        400.f, -1.5f, 1.8f},
-                 {Shape::kPeak,       3000.f, +2.5f, 1.4f},
-                 {Shape::kHighShelf, 10000.f, +2.5f, 1.3f}}},
-      {"pop", {{Shape::kLowShelf,     90.f, +3.5f, 1.2f},
-               {Shape::kPeak,        400.f, -1.5f, 1.8f},
-               {Shape::kPeak,       3000.f, +2.5f, 1.4f},
-               {Shape::kHighShelf, 10000.f, +2.5f, 1.3f}}},
-  };
-  return t;
 }
 
 // ─── 설문 성향 커브 ─────────────────────────────────────────────────────────
@@ -318,22 +196,17 @@ std::vector<float> Generate(const std::string& genre,
                             const std::string& tendency) {
   std::vector<Shape> shapes;
 
-  // 1) 장르 베이스 — 키워드 부분일치. 미상이면 기본 스마일 커브.
-  {
-    const std::string g = ToLower(genre);
-    const std::vector<Shape>* picked = &DefaultGenre();
-    if (!g.empty()) {
-      for (const auto& gc : GenreTable()) {
-        if (g.find(gc.keyword) != std::string::npos) {
-          picked = &gc.shapes;
-          break;
-        }
-      }
-    }
-    AddAll(shapes, *picked);
-  }
+  // [v0.1.1] 장르 제거 — 첫 인자는 무시한다.
+  //   track 테이블 284행 중 genre 가 채워진 행이 0개였다. 23개 장르 테이블은
+  //   프로덕션에서 한 번도 선택된 적이 없었고, 모든 사용자가 기본 스마일
+  //   커브(90Hz +3.0 / 500Hz -1.5 / 9kHz +2.5)를 받고 있었다. 사용자가 고른
+  //   적 없는 음색을 기본값으로 얹을 근거가 없어 장르 축을 통째로 뺐다.
+  //   시그니처는 유지한다 — 호출부와 GATE 1 하네스가 무수정으로 남고,
+  //   게이트가 "양쪽이 장르를 똑같이 무시하는지"를 계속 검증한다.
+  //   배경: docs/ALGORITHM_CHANGES.md
+  (void)genre;
 
-  // 2) 사용자 설문 성향 — 5차원을 그대로 가산.
+  // 1) 사용자 설문 성향 — 5차원을 그대로 가산.
   {
     const std::vector<std::string> p = SplitTendency(tendency);
     if (p.size() == 5) {
@@ -345,7 +218,7 @@ std::vector<float> Generate(const std::string& genre,
     }
   }
 
-  // 3) F31 각 주파수에서 합산 후 클램프.
+  // 2) F31 각 주파수에서 합산 후 클램프.
   const std::vector<int>& F31 = AIClient::F31;
   std::vector<float> gains(F31.size(), 0.f);
   for (size_t b = 0; b < F31.size(); ++b) {
@@ -354,12 +227,12 @@ std::vector<float> Generate(const std::string& genre,
     gains[b] = std::max(-kBandClampDb, std::min(kBandClampDb, sum));
   }
 
-  // 4) 과도 부스트 캡 — 세 축(설문 저역 + 볼륨 성향 + 장르)이 선형 합산되어
-  //    20Hz 에서 +8.6dB 까지 치솟는 것을 막는다. 설계 당시 축이 같은 방향으로
-  //    겹치는 경우를 고려하지 않았다.
+  // 3) 과도 부스트 캡 — 설문 저역과 볼륨 성향이 같은 방향으로 겹치면
+  //    저역이 치솟는 것을 막는다 (장르 축이 있던 시절엔 20Hz +8.6dB 까지
+  //    갔다). 설계 당시 축이 겹치는 경우를 고려하지 않았다.
   for (float& g : gains) g = SoftKnee(g);
 
-  // 5) 에너지 보존 중립화 — 실측 기준 스펙트럼에 걸었을 때 총에너지가
+  // 4) 에너지 보존 중립화 — 실측 기준 스펙트럼에 걸었을 때 총에너지가
   //    변하지 않도록 전역 오프셋을 뺀다.
   //
   //    전역 오프셋이므로 커브 **모양은 바뀌지 않는다**. 저역과 중역의 상대
