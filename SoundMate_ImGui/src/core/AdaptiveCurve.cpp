@@ -399,6 +399,43 @@ std::vector<float> ComputeTasteDelta(const std::vector<float>& measuredDb,
   //  계산해 두고, 5단계 평활까지 끝낸 뒤 edgeW 를 곱한다. 잘라낸 다음 평활
   //  하면 경계가 평활 구간 **밖**이라 계단이 끝내 남는다 — 그게 E6 이었다.
   const float kAgreeDen = kAgreeScaleDb * kAgreeScaleDb;
+
+  //  [v0.1.1 T1] 동조/상충 판정에 쓸 취향의 **형상**을 뽑는다.
+  //
+  //  LocalCurve::Generate() 는 마지막에 커브 전체에서 EnergyChangeDb(g) 를
+  //  뺀다 (LocalCurve.cpp:511-525). 그건 0dBFS 천장 때문에 커브를 통째로
+  //  내린 전역 스칼라이지 "이 대역을 좋아한다/싫어한다"는 형상이 아니다.
+  //  그런데 dev 는 2단계에서 offset 을 빼 DC 가 제거된 좌표계인데 taste 만
+  //  DC 를 달고 있어서, sign(dev * taste) 판정이 그 스칼라에 끌려갔다.
+  //
+  //  실측(tools/phase4_probe_main.cpp): taste DC 는 -2.32 ~ +1.46dB 범위이고
+  //  설문 1024 조합에서 판정이 뒤집히는 밴드가 18.1% (5756/31744) 였다.
+  //  최악은 800Hz — 형상은 +0.05dB(중립)인데 taste 가 -2.27dB 로 읽혀
+  //  "싫어하는 대역"으로 오판하고 상충 강도로 밀었다.
+  //
+  //  [왜 offset 과 같은 방식인가] dev 가 active 밴드의 라우드니스 가중
+  //  평균으로 DC 를 뺀 좌표계이므로, 비교 대상인 taste 도 **같은 집합·같은
+  //  가중**으로 빼야 두 값이 같은 좌표계에 놓인다. usable 전체나 presence
+  //  가중을 쓰면 기준이 다시 어긋난다.
+  //
+  //  [왜 taste 자체는 안 건드리는가] taste 는 최종 커브에 그대로 더해지는
+  //  값이다. 여기서 DC 를 빼면 사용자가 받는 커브가 바뀐다. tasteDc 는
+  //  α 의 **방향 판정에만** 쓰고, 출력 taste 는 보존한다. 그래서 dev=0 인
+  //  곡에서 나가는 커브는 이 변경 전후로 완전히 동일하다 (devq=0 → d=0).
+  float tasteDc = 0.f;
+  if (haveTaste) {
+    float wsum = 0.f, acc = 0.f;
+    for (size_t i = 0; i < n; ++i) {
+      if (!active[i])
+        continue;
+      const float w = haveFreqs ? LoudnessWeight((float)freqs[i]) : 1.f;
+      acc  += taste31[i] * w;
+      wsum += w;
+    }
+    if (wsum > 1e-6f)
+      tasteDc = acc / wsum;
+  }
+
   std::vector<bool> corrected(n, false);
   for (size_t i = 0; i < n; ++i) {
     if (!active[i])
@@ -406,6 +443,8 @@ std::vector<float> ComputeTasteDelta(const std::vector<float>& measuredDb,
 
     const float dev   = (measuredDb[i] - refDb[i]) - offset;
     const float taste = haveTaste ? taste31[i] : 0.f;
+    //  판정 전용 — 출력에는 taste 원값이 쓰인다 (위 T1 주석 참고).
+    const float tasteShape = taste - tasteDc;
 
     // 소프트 데드존 — 안쪽은 0, 바깥은 경계만큼 뺀 값. 경계에서 연속이다.
     const float mag  = std::fabs(dev);
@@ -414,7 +453,7 @@ std::vector<float> ComputeTasteDelta(const std::vector<float>& measuredDb,
                            : std::copysign(mag - kTasteDeadzoneDb, dev);
 
     // 편차와 취향의 방향이 같으면 +1(동조), 반대면 -1(상충) 쪽으로 간다.
-    const float agree = std::tanh(dev * taste / kAgreeDen);
+    const float agree = std::tanh(dev * tasteShape / kAgreeDen);
     const float alpha =
         (kAlphaAgree + (kAlphaOppose - kAlphaAgree) * (1.f - agree) * 0.5f) *
         presence[i];
