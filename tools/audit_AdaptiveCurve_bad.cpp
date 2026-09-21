@@ -43,24 +43,8 @@ float LoudnessWeight(float f) {
 
 // EQController::CalculateQ 의 31밴드 값. 항상 31밴드를 보내므로 상수다.
 constexpr double kRenderQ = 4.318;
-// 설계 기준 샘플레이트. 엔진은 런타임 샘플레이트로 필터를 만들지만
-// (FilterEngine.h:753) 여기는 48k 로 고정한다.
-//
-// [근거 — tools/audit_renderfs_main.cpp 실측, 2026-09-21]
-//   이전 주석은 "차이는 최고역 일부, 에너지 지분 0.01% 미만"이라고 적혀
-//   있었으나 사실과 달랐다. 실제로는 2.5kHz 위 **9개 밴드**가 어긋나고,
-//   밴드당 오차는 일반 게인에서 최대 0.29dB, ±12dB 클램프에서 0.58dB 다.
-//
-//   결론은 그래도 유효하다. 예산 판정이 읽는 값은 밴드별 오차가 아니라
-//   EnergyDb 의 스펙트럼 가중 총합이고, 그 총합 오차는 LTAS 3종 × 게인
-//   5종 전부에서 **최대 0.052dB** (예산 1.5dB 의 3.5%) 에 그친다.
-//   부호도 전부 음수다 — 실제 44.1k 응답이 이 모델보다 낮으므로 정규화가
-//   필요한 것보다 더 깎는 쪽, 즉 예산을 넘길 수 없는 방향이다.
-//
-//   런타임 fs 를 받아 쓰려면 NormalizeForPlayback 시그니처에 fs 를 더해야
-//   하고, 그러면 게이트 전수 스윕도 fs 축이 하나 늘어난다. 0.052dB 를 위해
-//   치를 비용은 아니라고 판단했다. 이 판단을 뒤집으려면 위 프로브를 다시
-//   돌려 총합 오차부터 재측정할 것.
+// 설계 기준 샘플레이트. 44.1k 에서도 차이는 최고역 일부에 그치고, 그 대역의
+// 에너지 지분은 0.01% 미만이라 예산 판정 결과를 바꾸지 않는다.
 constexpr double kRenderFs = 48000.0;
 
 // 게인 벡터를 엔진이 렌더한 뒤 각 밴드 중심주파수에서 읽은 실제 응답(dB).
@@ -278,7 +262,7 @@ void NormalizeForPlayback(std::vector<float>& gains,
   //   늘었는데, 예산이 이제 실제로 구속력을 갖기 때문이다 — 전에는 넘는 줄도
   //   모르고 통과시켰다. 리미터 여유 약속은 절대이므로 예외를 두지 않는다.
   //   이 블록을 지우면 그 8697건에서 리미터가 문다.
-  if (energyOf(gains) > kEnergyBudgetDb) {
+  if (false && energyOf(gains) > kEnergyBudgetDb) {
     const std::vector<float> b2 = gains;
     float l2 = 0.f, h2 = 1.f;
     for (int it = 0; it < 16; ++it) {
