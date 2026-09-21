@@ -2903,52 +2903,26 @@ void MainWindow::RenderBottomBar() {
       return;
     }
 
-    // 수동/프롬프트 덮어쓰기를 제거하고 현재 곡을 자동 적용 경로로 다시 태운다.
-    //   AI 를 무조건 호출하는 버튼은 아니다. 캐시가 있으면 캐시를 우선 적용하고,
-    //   캐시가 없고 AI 사용이 가능한 경우에만 자동 분석을 다시 시작한다.
-    withSongKeys([&](const std::string &title, const std::string &artist) {
-      bool removed = g_recordManager.ClearManualEQ(title, artist);
-      removed = g_recordManager.ClearPromptEQ(title, artist) || removed;
-      return removed;
-    });
-
-    bool appliedCached = false;
-    withSongKeys([&](const std::string &title, const std::string &artist) {
-      if (appliedCached)
-        return false;
-      EQEntry *cached = g_recordManager.GetCachedEQ(title, artist);
-      if (cached && cached->gains31.size() == 31) {
-        m_eqOrigin = EqOrigin::Cache;
-        m_eqGains31Master = cached->gains31;
-        SyncCurrentFromMaster();
-        ApplyEQNoSave();
-        SetStatus(Lang::T(Lang::AUTO_EQ_REBUILT), Theme::COLOR_GREEN);
-        appliedCached = true;
-        return true;
-      }
-      return false;
-    });
-    if (appliedCached)
+    // TriggerAIGeneration 이 시작할 수 없을 때는 기존 덮어쓰기도 지우지 않는다.
+    if (m_aiProcessing)
       return;
-
     if (!aiEligible) {
       SetStatus(Lang::T(Lang::AUTO_EQ_NO_HISTORY_PRO),
                 Theme::COLOR_ORANGE);
       return;
     }
 
-    // [v0.1.1] 곡 해석 게이트(noSongInfo)를 제거했다.
-    //
-    //   이 아래는 AI 경로가 아니다. 바로 다음 줄이 프롬프트 버퍼를 비우므로
-    //   TriggerAIGeneration 은 useLocalCurve(:758) 로 들어가고, 커브는
-    //   LocalCurve::Generate("", userPref) + AdaptiveCurve 델타 — 전부 수식
-    //   연산이다. 네트워크도 iTunes 도 타지 않는다. 곡 제목조차 쓰지 않는다
-    //   (입력은 설문 성향과 실측 스펙트럼뿐).
-    //
-    //   자동 진입 경로에서는 E5 로 이미 이 게이트를 걷어냈다. 메뉴로 들어올
-    //   때만 남겨 두면 같은 함수가 입구에 따라 다른 답을 낸다.
-    //   곡이 있는지는 위 hasSong(:2901) 과 TriggerAIGeneration 자신(:683)이
-    //   이미 본다.
+    // [v0.1.1] 재설정은 캐시 유무와 무관하게 새로 계산한다.
+    //   저장값을 불러오는 동작은 위 restoreEq 의 역할이다 (A12).
+    withSongKeys([&](const std::string &title, const std::string &artist) {
+      bool removed = g_recordManager.ClearManualEQ(title, artist);
+      removed = g_recordManager.ClearPromptEQ(title, artist) || removed;
+      return removed;
+    });
+
+    // 빈 프롬프트로 로컬 수식 경로를 강제한다. 현재 설문 성향으로
+    // LocalCurve::Generate 를 다시 실행하고 기존 적응 보정 경로에 넘긴다.
+    // 곡 해석 성공 여부(noSongInfo)는 필요 없다 (A11).
     memset(m_promptBuf, 0, sizeof(m_promptBuf));
     TriggerAIGeneration();
   };
