@@ -533,7 +533,11 @@ std::vector<float> ComputeTasteDelta(const std::vector<float>& measuredDb,
       const float res = src[i] - avg;
       const float lim = std::max(-kLowCurvatureLimitDb,
                                  std::min(kLowCurvatureLimitDb, res));
-      delta[i] = avg + lim;
+      // [v0.1.1 F4] avg 는 이미 ±kDevClampDb 까지 갈 수 있는 두 값의 평균이라
+      //   avg + lim 은 상한을 kLowCurvatureLimitDb 만큼 넘긴다(±6.0dB). 뒤의
+      //   neutralize() 가 재클램프해 주긴 하지만 그건 haveFreqs 와 wsum 조건이
+      //   맞을 때뿐이라 보장이 아니다. 쓰는 자리에서 직접 막는다.
+      delta[i] = std::max(-kDevClampDb, std::min(kDevClampDb, avg + lim));
     }
   }
 

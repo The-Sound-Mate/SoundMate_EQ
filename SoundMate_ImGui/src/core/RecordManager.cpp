@@ -1328,13 +1328,14 @@ void RecordManager::SaveInteraction(const EQEntry &orig) {
   SaveCache();
 }
 
-EQEntry *RecordManager::GetCachedEQ(const std::string &title,
-                                    const std::string &artist) {
+bool RecordManager::GetCachedEQ(const std::string &title,
+                                const std::string &artist, EQEntry &out) {
+  std::lock_guard<std::mutex> lk(m_mutex);
   std::string key = NormalizeKey(title, artist);
   static const std::vector<std::string> priority = {"direct", "manual",
                                                     "prompt", "AI"};
 
-  auto tryGet = [&](const json &srcMap) -> EQEntry * {
+  auto tryGet = [&](const json &srcMap) -> bool {
     for (auto &src : priority) {
       if (srcMap.contains(src)) {
         auto &d = srcMap[src];
@@ -1365,33 +1366,36 @@ EQEntry *RecordManager::GetCachedEQ(const std::string &title,
         }
 
         m_entryCache[key] = e;
-        return &m_entryCache[key];
+        out = e;
+        return true;
       }
     }
-    return nullptr;
+    return false;
   };
 
   if (m_historyMap.count(key)) {
     json srcMap;
     for (auto &[s, rec] : m_historyMap[key])
       srcMap[s] = rec.value("data", rec);
-    if (auto *p = tryGet(srcMap))
-      return p;
+    if (tryGet(srcMap))
+      return true;
   }
   if (m_cache["songs"].contains(key))
-    if (auto *p = tryGet(m_cache["songs"][key]))
-      return p;
-  return nullptr;
+    if (tryGet(m_cache["songs"][key]))
+      return true;
+  return false;
 }
 
 // 특정 source 만 골라 조회. GetCachedEQ 와 동일한 데이터 변환·업샘플 로직을 쓰되
 //   우선순위 순회를 건너뛰고 src 한 개만 본다.
-EQEntry *RecordManager::GetCachedEQBySource(const std::string &title,
-                                            const std::string &artist,
-                                            const std::string &source) {
+bool RecordManager::GetCachedEQBySource(const std::string &title,
+                                        const std::string &artist,
+                                        const std::string &source,
+                                        EQEntry &out) {
+  std::lock_guard<std::mutex> lk(m_mutex);
   std::string key = NormalizeKey(title, artist);
 
-  auto build = [&](const json &d) -> EQEntry * {
+  auto build = [&](const json &d) -> bool {
     EQEntry e;
     e.title = title;
     e.artist = artist;
@@ -1414,9 +1418,10 @@ EQEntry *RecordManager::GetCachedEQBySource(const std::string &title,
       else if (e.gains5.size() == 5)
         e.gains31 = SampleLogLinear(e.gains5, AIClient::F5, AIClient::F31);
     }
-    // GetCachedEQ 와 동일하게 m_entryCache 슬롯에 저장해 포인터 안정성 확보.
+    // GetCachedEQ 와 동일하게 m_entryCache 슬롯에도 남겨 둔다 (메모).
     m_entryCache[key] = e;
-    return &m_entryCache[key];
+    out = e;
+    return true;
   };
 
   // history 우선 — 가장 최신 동기화본
@@ -1428,7 +1433,7 @@ EQEntry *RecordManager::GetCachedEQBySource(const std::string &title,
       m_cache["songs"][key].contains(source)) {
     return build(m_cache["songs"][key][source]);
   }
-  return nullptr;
+  return false;
 }
 
 bool RecordManager::ClearManualEQ(const std::string &title,

@@ -93,6 +93,11 @@ private:
   bool HasHiddenMasterDetail() const;
   void SmoothTransition(
       const std::vector<float> &targetGains); // Python의 smooth_transition()
+  // [v0.1.1 F2] 진행 중인 곡전환 보간을 즉시 파기한다. 사용자가 명시적으로
+  //   EQ 를 확정하는 모든 경로(평탄화/복원/슬라이더 조작)에서 먼저 불러야
+  //   한다. 그러지 않으면 다음 프레임의 보간 루프가 master 를 이전 목표로
+  //   되돌려 쓴다 — 버튼을 눌렀는데 한 프레임 반영됐다 사라진다.
+  void CancelTransition();
   void UpdateEQVisualizer(const std::vector<float> &gains);
 
   // ── 백그라운드 처리 ──────────────────────────────────────────

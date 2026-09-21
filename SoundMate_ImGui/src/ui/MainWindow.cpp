@@ -659,6 +659,17 @@ void MainWindow::SmoothTransition(const std::vector<float> &target) {
   m_transitionDuration = 2.0f;
 }
 
+// [v0.1.1 F2] 보간을 완료 상태로 스냅 — 남은 목표값은 더 이상 반영되지 않는다.
+//   보간 루프는 m_eqGains31Master 를 매 프레임 덮어쓰므로, 사용자가 확정한
+//   값을 쓰기 전에 이걸 불러야 한다. 시작/목표 배열도 비워서 뒤늦게 살아나는
+//   경로를 남기지 않는다.
+void MainWindow::CancelTransition() {
+  m_transitionProgress = 1.0f;
+  m_transitionApplyTimer = 0.0f;
+  m_masterTransitionStart.clear();
+  m_masterTransitionTarget.clear();
+}
+
 void MainWindow::UpdateEQVisualizer(const std::vector<float> &gains) {
   for (size_t i = 0; i < gains.size() && i < m_eqGains.size(); i++)
     m_eqGains[i] = gains[i];
@@ -1491,7 +1502,11 @@ void MainWindow::Render() {
             return;
           }
           // 진짜 게스트 모드 — 외부 API/AI 차단, 로컬 캐시만 사용.
-          EQEntry *cached = g_recordManager.GetCachedEQ(title, artist);
+          EQEntry cachedEntry;
+          EQEntry *cached = g_recordManager.GetCachedEQ(title, artist,
+                                                        cachedEntry)
+                                ? &cachedEntry
+                                : nullptr;
           if (cached && mode != EqMode::Off) {
             std::vector<float> targetView;
             if (!cached->gains31.empty()) {
@@ -1525,6 +1540,15 @@ void MainWindow::Render() {
         //   없을 때만 서버가 iTunes 를 부른다. 커브도 함께 받아 온다.
         MusicInfo info = g_genreManager.GetMusicInfo(
             title, artist, g_recordManager.GetUserTendency());
+
+        // [v0.1.1 F5] 위 호출은 네트워크다 — 타임아웃까지 길게 걸릴 수 있고,
+        //   그 사이 사용자가 곡을 넘기면 이 스레드는 죽은 곡의 결과를 들고
+        //   있다. epoch 를 다시 보지 않으면 이전 곡의 장르/커브/캐시가 새 곡에
+        //   그대로 적용된다. 100ms 디바운스 루프에만 검사가 있었고 그 뒤로는
+        //   한 번도 없었다. 여기서 끊는다 — 아래 canonical 기록과 큐 쓰기 전.
+        if (m_songEpoch.load() != myEpoch)
+          return;
+
         m_currentGenre = info.valid ? info.genre : "";
         m_serverCurve31 = info.curve31;
 
@@ -1549,7 +1573,11 @@ void MainWindow::Render() {
         }
 
         // 로컬 캐시 확인 — canonical key 로 조회
-        EQEntry *cached = g_recordManager.GetCachedEQ(keyTitle, keyArtist);
+        EQEntry cachedEntry;
+        EQEntry *cached = g_recordManager.GetCachedEQ(keyTitle, keyArtist,
+                                                      cachedEntry)
+                              ? &cachedEntry
+                              : nullptr;
         if (cached) {
           std::vector<float> targetView;
           if (!cached->gains31.empty()) {
@@ -1570,7 +1598,16 @@ void MainWindow::Render() {
             m_queuedGains = targetView;
             m_queuedMaster31 = cached->gains31; // [Task 3-A] master 정밀도 보존
             m_pendingEQUpdate = true;
-            m_eqOrigin = EqOrigin::Cache;
+            // [v0.1.1 F1] 캐시의 출처를 그대로 origin 으로 옮긴다.
+            //   사용자가 직접 만든 커브(direct/manual)는 그 자체가 최종값이다.
+            //   여기에 origin=Cache 를 박으면 :542 의 델타 가산과 :562 의
+            //   재정규화가 둘 다 살아나서, 저장할 때 이미 델타가 섞여 들어간
+            //   커브 위에 델타가 한 번 더 얹힌다. 같은 곡을 재생할수록 그
+            //   곡만 점점 더 휘는 이유가 이것이다.
+            //   AI/prompt 커브는 반대로 델타를 받는 것이 설계이므로 Cache 유지.
+            const bool userAuthored =
+                (cached->source == "manual" || cached->source == "direct");
+            m_eqOrigin = userAuthored ? EqOrigin::Manual : EqOrigin::Cache;
             SetStatus("Local Cache Applied.", Theme::COLOR_GREEN);
           }
         } else {
@@ -2704,6 +2741,10 @@ void MainWindow::RenderEQPanel() {
       //   만든 직후 슬라이더 하나를 건드리면 나머지 밴드가 0 을 떠나 델타
       //   모양으로 물드는 식이다. 눌러서 0 을 만든 사람 입장에선 영문 모를
       //   변화다.
+      // [F2] 곡전환 보간 중에 슬라이더를 잡으면, 방금 찍은 점을 다음 프레임의
+      //   보간 루프가 통째로 덮어쓴다. 손으로 미는데 값이 되돌아가는 정체가
+      //   이것이다. 인계보다 먼저 보간을 파기한다.
+      CancelTransition();
       const EqOrigin dragOrigin = m_eqOrigin.load();
       if (dragOrigin != EqOrigin::Manual && dragOrigin != EqOrigin::Preset &&
           dragOrigin != EqOrigin::Flat) {
@@ -2841,6 +2882,8 @@ void MainWindow::RenderBottomBar() {
     withSongKeys([&](const std::string &title, const std::string &artist) {
       return g_recordManager.ClearManualEQ(title, artist);
     });
+    // [F2] 곡전환 보간이 돌고 있으면 다음 프레임에 0dB 가 지워진다.
+    CancelTransition();
     m_eqOrigin = EqOrigin::Flat;
     m_eqGains31Master.assign(31, 0.f);
     SyncCurrentFromMaster();
@@ -2851,6 +2894,8 @@ void MainWindow::RenderBottomBar() {
   auto applyRestored31 = [&](const std::vector<float> &gains31) {
     // 복원은 사용자가 누른 명시값이다. Cache 로 두면 재생용 정규화와
     //   평활이 다시 들어가 "처음 세팅된 값" 과 달라질 수 있다.
+    // [F2] 복원값도 보간에 덮여 사라진다 — 먼저 파기.
+    CancelTransition();
     m_eqOrigin = EqOrigin::Preset;
     m_eqGains31Master = gains31;
     SyncCurrentFromMaster();
@@ -2882,7 +2927,11 @@ void MainWindow::RenderBottomBar() {
       withSongKeys([&](const std::string &title, const std::string &artist) {
         if (restored)
           return false;
-        EQEntry *cached = g_recordManager.GetCachedEQ(title, artist);
+        EQEntry cachedEntry;
+        EQEntry *cached = g_recordManager.GetCachedEQ(title, artist,
+                                                      cachedEntry)
+                              ? &cachedEntry
+                              : nullptr;
         if (cached && cached->gains31.size() == 31) {
           applyRestored31(cached->gains31);
           SetStatus(Lang::T(Lang::EQ_RESTORED), Theme::COLOR_GREEN);

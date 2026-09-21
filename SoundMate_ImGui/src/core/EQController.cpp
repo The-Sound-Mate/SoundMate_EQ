@@ -82,14 +82,40 @@ void EQController::RefreshPaths() { Initialize(); }
 
 bool EQController::WriteEQFile(const std::string &filePath,
                                const std::string &content) {
+  // [v0.1.1 F8] 제자리 truncate 는 두 가지를 놓친다.
+  //   1) 엔진이 파일을 다시 읽는 타이밍과 겹치면 잘린 config 를 읽는다 —
+  //      밴드 몇 개가 사라진 커브가 잠깐 걸린다.
+  //   2) 기록 성공 여부를 아무도 확인하지 않아, 디스크가 꽉 차거나 권한이
+  //      막혀도 "적용됨" 으로 보고했다.
+  //   임시 파일에 다 쓰고 MoveFileEx 로 갈아끼운다. 교체가 막히면(엔진이
+  //   핸들을 잡고 있는 등) 예전 방식으로 내려앉되, 그때도 good() 은 본다.
   try {
     auto dir = std::filesystem::path(filePath).parent_path();
     std::filesystem::create_directories(dir);
+
+    const std::string tmpPath = filePath + ".tmp";
+    {
+      std::ofstream tmp(tmpPath, std::ios::trunc | std::ios::binary);
+      if (!tmp.is_open())
+        return false;
+      tmp << content;
+      tmp.flush();
+      if (!tmp.good())
+        return false;
+    }
+    if (MoveFileExA(tmpPath.c_str(), filePath.c_str(),
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+      return true;
+
+    std::error_code ec;
+    std::filesystem::remove(tmpPath, ec);
+
     std::ofstream file(filePath, std::ios::trunc);
     if (!file.is_open())
       return false;
     file << content;
-    return true;
+    file.flush();
+    return file.good();
   } catch (...) {
     return false;
   }
@@ -135,7 +161,12 @@ bool EQController::ApplyEQ(const std::vector<float> &gains,
   oss << "Preamp: " << std::fixed << std::setprecision(1) << preamp << " dB\n";
 
   // 엔진이 기대하는 형식으로 기록: Filter: [ID] [Freq] [Gain] [Q]
-  for (size_t i = 0; i < freqs.size(); ++i) {
+  //
+  // [v0.1.1 F9] 두 배열 중 짧은 쪽으로 자른다. 예전에는 freqs.size() 로만
+  //   돌면서 gains[i] 를 읽어, gains 가 더 짧으면 범위 밖 메모리가 그대로
+  //   필터 이득이 되어 config.txt 에 기록됐다.
+  const size_t bandCount = std::min(freqs.size(), gains.size());
+  for (size_t i = 0; i < bandCount; ++i) {
     oss << "Filter: " << i << " " << std::fixed << std::setprecision(1)
         << (float)freqs[i] << " " << std::setprecision(2) << gains[i] << " "
         << std::setprecision(3) << q << "\n";

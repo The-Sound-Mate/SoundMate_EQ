@@ -125,7 +125,9 @@ public:
   // current 는 process() 가 매 샘플 한 발씩 이동.
   // 진행 중인 lerp 가 있어도 그대로 새 target 향해 자연스럽게 이어짐.
   void setCoeffs(const BiquadCoeffs &newC) {
-    target = newC;
+    // 비유한 계수는 문 앞에서 막는다 — 한 번 들어오면 x1/y1 을 통해
+    // 필터 상태 전체가 오염되고 emergencyReset 으로도 못 빠져나온다.
+    target = coeffsFinite(newC) ? newC : passthrough();
     rampLeft = kRampLen;
   }
 
@@ -171,13 +173,38 @@ public:
     return (float)out;
   }
 
+  // 계수 전체가 유한한지 — 비유한 계수는 상태를 0 으로 돌려도 다음 샘플에서
+  // 곧바로 NaN 을 재생성하므로 스냅 전에 반드시 검사해야 한다.
+  static bool coeffsFinite(const BiquadCoeffs &c) {
+    if (!std::isfinite(c.a0))
+      return false;
+    for (int i = 0; i < 4; ++i)
+      if (!std::isfinite(c.a[i]))
+        return false;
+    return true;
+  }
+
+  // 통과(bypass) 계수 — out = 1.0*in.
+  static BiquadCoeffs passthrough() {
+    BiquadCoeffs c;
+    c.a0 = 1.0;
+    c.a[0] = c.a[1] = c.a[2] = c.a[3] = 0.0;
+    return c;
+  }
+
   // NaN 감염 또는 디바이스 reset 시 호출 — 모든 상태 0 으로 +
   // 진행 중인 lerp 도 즉시 종료 (current = target 으로 스냅).
+  //
+  // [중요] target 자체가 이미 오염돼 있으면 current = target 은 NaN 을 도로
+  //   심는 짓이다. 그 경우 "10ms 무음 후 복구" 가 아니라 영구 무음이 된다.
+  //   target 이 비유한이면 통과 계수로 대체한다 — EQ 는 잃되 소리는 살린다.
   void emergencyReset() {
     x1 = 0.0;
     x2 = 0.0;
     y1 = 0.0;
     y2 = 0.0;
+    if (!coeffsFinite(target))
+      target = passthrough();
     current = target;
     rampLeft = 0;
   }
@@ -684,6 +711,14 @@ public:
 
     // Read new settings into pending struct (no alloc, stack-friendly)
     PendingConfig cfg;
+    // 프리앰프도 같은 이유로 비유한 차단 — 여긴 모든 샘플에 곱해지므로
+    // 한 번 NaN 이 들어오면 EQ 를 끄더라도 무음이 유지된다.
+    if (!std::isfinite(srcMasterGain))
+      srcMasterGain = 0.f;
+    if (srcMasterGain < -30.f)
+      srcMasterGain = -30.f;
+    if (srcMasterGain > 30.f)
+      srcMasterGain = 30.f;
     cfg.masterGain = powf(10.f, srcMasterGain / 20.f);
     cfg.activeBands = 0;
     // Initialize coefficients for all channels that will be processed:
@@ -698,9 +733,12 @@ public:
       if (!b.enabled)
         continue;
 
-      float freq = b.frequency;
-      float gain = b.gain;
-      float q = (b.q < 0.01f) ? 0.707f : b.q;
+      // [비유한 차단] 아래 범위 비교는 NaN 을 전부 통과시킨다 (NaN 과의
+      //   모든 비교는 false). 공유 메모리는 앱이 쓰므로 한 번의 쓰기 사고가
+      //   곧바로 makePeaking 을 NaN 계수로 만든다. 비교 전에 걸러낸다.
+      float freq = std::isfinite(b.frequency) ? b.frequency : 1000.f;
+      float gain = std::isfinite(b.gain) ? b.gain : 0.f;
+      float q = (std::isfinite(b.q) && b.q >= 0.01f) ? b.q : 0.707f;
 
       if (freq < 20.f)
         freq = 20.f;

@@ -126,12 +126,16 @@ public:
   SessionState LoadSessionState();
 
   // ── 로컬 캐시 ──────────────────────────────────────────────────
-  EQEntry *GetCachedEQ(const std::string &title, const std::string &artist);
+  // [v0.1.1 F7] 값으로 돌려준다. 예전에는 m_entryCache 내부 포인터를 락 없이
+  //   넘겼는데, ClearSongEQCache 가 m_mutex 를 쥐고 같은 키를 erase 하므로
+  //   해석 스레드가 들고 있던 포인터가 그대로 매달린 포인터가 됐다. std::map
+  //   자체도 동시 삽입/삭제로 깨질 수 있었다. 조회 전체를 락 안에서 끝낸다.
+  bool GetCachedEQ(const std::string &title, const std::string &artist,
+                   EQEntry &out);
   // 특정 source("AI"/"prompt"/"manual"/"direct") 만 골라 조회.
   //   EQ 복원처럼 우선순위 무시하고 특정 소스만 필요한 경우 사용.
-  EQEntry *GetCachedEQBySource(const std::string &title,
-                               const std::string &artist,
-                               const std::string &source);
+  bool GetCachedEQBySource(const std::string &title, const std::string &artist,
+                           const std::string &source, EQEntry &out);
   void SaveInteraction(const EQEntry &entry);
   bool ClearManualEQ(const std::string &title, const std::string &artist);
   bool ClearPromptEQ(const std::string &title, const std::string &artist);

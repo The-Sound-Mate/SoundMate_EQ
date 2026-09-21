@@ -52,6 +52,9 @@ void AdaptiveEngine::OnSongChanged(const std::string& title,
     m_lastApplied.clear();
     m_deltaIsFirst = true;
   }
+  // [F6] 세대를 먼저 올리고 신호를 낸다. 순서가 반대면 워커가 신호만 보고
+  //   옛 세대로 리셋할 수 있다.
+  m_songSerial.fetch_add(1, std::memory_order_release);
   m_restart.store(true);
 }
 
@@ -237,7 +240,12 @@ void AdaptiveEngine::WorkerLoop() {
   uint64_t servoSamples = 0, servoSettle = 0;
   size_t   servoPolls = 0, servoActive = 0;
 
+  // [F6] 이번 측정 구간이 속한 곡 세대. resetRun 이 곧 "측정 시작" 이므로
+  //   여기서 기억해 두고, 델타를 발행하기 직전에 다시 대조한다.
+  uint64_t runSerial = m_songSerial.load(std::memory_order_acquire);
+
   auto resetRun = [&]() {
+    runSerial = m_songSerial.load(std::memory_order_acquire);
     analyzer.Reset();
     servoSamples = 0; servoPolls = 0; servoActive = 0; servoSettle = 0;
     // 연속 초과 카운터는 워커 전용 상태다. 곡이 바뀌면 여기서 비운다
@@ -406,6 +414,12 @@ void AdaptiveEngine::WorkerLoop() {
       }
       const std::vector<float> delta = AdaptiveCurve::ComputeTasteDelta(
           levels, analyzer.BandUsable(), AIClient::F31, taste);
+      // [F6] levels 스냅샷 이후 LogMood 파일 I/O 와 산출이 끼어 있다. 그 사이
+      //   곡이 바뀌었다면 이건 이전 곡의 델타다 — 버리고 처음부터 다시.
+      if (m_songSerial.load(std::memory_order_acquire) != runSerial) {
+        resetRun();
+        continue;
+      }
       {
         std::lock_guard<std::mutex> lk(m_mutex);
         m_lastLevels = levels;
@@ -443,6 +457,12 @@ void AdaptiveEngine::WorkerLoop() {
     }
     const std::vector<float> delta = AdaptiveCurve::ComputeTasteDelta(
         levels, analyzer.BandUsable(), AIClient::F31, taste);
+
+    // [F6] 최초 델타와 같은 이유 — 곡이 바뀌었으면 발행하지 않는다.
+    if (m_songSerial.load(std::memory_order_acquire) != runSerial) {
+      resetRun();
+      continue;
+    }
 
     {
       std::lock_guard<std::mutex> lk(m_mutex);

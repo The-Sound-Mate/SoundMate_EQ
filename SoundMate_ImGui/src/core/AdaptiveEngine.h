@@ -16,6 +16,7 @@
 #pragma once
 
 #include <atomic>
+#include <cstdint>
 #include <functional>
 #include <mutex>
 #include <string>
@@ -186,6 +187,12 @@ private:
   std::atomic<bool> m_enabled{true};
   std::atomic<bool> m_trackWithinSong{true};
   std::atomic<bool> m_restart{false};   // OnSongChanged 신호
+  // [v0.1.1 F6] 곡 세대 번호. m_restart 만으로는 부족하다 — 워커가 루프 위에서
+  //   exchange(false) 로 신호를 소비한 뒤 곡이 바뀌면, 이번 측정은 이전 곡의
+  //   오디오로 끝나는데도 그 델타가 발행된다. OnSongChanged 가 방금 비운
+  //   m_delta 에 이전 곡 값이 되살아나 새 곡 앞 30초를 엉뚱하게 보정한다.
+  //   워커는 resetRun() 시점의 세대를 기억하고, 발행 직전에 다시 비교한다.
+  std::atomic<uint64_t> m_songSerial{0};
   std::atomic<State> m_state{State::Idle};
 
   mutable std::mutex m_mutex;

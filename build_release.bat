@@ -38,21 +38,32 @@ rem                 History - before the budget was measured on the RENDERED
 rem                 response this failed 38953 of 81920 cases (v0.1.0 sweep);
 rem                 before taste+delta was normalized instead of taste alone
 rem                 it failed 2942 of 15360 (v0.1.1 sweep). Both are 0 now.
-rem Both return non-zero on failure, so the build stops here. The probes compile
-rem their own sources, so they always verify the current code.
+rem   filter_nan  : the APO biquad must never be silenced by a non-finite
+rem                 coefficient. Before v0.1.1 F3, a single NaN reaching
+rem                 setCoeffs poisoned x1/y1 permanently and emergencyReset
+rem                 re-seeded it from the same poisoned target - permanent
+rem                 silence, not a 10ms dropout. Measured against a copy with
+rem                 the guards removed: 4 of 5 checks fail. With them: 0.
+rem All three return non-zero on failure, so the build stops here. The probes
+rem compile their own sources, so they always verify the current code.
 rem
 rem Keep this file ASCII-only: cmd.exe reads it as the OEM codepage (949 here),
 rem and UTF-8 Korean in a batch line corrupts the parse, not just the display.
 rem ============================================================================
 echo.
-echo [GATE 1/2] LocalCurve obfuscation equivalence...
+echo [GATE 1/3] LocalCurve obfuscation equivalence...
 call "C:\SoundMate_EQ\tools\run_curve_equiv.bat"
 if errorlevel 1 (echo [ERROR] curve_equiv FAILED & exit /b 1)
 
 echo.
-echo [GATE 2/2] Playback-path energy budget sweep...
+echo [GATE 2/3] Playback-path energy budget sweep...
 call "C:\SoundMate_EQ\tools\run_gain_probe.bat"
 if errorlevel 1 (echo [ERROR] gain_probe FAILED & exit /b 1)
+
+echo.
+echo [GATE 3/3] Engine filter non-finite tolerance...
+call "C:\SoundMate_EQ\tools\run_filter_nan.bat"
+if errorlevel 1 (echo [ERROR] filter_nan FAILED & exit /b 1)
 
 echo.
 echo [OK] Gates passed.

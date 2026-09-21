@@ -224,9 +224,29 @@ static const std::vector<int>& Freqs() {
   static const std::vector<int> v(kF31, kF31 + 31);
   return v;
 }
-static const std::vector<bool>& Usable() {
-  static const std::vector<bool> v(31, true);
+// [v0.1.1 F10] 예전에는 여기가 (31, true) 상수였다. 그래서 이 게이트는
+//   48kHz 만, 그것도 "모든 밴드가 측정 가능" 이라는 한 가지 배치만 검증했다.
+//   실제로는 SpectrumAnalyzer::Configure 가 f0 > rate*0.45 인 밴드를 죽인다.
+//   44.1kHz 에서 한계는 19845Hz 이므로 20kHz 밴드는 **항상** false 다 —
+//   가장 흔한 재생 환경이 한 번도 검증된 적이 없었다는 뜻이다.
+//   끝 밴드가 죽으면 가장자리 테이퍼 기준점(firstActive/lastActive)이 통째로
+//   한 칸 안쪽으로 옮겨가므로 델타 모양 자체가 달라진다. 반드시 둘 다 돈다.
+static constexpr double kMaxFreqRatio = 0.45;  // SpectrumAnalyzer.cpp:14 와 동일
+
+static std::vector<bool>& UsableMut() {
+  static std::vector<bool> v(31, true);
   return v;
+}
+static const std::vector<bool>& Usable() { return UsableMut(); }
+
+// SpectrumAnalyzer::Configure 의 판정을 그대로 옮긴 것.
+static void SetProbeSampleRate(double rate) {
+  std::vector<bool>& v = UsableMut();
+  v.assign(31, false);
+  for (int b = 0; b < 31; ++b) {
+    const double f0 = (double)kF31[b];
+    v[b] = (f0 > 0.0 && f0 <= rate * kMaxFreqRatio);
+  }
 }
 
 // 취향 + 델타 = 엔진으로 나가는 최종 커브. MainWindow.cpp 의 합성과 같다.
@@ -1006,6 +1026,10 @@ int main() {
     }
   }
 
+  // [F10] 48kHz 먼저. 44.1kHz 는 아래에서 전 항목을 다시 돈다.
+  SetProbeSampleRate(48000.0);
+  std::printf("\n########## 샘플레이트 48000Hz (가용 밴드 %d/31) ##########\n",
+              (int)std::count(Usable().begin(), Usable().end(), true));
   const int lawFails = CheckControlLaw();
 
   const std::string kHeavy =
@@ -1029,14 +1053,33 @@ int main() {
   // 실패로 끝낸다. 리미터 여유는 협상 대상이 아니므로 "경고만 찍고 통과"는
   // 의미가 없다.
   const long sweepFails = Sweep();
-  const long total = (long)lawFails + sweepFails;
-  if (total > 0) {
-    std::printf(
-        "\n[FAIL] 제어식 %d건 + 스윕 %ld건 = %ld건 — 재생 경로 변경을 "
-        "되돌리거나 AdaptiveCurve 를 고칠 것.\n",
-        lawFails, sweepFails, total);
+
+  // ── [F10] 44.1kHz 재시행 — 20kHz 밴드가 죽은 배치 ───────────────────────
+  SetProbeSampleRate(44100.0);
+  std::printf(
+      "\n########## 샘플레이트 44100Hz (가용 밴드 %d/31) ##########\n",
+      (int)std::count(Usable().begin(), Usable().end(), true));
+  if (Usable()[30]) {
+    std::printf("  [FAIL] 44.1kHz 인데 20kHz 밴드가 살아 있다 — 마스크 오류\n");
     return 1;
   }
-  std::printf("\n[PASS] 제어식 검증과 전수 스윕 모두 통과.\n");
+  const int lawFails441 = CheckControlLaw();
+  RunCase(kFlat, kLtasPop, "pop @44.1k");
+  RunCase(kHeavy, kLtasBass, "bass-heavy @44.1k");
+  RunCase(kTrebleWarm, kLtasBright, "bright @44.1k");
+  RunCase(kHeavy, kLtasFlat, "flat @44.1k (안전망 시험)");
+  const long sweepFails441 = Sweep();
+
+  const long total = (long)lawFails + sweepFails + (long)lawFails441 +
+                     sweepFails441;
+  if (total > 0) {
+    std::printf(
+        "\n[FAIL] 48k: 제어식 %d + 스윕 %ld / 44.1k: 제어식 %d + 스윕 %ld "
+        "= %ld건 — 재생 경로 변경을 되돌리거나 AdaptiveCurve 를 고칠 것.\n",
+        lawFails, sweepFails, lawFails441, sweepFails441, total);
+    return 1;
+  }
+  std::printf(
+      "\n[PASS] 48kHz / 44.1kHz 양쪽에서 제어식 검증과 전수 스윕 모두 통과.\n");
   return 0;
 }
