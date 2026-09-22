@@ -12,6 +12,12 @@
 
 struct EQEntry {
   std::string title, artist, genre, source;
+  // [v0.1.1 identity-v2] DB track.track_hash 로 올라갈 매핑 키.
+  // 비어 있으면 SaveInteraction 이 title/artist/sourceApp 으로 v2 키를 만든다.
+  // title/artist 는 사람이 보는 값, mappingKey 는 EQ 재매칭용 안정 키다.
+  std::string mappingKey;
+  std::string identitySource;  // "smtc" / "audio_fp" 등. 현재는 smtc.
+  std::string sourceApp;       // Windows SMTC SourceAppUserModelId 를 friendly name 으로 정리한 값.
   std::vector<float> gains5, gains10, gains15, gains31;
   std::string deviceName, prompt, timestamp;
 };
@@ -142,6 +148,26 @@ public:
   bool ClearSongEQCache(const std::string &title, const std::string &artist);
   void ClearAllEQCache(); // 로컬 EQ 캐시 전체 초기화
 
+  // ── [v0.1.1] EQ 관리 창 ────────────────────────────────────────
+  // 저장된 곡별 EQ 를 사용자가 눈으로 보고 골라 지울 수 있게 하기 위한 목록.
+  // song_cache.json 의 "songs" 를 그대로 펼친다.
+  struct CachedSongInfo {
+    // NormalizeKey 결과. 삭제할 때 이 값을 그대로 돌려주면 된다 —
+    // 표시용 제목을 다시 정규화하면 복원 과정에서 깨질 수 있다.
+    std::string key;
+    std::string title;   // 표시용. 히스토리에 원문이 있으면 그것, 없으면 키에서 복원
+    std::string artist;  // 표시용. 비어 있을 수 있다
+    // "AI" / "prompt" / "manual" / "direct" 중 저장돼 있는 것들
+    std::vector<std::string> sources;
+    int maxBands = 0;    // multi_bands 중 가장 큰 밴드 수 (5/10/15/31)
+  };
+  std::vector<CachedSongInfo> ListCachedSongs();
+
+  // ListCachedSongs 가 돌려준 key 로 지운다. 내부 동작은 ClearSongEQCache 와
+  // 같지만, 제목/아티스트를 다시 정규화하지 않으므로 목록에 보이는 항목은
+  // 반드시 지워진다.
+  bool DeleteCachedSongByKey(const std::string &key);
+
   // ── 사용자 취향 ────────────────────────────────────────────────
   std::string GetUserTendency();
 
@@ -166,6 +192,9 @@ private:
   std::string NormalizeKey(const std::string &title, const std::string &artist);
   std::string GenerateTrackHash(const std::string &title,
                                 const std::string &artist);
+  std::string GenerateTrackMappingKey(const std::string &title,
+                                      const std::string &artist,
+                                      const std::string &sourceApp);
   std::string RefreshAccessToken(const std::string &refreshToken);
   void EnsureRecordDir();
   void LoadCache();

@@ -732,13 +732,15 @@ void MainWindow::TriggerAIGeneration() {
   // 가 비동기로 완료되어도 자동으로 반영됨. m_userPreference 캐시 의존 제거.
   std::string userPref = g_recordManager.GetUserTendency();
 
+  std::string aiSourceApp = m_currentSource;
+
   // [A-1] 호출 시점의 곡 epoch 캡처 — 응답 도착 전 곡이 바뀌면 결과 폐기.
   // 옛 곡의 AI 결과가 새 곡에 잘못 적용되는 사고 방지.
   int myEpoch = m_songEpoch.load();
 
   auto abortFlagPtr = m_aiAbortFlag;
   m_aiThread = std::thread([this, prompt, accessToken, aiTitle, aiArtist,
-                            userPref, myEpoch, abortFlagPtr]() {
+                            aiSourceApp, userPref, myEpoch, abortFlagPtr]() {
     // 어떤 경로로 빠져나가도 m_aiProcessing 은 반드시 false 로 복원되어야 한다.
     // 안 그러면 후속 곡의 TriggerAIGeneration 가 영구히 차단되는 데드락 발생.
     struct AiProcessingGuard {
@@ -909,10 +911,13 @@ void MainWindow::TriggerAIGeneration() {
       m_eqOrigin = prompt.empty() ? EqOrigin::AI : EqOrigin::Prompt;
       SetStatus("AI Analysis Complete!", Theme::COLOR_GREEN);
 
-      // [4-A] DB 저장도 canonical key — cross-platform 매칭 일관성.
+      // [identity-v2] DB 저장도 SMTC identity 기준. iTunes canonical 은
+      //   장르 표시용일 뿐 저장/조회 키에 섞지 않는다.
       EQEntry entry;
       entry.title = aiTitle;
       entry.artist = aiArtist;
+      entry.identitySource = "smtc";
+      entry.sourceApp = aiSourceApp;
       entry.source = prompt.empty() ? "AI" : "prompt";
       entry.prompt = prompt;
       entry.gains5 = result.bands5;
@@ -1549,22 +1554,23 @@ void MainWindow::Render() {
         if (m_songEpoch.load() != myEpoch)
           return;
 
+        // [identity-v2] iTunes/resolve-track 결과는 장르 표시용으로만 쓴다.
+        //   canonicalTitle/canonicalArtist 는 그럴듯하지만 틀린 곡을 돌려줄 수 있고,
+        //   그 값을 캐시 키로 쓰면 저장된 다른 곡 EQ 가 자동 적용된다.
+        //   EQ 조회/저장 identity 는 SMTC 에서 온 title/artist/source 로만 간다.
         m_currentGenre = info.valid ? info.genre : "";
         m_serverCurve31 = info.curve31;
 
-        // [4-A] DB key 는 canonical title/artist 사용.
-        // YouTube/Spotify/Apple Music 어디서 듣든 같은 곡 → 같은 row 매칭.
-        // iTunes 매칭 실패 시 원본으로 폴백.
-        std::string keyTitle = info.valid ? info.title : title;
-        std::string keyArtist = info.valid ? info.artist : artist;
+        std::string keyTitle = title;
+        std::string keyArtist = artist;
 
-        // ⚠️ canonical mutex 보호 — 메인 스레드 (RenderEQPanel slider
-        // deactivation) 와 AI 스레드 (TriggerAIGeneration 시작) 가 동시에 읽음.
+        // ⚠️ canonical mutex 보호 — 이제 iTunes canonical 이 아니라 현재 SMTC
+        // identity snapshot 이다. trackId 는 더 이상 identity 신뢰 신호가 아니다.
         {
           std::lock_guard<std::mutex> lk(m_canonicalMutex);
           m_canonicalTitle = keyTitle;
           m_canonicalArtist = keyArtist;
-          m_canonicalTrackId = info.trackId;
+          m_canonicalTrackId = 0;
         }
 
         if (mode == EqMode::Off) {
@@ -1728,6 +1734,7 @@ void MainWindow::Render() {
     m_settingsWin.Render();
   }
   m_surveyWin.Render();
+  m_eqLibWin.Render();
 
   // 복원 백업 선택 팝업
   RenderRestorePopup();
@@ -2341,11 +2348,18 @@ void MainWindow::RenderLeftPanel() {
       curY += badgeSize.y + badgePadY * 2 + UIScale::Px(10.0f);
     } else if (!m_statusText.empty()) {
       // 마지막 상태 — 작은 뱃지
-      const char *badgeText = m_statusText.c_str();
-      // 긴 텍스트는 잘라서 표시
+      // 긴 텍스트는 잘라서 표시.
+      // [v0.1.1] 바이트로 자르면 한글(UTF-8 3바이트) 한가운데가 끊겨
+      //   "보◆" 같은 깨진 글자가 남는다. 자를 위치가 이어짐 바이트
+      //   (0b10xxxxxx) 면 문자 시작까지 뒤로 물러난다.
       std::string shortStatus = m_statusText;
-      if (shortStatus.length() > 30)
-        shortStatus = shortStatus.substr(0, 27) + "...";
+      if (shortStatus.length() > 30) {
+        size_t cut = 27;
+        while (cut > 0 &&
+               (static_cast<unsigned char>(shortStatus[cut]) & 0xC0) == 0x80)
+          --cut;
+        shortStatus = shortStatus.substr(0, cut) + "...";
+      }
       ImVec2 badgeSize = ImGui::CalcTextSize(shortStatus.c_str());
       float badgePadX = UIScale::Px(8.0f), badgePadY = UIScale::Px(3.0f);
       ImVec2 badgePos = {cpos.x + kPad, curY};
@@ -2781,6 +2795,8 @@ void MainWindow::RenderEQPanel() {
       EQEntry entry;
       entry.title = canon.title.empty() ? m_currentTitle : canon.title;
       entry.artist = canon.artist.empty() ? m_currentArtist : canon.artist;
+      entry.identitySource = "smtc";
+      entry.sourceApp = m_currentSource;
       entry.source = "manual";
       entry.deviceName = GetSelectedDeviceGuid();
       // [최종] master31 을 SSOT 로 저장. SaveInteraction 내부에서 5/10/15 downsample 자동 채움.
@@ -2853,18 +2869,11 @@ void MainWindow::RenderBottomBar() {
   const bool aiEligible = g_recordManager.IsAIEligible();
   // [작업 C] 곡 정보(정규화 결과)가 없으면 프롬프트도 비활성 + 안내.
   //
-  // [v0.1.1] 판정을 m_currentGenre.empty() 에서 trackId 로 바꿨다. 장르는
-  //   "해석됐는가" 의 대리 변수로 쓰기에 세 가지가 틀렸다.
-  //   - 의미: 해석 성공 신호는 GenreManager 의 info.valid 이고 장르는 그 안의
-  //     선택 속성이다. iTunes 가 장르를 안 주면 해석에 성공하고도 잠겼다.
-  //   - 스레드: 곡 해석 스레드(:1512)가 쓰는 std::string 을 렌더 스레드가
-  //     락 없이 읽었다. m_canonicalTrackId 는 m_canonicalMutex 아래 있다.
-  //   - 신선도: 둘 다 해석 완료 시점에만 대입되므로, 곡이 바뀐 직후에는
-  //     이전 곡의 값이 남았다 — 이건 :1405 의 무효화 블록에서 같이 고쳤다.
-  //   m_canonicalTitle 은 쓸 수 없다. 미해석 시 원본 제목으로 폴백하므로
-  //   (:1518) "해석됨" 이 아니라 "곡이 있음" 을 뜻한다.
-  const bool noSongInfo = SnapshotCanonical().trackId == 0;
+  // [identity-v2] 프롬프트/저장 가능 여부는 iTunes trackId 가 아니라
+  //   SMTC 로 현재 곡 제목을 얻었는지로 본다. iTunes 는 장르 표시용이며,
+  //   trackId 를 identity 신뢰 신호로 쓰지 않는다.
   const bool hasSong = !m_currentTitle.empty();
+  const bool noSongInfo = !hasSong;
 
   auto withSongKeys = [&](auto fn) {
     bool touched = fn(m_currentTitle, m_currentArtist);
@@ -3074,6 +3083,12 @@ void MainWindow::RenderBottomBar() {
     if (ImGui::MenuItem(Lang::T(Lang::DELETE_TRACK_EQ)))
       deleteSongEq();
     ImGui::EndDisabled();
+
+    // [v0.1.1] 저장된 EQ 보기. 지금 곡과 무관한 전체 목록이라
+    //   BeginDisabled(!hasSong) 바깥에 둔다 — 곡이 없어도 열려야 한다.
+    ImGui::Separator();
+    if (ImGui::MenuItem(Lang::T(Lang::EQ_LIB_TITLE)))
+      m_eqLibWin.Open();
 
     ImGui::EndPopup();
   }

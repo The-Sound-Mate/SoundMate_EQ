@@ -202,6 +202,7 @@ set(GUI_SOURCES
     ${GUI_SRC_DIR}/src/ui/MainWindow.cpp
     ${GUI_SRC_DIR}/src/ui/LoginWindow.cpp
     ${GUI_SRC_DIR}/src/ui/SettingsWindow.cpp
+    ${GUI_SRC_DIR}/src/ui/EqLibraryWindow.cpp
     ${GUI_SRC_DIR}/src/ui/SurveyWindow.cpp
     ${GUI_SRC_DIR}/src/ui/Lang.cpp
     ${GUI_SRC_DIR}/src/core/EQController.cpp

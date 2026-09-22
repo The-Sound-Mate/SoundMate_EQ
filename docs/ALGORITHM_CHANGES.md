@@ -1297,3 +1297,167 @@ LookaheadLimiter 는 **사용자 요청으로** 신호 경로에서 들어냈고
 - **아무도 v0.1.1 을 아직 들어보지 않았다**
 
 따라서 정직한 답은 "오류가 발견되지 않았다"이지 "완벽하다"가 아니다.
+
+---
+
+## [2026-09-21] v0.1.1 — 저장된 EQ 보기 창
+
+알고리즘 변경 아님. 커브 산출에는 한 줄도 손대지 않았다. 저장된 곡별 EQ
+캐시를 사용자가 눈으로 보고 곡 단위로 지울 수 있게 하는 UI/스토리지 변경이다.
+**reset.exe 동반 갱신 불필요** — 엔진 DLL·레지스트리·GUID 무변경, 앱 측 전용.
+
+### 무엇이 바뀌었나
+
+#### U1. `RecordManager::ListCachedSongs()` / `DeleteCachedSongByKey()` 신설
+  - 무엇이: 곡별 EQ 를 지우는 길이 `ClearSongEQCache(title, artist)` 하나뿐이었다
+    → 목록 조회 + 키 기반 삭제를 추가
+  - 왜: `song_cache.json` 의 `songs` 는 **정규화 키**(`lower(title)_lower(artist)`)
+    로만 색인된다. 표시용 제목을 다시 정규화해 지우면 복원 과정에서 원문과
+    어긋난 곡은 목록에 보이는데도 지워지지 않는다. 그래서 삭제는 목록이
+    돌려준 `key` 를 그대로 받는다
+  - 표시 이름: `m_historyMap[key][source]["data"]["song"]` 의 원문을 우선 쓰고,
+    없으면 키를 마지막 `_` 에서 잘라 되살린다
+  - 알려진 한계: `pending/` 동기화 파일 이름은 **원문** 제목/아티스트 해시라
+    원문을 못 찾으면 그 파일만 남는다. 캐시·히스토리에서는 사라지므로
+    EQ 가 되살아나지는 않고, 다음 동기화에서 서버로 올라간 뒤 정리된다
+
+#### U1b. 표시 이름이 소문자로 나오던 문제 (U1 직후 실사용에서 발견)
+  - 증상: 목록이 `don't be happy (2013 live version) / m.c the max` 처럼
+    전부 소문자로 떴다. 원문이 아니라 **정규화 키가 그대로 화면에 나온 것**
+  - 원인: U1 의 원문 조회는 `m_historyMap`(= `history_integrated.json`) 을
+    봤는데, 그 파일은 `ConsolidateLocalRecords()` 가 `applied_eq_*.json` 을
+    묶어서 만든다. 그런데 **`applied_eq_*.json` 을 쓰는 코드가 코드베이스
+    어디에도 없다** — 읽는 쪽(`RecordManager.cpp:1971`)만 남아 있다. 즉
+    히스토리는 영영 비어 있고, "없으면 키를 잘라 쓴다"는 폴백이 사실상
+    유일한 경로였다
+  - 조치 (3단):
+    1. `SaveEQ` 가 캐시 항목 안에 `song = {title, artist}` **원문**을 같이
+       적는다. 이게 근본 해결 — 목록이 읽는 바로 그 자리에 원문을 둔다
+    2. `ListCachedSongs()` 의 조회 순서를 캐시 `song` → 옛 히스토리 →
+       `pending/` 파일 내용 → 키 분해 로 바꿨다. 3순위 덕에 v0.1.1 이전에
+       저장된 항목도 (아직 동기화 전이면) 원문으로 뜬다
+    3. `DeleteCachedSongByKey()` 도 같은 순서로 원문을 찾는다. pending 파일
+       이름 해시를 만들 수 있게 되어 위의 "알려진 한계"가 대부분 사라진다
+  - `song` 필드는 **추가 전용**이라 옛 `song_cache.json` 을 그대로 읽는다.
+    필드가 없으면 3·4순위로 떨어질 뿐이다
+
+#### U2. `EqLibraryWindow` 신설 (`src/ui/EqLibraryWindow.{h,cpp}`)
+  - 검색(곡명/아티스트), 곡별 삭제(확인창), **전체 삭제**(확인창 →
+    `ClearAllEQCache()`), 새로고침, 저장/표시 개수 표시
+  - 목록은 **열 때 한 번만** 스냅샷으로 읽는다. 곡 해석 스레드가 배경에서
+    캐시에 계속 쓰기 때문에 매 프레임 읽으면 목록이 흔들리고 `m_mutex` 를
+    프레임마다 잡는다
+  - 검색어 소문자화는 ASCII 바이트만 건드린다. 0x80 이상(한글 UTF-8)을
+    `tolower` 에 넘기면 로캘에 따라 바이트가 바뀌어 한글 검색이 깨진다
+
+#### U3. 진입점 = 메인창 "EQ 관리" 팝업의 **저장된 EQ 보기**
+  - `MainWindow::RenderBottomBar()` 의 `##eq_manage_menu` 팝업 맨 아래에
+    구분선 + `저장된 EQ 보기` 항목을 넣고 `m_eqLibWin.Open()` 을 호출한다
+  - `BeginDisabled(!hasSong)` **바깥**에 둔다 — 지금 재생 중인 곡이 아니라
+    저장된 전체 목록을 보는 기능이라 곡이 없어도 열려야 한다
+  - 설정창에는 넣지 않는다. EQ 캐시를 다루는 나머지 항목(평탄화/복원/자동 EQ
+    재생성/이 곡 EQ 삭제)이 전부 이 팝업에 있어서, 같은 성격의 기능을 두 군데로
+    나누면 사용자가 어디를 봐야 할지 알 수 없다
+  - 창은 모달이 아니다 — 팝업이 닫힌 뒤에도 남아 있고 메인창 조작을 막지 않는다
+  - 문자열 ID: `WIN_EQ_LIBRARY`(제목, `##eqlibwin` 식별자 고정) 와
+    `EQ_LIB_TITLE`(메뉴 항목 = 창 머리글). 둘을 같은 문구로 두어야 사용자가
+    어느 메뉴로 열린 창인지 바로 안다
+
+### 검증
+  - `build_release.bat` 3개 게이트 전부 통과 (GATE 1 커브 동일, GATE 2 48k/44.1k
+    전수 스윕 예산 초과 0건, GATE 3 5/5). 커브 코드를 건드리지 않았으므로
+    **게이트 결과가 직전과 동일한 것이 회귀 없음의 증거**다
+  - 빌드 산출물: `build-release/Release/SoundMate Equalizer.exe` 2,919,936 B
+    (2026-09-21 19:58:19). 진입점을 설정창 → EQ 관리 메뉴로 옮긴 뒤 재빌드한
+    것이며, 게이트 수치는 이전 빌드와 한 자리도 다르지 않다
+  - 청취 확인 3곡 (2026-09-21 19:43~19:55, v0.1.1 실행 중 SHM 실측):
+    `심(心)` / `행복하지말아요` / `어디에도` 모두 저역이 상승 후 **꺾여
+    수렴**했다 (예: 어디에도 +3.61 → +6.27 → +5.52 → +5.69). 발산이나
+    펌핑 없음. 세 곡 내내 고역 보정이 **음수**로 유지돼, v0.1.0 의
+    `DefaultGenre()` 스마일 커브(9kHz +2.5 셸프)가 실제로 사라졌음을 확인
+
+### 되돌리는 법
+  두 CMakeLists 에서 `src/ui/EqLibraryWindow.cpp` 를 빼고, `MainWindow` 의
+  `m_eqLibWin` 멤버·`Render()` 호출·`##eq_manage_menu` 안의 메뉴 항목을
+  제거한다. `SettingsWindow` 는 손대지 않았으므로 되돌릴 것이 없다.
+
+---
+
+## [2026-09-21 밤] 곡 식별(identity) v2 — 잘못된 EQ 적용 경로와 DB 초기화
+
+알고리즘 변경 아님(아직). 이번 기록은 **치명적 오류 1건(E10)** 과 그 대응으로
+실행한 **DB 데이터 초기화**다. 새 키 체계의 구현은 `docs/IDENTITY_V2_PLAN.md`
+에 있고 코드는 아직 미컴파일 상태다. **reset.exe 동반 갱신 불필요** — 엔진
+DLL·레지스트리·GUID 무변경.
+
+### 치명적 오류
+
+#### E10. 곡 식별이 틀리면 **다른 곡의 EQ 가 조용히 걸린다** ★
+  - 증상: 곡별 캐시 키가 `sha256(title + artist)` 한 겹뿐인데, 제목/아티스트가
+    SMTC 에서 오는 값이라 브라우저·플레이어가 주는 문자열이 곡마다 제멋대로다.
+    거기에 서버 `resolve-track` 의 iTunes 조회가 **엉뚱한 곡으로 확정**한 사례가
+    `track_meta` 에 남아 있었다:
+    | `track_meta.id` | iTunes 가 확정한 곡 | 실제로 재생된 것 |
+    |---|---|---|
+    | `f68f13b0-1b65-4728-9235-e81f54257af1` | `Airplane / Widespread Panic` (Rock, id 287468542) | 거북이 「Airplane」 |
+    | `9fed2f6c-2b2a-4662-8ad7-baf81b5dc110` | `Unknown / Lifehouse` | `No matter where` |
+    | `74a22ee6-97fb-4e3d-a220-7a4c807b95bb` | `Bad Romance (Tendu 2) / Nate Fifield` | 포레스텔라 커버 |
+    | `66ccf147-52e9-40b2-aa01-018d9c5c20b2` | `ZOO / TAEYONG…` | aespa 「Supernova」 MV |
+    | `10f39a8f-23f6-4684-bb0b-d8763a4f712b` | `Trains and Pine Trees` | 포레스텔라 Bad Romance |
+    | `e36b2c87-5abb-45e1-b5ec-8432bdebcd4d` | `Towards the Unknown (Spa) / Luminous Hymn` | `One Day Only` (별칭 조회 9회) |
+  - 왜 치명적인가 — **실패의 비대칭**: 캐시 미스와 지문 불일치는 *안전하게*
+    실패한다(설문 커브 + 적응 보정으로 떨어진다). 그런데 오식별은 *불안전하게*
+    실패한다 — 사용자에게 아무 표시 없이 **다른 곡을 위해 저장된 EQ** 가
+    그대로 걸린다. 사용자는 자기가 만든 EQ 라고 믿는다
+  - 근거: 위 6건은 `track_meta.titles` 의 `ko` 원문과 `canonical_*` 가
+    서로 다른 곡을 가리킨다. 우연이 아니라 iTunes 검색이 제목 토큰만 보고
+    아무 판을 집은 결과다
+  - 조치 (2단):
+    1. 키를 2단으로 쪼갠다 — 신뢰 소스(Spotify/Apple Music/iTunes/YouTube
+       Music/Tidal/Deezer/Amazon Music)는 `v2t:` 로 앱과 무관하게 공유하고,
+       나머지(브라우저·로컬 플레이어·미확인)는 `v2u:` 로 **앱을 키에 포함**해
+       격리한다. 신뢰 판정은 `SourceAppUserModelId()` 원문으로 한다.
+       `"youtube"` 단독은 신뢰하지 않는다 — 브라우저일 수 있다
+    2. 정규화는 공백 정리 + ASCII 소문자화까지만 한다. 기존의 공격적인
+       한글 정리가 오식별의 원인이었으므로 한글은 그대로 통과시킨다
+  - 미결: 같은 곡으로 확정됐을 때의 통합은 `track.canonical_id` 자기참조
+    FK(NULL = 자기자신)로 하고 **물리 병합은 금지**한다. 연결 해제가
+    `canonical_id = NULL` 한 줄이어야 되돌릴 수 있다
+
+### DB 데이터 초기화 (2026-09-21 15:08 UTC 실행)
+
+v1 키(`sha256(title+artist)`)로 쌓인 297곡은 새 키 체계에서 **어차피 하나도
+매칭되지 않는다.** 그중 일부는 E10 의 잘못된 EQ 를 물고 있다. 그래서 남겨
+두는 쪽이 오히려 위험하다 — 지우고 다시 쌓는다.
+
+```sql
+delete from public.track_meta;   -- 97  → track_alias 101 cascade
+delete from public.track;        -- 297 → user_track_history 354 cascade
+```
+
+삭제 전 백업을 **2중**으로 만들었다.
+  1. 서버 스냅샷 스키마 `backup_20260921`(마이그레이션
+     `identity_v2_backup_snapshot_20260921`). `anon`/`authenticated` 권한 회수
+  2. 이 PC 의 `%USERPROFILE%\Downloads\SoundMate_DB_Backup_20260921\`
+     JSON 13개 + `00_MANIFEST.md`(복원 SQL·함정 포함).
+     **저장소 안에 두지 않는다** — 사용자 9명의 UUID 와 청취 기록이 들어 있고
+     origin 이 공개 GitHub 다
+
+행 수는 삭제 직전 라이브와 백업이 정확히 일치했다(297/354/97/101, 드리프트 0),
+삭제 후 네 테이블 모두 0 이다. 영향: 고유 사용자 9명(1위 248행 = 개발자,
+4위 15행 = 개발자 외 실사용자, 나머지 7명은 6월 이후 휴면)의 곡별 저장 EQ 가
+사라진다. 사라진 자리는 **안전 실패 경로**로 떨어진다 — 설문 커브 + 적응 보정.
+
+### 스키마 추가 (마이그레이션 `identity_v2_track_columns`)
+
+`public.track` 에 6열 추가 — `key_tier`, `source_key`, `identity_source`,
+`canonical_id`(자기참조 FK, `on delete set null`), `linked_by`, `linked_at`.
+제약 3개(`key_tier in ('t','u')`, `linked_by in ('user','fingerprint')`,
+`canonical_id <> id`) + `canonical_id` 부분 인덱스.
+**6열 전부 nullable** 이라 기존 `sync_track_history` RPC 는 무수정으로 계속 돈다.
+
+### 되돌리는 법
+  `00_MANIFEST.md` §1(서버 스냅샷 4줄 insert) 이 가장 빠르다. 로컬 JSON 복원은
+  §2 를 쓰되 §3-1 의 빈 배열 함정(`coalesce(..., '{}'::double precision[])`)을
+  반드시 적용해야 원본과 같아진다. 스키마를 되돌리려면 추가한 6열을 drop 한다.
+  `RecordManager` 의 두 함수는 호출부가 없어지므로 남겨 둬도 무해하다.

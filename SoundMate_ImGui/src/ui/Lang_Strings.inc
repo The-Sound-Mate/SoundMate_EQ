@@ -238,3 +238,22 @@ SM_STR(SURVEY_APPLY_CLOSE, u8"Apply and close")  // 적용 및 닫기
 // 기본 파형만 나오는데, 아무 설명이 없으면 그냥 고장으로 보인다.
 SM_STR(ENGINE_STALE_TITLE, u8"The audio engine is out of date.")  // 오디오 엔진이 옛 버전입니다.
 SM_STR(ENGINE_STALE_BODY, u8"The engine file could not be replaced during setup, so it is still the old one. Per-app EQ and the live spectrum will not work until it is updated. Restart your PC to finish the replacement, or run the installer again.")  // 설치 때 엔진 파일을 교체하지 못해 이전 버전이 그대로 돌고 있습니다. 교체가 끝나기 전까지는 앱별 EQ 목록과 실시간 주파수 표시가 동작하지 않습니다. PC를 다시 시작해 교체를 마치거나, 설치 파일을 다시 실행해 주세요.
+
+// --- 저장된 EQ 보기 창 ------------------------------------------------------
+// 창 제목의 ##eqlibwin 은 ImGui 창 식별자다. 번역본도 ## 뒤는 그대로 둔다.
+SM_STR(WIN_EQ_LIBRARY, u8"View saved EQ##eqlibwin")  // 저장된 EQ 보기##eqlibwin
+// [EQ 관리 메뉴] 팝업 항목 이름이자 창 머리글. 둘이 같아야 어디서 열렸는지 안다.
+SM_STR(EQ_LIB_TITLE, u8"View saved EQ")  // 저장된 EQ 보기
+SM_STR(EQ_LIB_SEARCH, u8"Search title or artist")  // 곡명 또는 아티스트 검색
+SM_STR(EQ_LIB_HINT, u8"Deleting a track's EQ makes it be analyzed from scratch the next time it plays.")  // 곡의 EQ를 지우면 다음에 그 곡이 나올 때 처음부터 다시 분석합니다.
+SM_STR(EQ_LIB_EMPTY, u8"No track EQ has been saved yet.")  // 아직 저장된 곡 EQ가 없습니다.
+SM_STR(EQ_LIB_NO_MATCH, u8"No track matches the search.")  // 검색과 일치하는 곡이 없습니다.
+SM_STR(EQ_LIB_COUNT_FMT, u8"%d saved / %d shown")  // 저장 %d곡 / 표시 %d곡
+SM_STR(EQ_LIB_BANDS_FMT, u8"%d bands")  // %d밴드
+SM_STR(EQ_LIB_UNKNOWN_ARTIST, u8"Unknown artist")  // 아티스트 미상
+SM_STR(EQ_LIB_REFRESH, u8"Refresh")  // 새로고침
+SM_STR(EQ_LIB_DELETE_ALL, u8"Delete all")  // 전체 삭제
+SM_STR(EQ_LIB_DELETE_ALL_CONFIRM, u8"Delete the saved EQ for every track?")  // 저장된 모든 곡의 EQ를 지울까요?
+SM_STR(EQ_LIB_DELETED_FMT, u8"Deleted the EQ for \"%s\".")  // \"%s\" 의 EQ를 지웠습니다.
+SM_STR(EQ_LIB_DELETE_FAILED_FMT, u8"Could not delete \"%s\".")  // \"%s\" 을(를) 지우지 못했습니다.
+SM_STR(EQ_LIB_CLEARED, u8"Deleted the saved EQ for every track.")  // 저장된 모든 곡의 EQ를 지웠습니다.

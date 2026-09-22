@@ -9,6 +9,7 @@
 #include "../core/MediaMonitor.h"
 #include "SettingsWindow.h"
 #include "SurveyWindow.h"
+#include "EqLibraryWindow.h"
 #include "imgui.h"
 #include <array>
 #include <atomic>
@@ -475,6 +476,8 @@ private:
 
   SettingsWindow m_settingsWin;
   SurveyWindow m_surveyWin;
+  // [v0.1.1] 저장된 곡 EQ 관리 창.
+  EqLibraryWindow m_eqLibWin;
   AppSettings m_settings;
   std::string m_userPreference;
   std::function<void()> m_onLogout;

@@ -239,3 +239,21 @@ SM_TR(SURVEY_APPLY_CLOSE, u8"적용 및 닫기")
 // --- 엔진 버전 불일치 경고 (앱별 EQ 창) ------------------------------------
 SM_TR(ENGINE_STALE_TITLE, u8"오디오 엔진이 옛 버전입니다.")
 SM_TR(ENGINE_STALE_BODY, u8"설치 때 엔진 파일을 교체하지 못해 이전 버전이 그대로 돌고 있습니다. 교체가 끝나기 전까지는 앱별 EQ 목록과 실시간 주파수 표시가 동작하지 않습니다. PC를 다시 시작해 교체를 마치거나, 설치 파일을 다시 실행해 주세요.")
+
+// --- 저장된 EQ 보기 창 ------------------------------------------------------
+// ##eqlibwin 은 창 식별자라 영어 원문과 글자까지 같아야 한다.
+SM_TR(WIN_EQ_LIBRARY, u8"저장된 EQ 보기##eqlibwin")
+SM_TR(EQ_LIB_TITLE, u8"저장된 EQ 보기")
+SM_TR(EQ_LIB_SEARCH, u8"곡명 또는 아티스트 검색")
+SM_TR(EQ_LIB_HINT, u8"곡의 EQ를 지우면 다음에 그 곡이 나올 때 처음부터 다시 분석합니다.")
+SM_TR(EQ_LIB_EMPTY, u8"아직 저장된 곡 EQ가 없습니다.")
+SM_TR(EQ_LIB_NO_MATCH, u8"검색과 일치하는 곡이 없습니다.")
+SM_TR(EQ_LIB_COUNT_FMT, u8"저장 %d곡 / 표시 %d곡")
+SM_TR(EQ_LIB_BANDS_FMT, u8"%d밴드")
+SM_TR(EQ_LIB_UNKNOWN_ARTIST, u8"아티스트 미상")
+SM_TR(EQ_LIB_REFRESH, u8"새로고침")
+SM_TR(EQ_LIB_DELETE_ALL, u8"전체 삭제")
+SM_TR(EQ_LIB_DELETE_ALL_CONFIRM, u8"저장된 모든 곡의 EQ를 지울까요?")
+SM_TR(EQ_LIB_DELETED_FMT, u8"\"%s\" 의 EQ를 지웠습니다.")
+SM_TR(EQ_LIB_DELETE_FAILED_FMT, u8"\"%s\" 을(를) 지우지 못했습니다.")
+SM_TR(EQ_LIB_CLEARED, u8"저장된 모든 곡의 EQ를 지웠습니다.")

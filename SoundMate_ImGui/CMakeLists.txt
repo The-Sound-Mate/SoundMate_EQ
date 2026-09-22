@@ -47,6 +47,7 @@ set(APP_SOURCES
     src/ui/LoginWindow.cpp
     src/ui/LoginWindow.h
     src/ui/SettingsWindow.cpp
+    src/ui/EqLibraryWindow.cpp
     src/ui/SettingsWindow.h
     src/ui/SurveyWindow.cpp
     src/ui/SurveyWindow.h

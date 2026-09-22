@@ -6,12 +6,15 @@
 #include "SurveyMapping.h"       // [C-2] 라벨 ↔ ID 변환
 #include "AIClient.h"            // [Task 3-A] F5/F10/F15/F31 정적 주파수 테이블 공유
 #include <algorithm>
+#include <cctype>   // [identity-v2] std::tolower — 매핑 키 정규화에서 쓴다.
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <curl/curl.h>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <map>
 #include <set>
 #include <sstream>
 #include <tuple>
@@ -148,6 +151,23 @@ static std::string PendingFilenameFor(const std::string &title,
   char hex[9];
   snprintf(hex, sizeof(hex), "%08x", h);
   return std::string("pending_") + hex + ".json";
+}
+
+static std::string PendingFilenameForKey(const std::string &mappingKey,
+                                         const std::string &title,
+                                         const std::string &artist) {
+  if (mappingKey.empty() || mappingKey == "unknown")
+    return PendingFilenameFor(title, artist);
+  std::string hex;
+  hex.reserve(mappingKey.size());
+  for (char c : mappingKey) {
+    if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
+        (c >= 'A' && c <= 'F'))
+      hex.push_back((char)std::tolower((unsigned char)c));
+  }
+  if (hex.size() > 16) hex = hex.substr(hex.size() - 16);
+  if (hex.empty()) return PendingFilenameFor(title, artist);
+  return std::string("pending_v2_") + hex + ".json";
 }
 
 static std::string DefaultCacheJson() {
@@ -373,30 +393,40 @@ std::string RecordManager::NormalizeKey(const std::string &t,
 #include <wincrypt.h>
 #pragma comment(lib, "advapi32.lib")
 
-std::string RecordManager::GenerateTrackHash(const std::string &title,
-                                             const std::string &artist) {
-  if (title.empty() || artist.empty())
-    return "unknown";
+namespace {
+std::string TrimAscii(std::string s) {
+  size_t a = s.find_first_not_of(" \t\n\r");
+  if (a == std::string::npos) return "";
+  size_t b = s.find_last_not_of(" \t\n\r");
+  return s.substr(a, b - a + 1);
+}
 
-  // [B-5] 양끝 공백 제거 — 한 칸 차이로 다른 해시 생성되는 문제 방어.
-  // YouTube/Spotify 메타데이터에 trailing space 가 종종 섞임.
-  auto trim = [](std::string s) -> std::string {
-    size_t a = s.find_first_not_of(" \t\n\r");
-    if (a == std::string::npos) return "";
-    size_t b = s.find_last_not_of(" \t\n\r");
-    return s.substr(a, b - a + 1);
-  };
-  std::string t = trim(title);
-  std::string ar = trim(artist);
-  if (t.empty() || ar.empty()) return "unknown";
+std::string CollapseAsciiWhitespace(std::string s) {
+  std::string out;
+  out.reserve(s.size());
+  bool inSpace = false;
+  for (unsigned char ch : s) {
+    const bool sp = (ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r');
+    if (sp) {
+      if (!inSpace && !out.empty()) out.push_back(' ');
+      inSpace = true;
+      continue;
+    }
+    out.push_back((char)std::tolower(ch));
+    inSpace = false;
+  }
+  while (!out.empty() && out.back() == ' ') out.pop_back();
+  return out;
+}
 
-  std::string raw = t + "|" + ar;
-  for (auto &c : raw)
-    c = tolower(c);
+std::string IdentityPart(std::string s) {
+  return CollapseAsciiWhitespace(TrimAscii(std::move(s)));
+}
 
+std::string Sha256Hex(const std::string &raw) {
   HCRYPTPROV hProv = 0;
   HCRYPTHASH hHash = 0;
-  std::string hashStr = "unknown";
+  std::string hashStr;
 
   if (CryptAcquireContextA(&hProv, nullptr, nullptr, PROV_RSA_AES,
                            CRYPT_VERIFYCONTEXT)) {
@@ -419,6 +449,52 @@ std::string RecordManager::GenerateTrackHash(const std::string &title,
     CryptReleaseContext(hProv, 0);
   }
   return hashStr;
+}
+} // namespace
+
+std::string RecordManager::GenerateTrackHash(const std::string &title,
+                                             const std::string &artist) {
+  if (title.empty() || artist.empty())
+    return "unknown";
+
+  // [B-5] 양끝 공백 제거 — 한 칸 차이로 다른 해시 생성되는 문제 방어.
+  // YouTube/Spotify 메타데이터에 trailing space 가 종종 섞임.
+  auto trim = [](std::string s) -> std::string {
+    size_t a = s.find_first_not_of(" \t\n\r");
+    if (a == std::string::npos) return "";
+    size_t b = s.find_last_not_of(" \t\n\r");
+    return s.substr(a, b - a + 1);
+  };
+  std::string t = trim(title);
+  std::string ar = trim(artist);
+  if (t.empty() || ar.empty()) return "unknown";
+
+  std::string raw = t + "|" + ar;
+  for (auto &c : raw)
+    c = tolower(c);
+
+  std::string hashStr = Sha256Hex(raw);
+  return hashStr.empty() ? "unknown" : hashStr;
+}
+
+std::string RecordManager::GenerateTrackMappingKey(const std::string &title,
+                                                   const std::string &artist,
+                                                   const std::string &sourceApp) {
+  const std::string t = IdentityPart(title);
+  if (t.empty()) return "unknown";
+
+  const std::string a = IdentityPart(artist);
+  const std::string src = IdentityPart(sourceApp);
+
+  // [identity-v2] iTunes/텍스트 검색 결과를 정체성으로 쓰지 않는다.
+  // SMTC 가 준 로컬 메타데이터와 재생 앱 범위만으로 안정 키를 만든다.
+  // artist 가 비어도 title+source 로 키를 만들 수 있게 해 YouTube/브라우저
+  // 메타데이터의 빈 artist 때문에 저장 자체가 막히지 않게 한다.
+  const char sep = '\x1f';
+  std::string raw = std::string("v2") + sep + src + sep + a + sep + t;
+  std::string hex = Sha256Hex(raw);
+  if (hex.empty()) return "unknown";
+  return "v2:smtc:" + hex;
 }
 
 void RecordManager::SetUserId(const std::string &uid) {
@@ -1261,15 +1337,26 @@ void RecordManager::SaveInteraction(const EQEntry &orig) {
   }
 
   std::string key = NormalizeKey(entry.title, entry.artist);
+  const std::string mappingKey = !entry.mappingKey.empty()
+                                     ? entry.mappingKey
+                                     : GenerateTrackMappingKey(entry.title,
+                                                               entry.artist,
+                                                               entry.sourceApp);
+  const std::string identitySource = !entry.identitySource.empty()
+                                         ? entry.identitySource
+                                         : "smtc";
 
   // ── [DB-Sync] Pro+ 사용자 한정: pending/ 디스크 큐에 1파일 즉시 기록. ──
   // Free / Anonymous 는 서버 동기화 안 함 → pending 파일도 안 만듦.
   // [E-1] 익명 모드: 로컬 캐시 (m_cache) 에만 저장 — 마이그레이션 시 일괄 업로드.
   if (!IsAnonymous() && IsAIEligible()) {
-    json pendRec = {{"schema_version", 1},
+    json pendRec = {{"schema_version", 2},
                     {"title", entry.title},
                     {"artist", entry.artist},
                     {"genre", entry.genre},
+                    {"mapping_key", mappingKey},
+                    {"identity_source", identitySource},
+                    {"source_app", entry.sourceApp},
                     {"source", entry.source},
                     {"eq_5", entry.gains5},
                     {"eq_10", entry.gains10},
@@ -1283,7 +1370,7 @@ void RecordManager::SaveInteraction(const EQEntry &orig) {
       std::string dir = PendingDir(m_recordDir);
       std::filesystem::create_directories(dir);
       writtenPath = dir + "\\" +
-                    PendingFilenameFor(entry.title, entry.artist);
+                    PendingFilenameForKey(mappingKey, entry.title, entry.artist);
       // atomic write — .tmp → rename. 강종 시에도 본 파일은 손상 안 됨.
       std::string tmp = writtenPath + ".tmp";
       {
@@ -1318,8 +1405,22 @@ void RecordManager::SaveInteraction(const EQEntry &orig) {
   }
 
   // 메모리 캐시 업데이트
+  //
+  // [v0.1.1] song 필드에 *원문* 제목/아티스트를 같이 남긴다.
+  //   키는 NormalizeKey 로 소문자화돼 있어 화면에 그대로 쓰면 "don't be
+  //   happy / m.c the max" 처럼 보인다. 원문이 남던 history_integrated.json
+  //   은 applied_eq_*.json 을 통합해 만드는데 그 파일을 쓰는 코드가 이제
+  //   없어서 영영 비어 있다 — 즉 원문을 되찾을 길이 캐시 말고는 없다.
+  //   pending/ 파일 이름도 원문 해시라, 이 필드가 있어야 곡 삭제 때 같이
+  //   지울 수 있다.
   m_cache["songs"][key][entry.source] = {{"gains", entry.gains5},
                                          {"source", entry.source},
+                                         {"mapping_key", mappingKey},
+                                         {"identity_source", identitySource},
+                                         {"source_app", entry.sourceApp},
+                                         {"song",
+                                          {{"title", entry.title},
+                                           {"artist", entry.artist}}},
                                          {"multi_bands",
                                           {{"5", entry.gains5},
                                            {"10", entry.gains10},
@@ -1343,6 +1444,9 @@ bool RecordManager::GetCachedEQ(const std::string &title,
         e.title = title;
         e.artist = artist;
         e.source = src;
+        e.mappingKey = d.value("mapping_key", "");
+        e.identitySource = d.value("identity_source", "");
+        e.sourceApp = d.value("source_app", "");
         auto mb = d.value("multi_bands", json::object());
         if (mb.contains("5"))
           e.gains5 = mb["5"].get<std::vector<float>>();
@@ -1486,8 +1590,16 @@ bool RecordManager::ClearSongEQCache(const std::string &title,
   const std::string key = NormalizeKey(title, artist);
   bool removed = false;
 
+  std::set<std::string> mappingKeys;
   if (m_cache.contains("songs") && m_cache["songs"].is_object() &&
       m_cache["songs"].contains(key)) {
+    for (auto srcIt = m_cache["songs"][key].begin();
+         srcIt != m_cache["songs"][key].end(); ++srcIt) {
+      if (srcIt.value().is_object()) {
+        std::string mk = srcIt.value().value("mapping_key", "");
+        if (!mk.empty()) mappingKeys.insert(mk);
+      }
+    }
     m_cache["songs"].erase(key);
     removed = true;
   }
@@ -1495,14 +1607,19 @@ bool RecordManager::ClearSongEQCache(const std::string &title,
   if (m_historyMap.erase(key) > 0)
     removed = true;
 
-  // Pro+ 에서 아직 서버 동기화 전인 pending 파일도 같이 지운다. 이 파일은
-  //   곡 제목/아티스트 해시로 결정되므로 같은 곡 재생 시 되살아나는 일을 막는다.
+  // Pro+ 에서 아직 서버 동기화 전인 pending 파일도 같이 지운다. v1 은
+  //   제목/아티스트 해시, v2 는 mapping_key 기반 파일명이다.
   try {
     std::error_code ec;
+    const std::string dir = PendingDir(m_recordDir) + "\\";
     const bool pendingRemoved = std::filesystem::remove(
-        PendingDir(m_recordDir) + "\\" + PendingFilenameFor(title, artist), ec);
+        dir + PendingFilenameFor(title, artist), ec);
     if (pendingRemoved)
       removed = true;
+    for (const auto &mk : mappingKeys) {
+      if (std::filesystem::remove(dir + PendingFilenameForKey(mk, title, artist), ec))
+        removed = true;
+    }
   } catch (...) {}
 
   m_entryCache.erase(key);
@@ -1528,6 +1645,247 @@ bool RecordManager::ClearSongEQCache(const std::string &title,
       std::ofstream out(m_historyFile, std::ios::trunc);
       out << kept.dump(4);
     } catch (...) {}
+  }
+  return removed;
+}
+
+// ── [v0.1.1] EQ 관리 창이 쓰는 목록/삭제 ────────────────────────────────────
+// 캐시에는 정규화된 키만 남고 원문 제목/아티스트는 없다. 화면에 보여 줄
+// 문자열은 히스토리에서 원문을 찾고, 없으면 키에서 되살린다.
+static void SplitNormalizedKey(const std::string &key, std::string &title,
+                               std::string &artist) {
+  // 키는 lower(title) + "_" + lower(artist) 다. 제목에 '_' 가 들어 있어도
+  // 마지막 '_' 뒤가 아티스트이므로 rfind 로 자른다.
+  const size_t sep = key.rfind('_');
+  if (sep == std::string::npos) {
+    title = key;
+    artist.clear();
+    return;
+  }
+  title = key.substr(0, sep);
+  artist = key.substr(sep + 1);
+}
+
+// pending/ 에 남아 있는 원문 제목/아티스트를 긁어 온다.
+//
+// [왜] v0.1.1 이전에 저장된 캐시 항목에는 song 필드가 없다. 그 시절 원문이
+//   실제로 남아 있는 곳은 pending/ 파일 안뿐이다 — history_integrated.json
+//   을 채우던 applied_eq_*.json 은 읽는 코드만 있고 쓰는 코드가 없어서
+//   영영 비어 있기 때문이다. 동기화가 끝나 pending 파일이 지워진 옛 항목은
+//   여기서도 못 찾고, 그때는 키를 잘라 쓰는 수밖에 없다.
+static std::vector<std::pair<std::string, std::string>>
+ScanPendingOriginals(const std::string &recordDir) {
+  std::vector<std::pair<std::string, std::string>> out;
+  std::error_code ec;
+  const std::string dir = PendingDir(recordDir);
+  if (!std::filesystem::exists(dir, ec))
+    return out;
+  for (auto &p : std::filesystem::directory_iterator(dir, ec)) {
+    auto name = p.path().filename().string();
+    if (name.rfind("pending_", 0) != 0 || name.size() < 5 ||
+        name.substr(name.size() - 5) != ".json")
+      continue;
+    try {
+      std::ifstream f(p.path());
+      auto rec = json::parse(f);
+      std::string t = rec.value("title", "");
+      if (!t.empty())
+        out.emplace_back(t, rec.value("artist", ""));
+    } catch (...) {
+    }
+  }
+  return out;
+}
+
+std::vector<RecordManager::CachedSongInfo> RecordManager::ListCachedSongs() {
+  std::lock_guard<std::mutex> lk(m_mutex);
+  std::vector<CachedSongInfo> out;
+  if (!m_cache.contains("songs") || !m_cache["songs"].is_object())
+    return out;
+
+  // pending/ 스캔은 원문이 모자랄 때만 한 번 돈다 — 창을 열 때마다 디스크를
+  // 훑지 않게.
+  std::map<std::string, std::pair<std::string, std::string>> pendingOrig;
+  bool pendingScanned = false;
+
+  for (auto it = m_cache["songs"].begin(); it != m_cache["songs"].end(); ++it) {
+    if (!it.value().is_object() || it.value().empty())
+      continue;
+
+    CachedSongInfo info;
+    info.key = it.key();
+
+    // 1순위 — 캐시 항목이 직접 들고 있는 원문 (v0.1.1 이후 저장분).
+    for (auto s = it.value().begin(); s != it.value().end(); ++s) {
+      if (!s.value().is_object() || !s.value().contains("song"))
+        continue;
+      const auto &song = s.value()["song"];
+      if (!song.is_object())
+        continue;
+      info.title = song.value("title", "");
+      info.artist = song.value("artist", "");
+      if (!info.title.empty())
+        break;
+    }
+
+    // 2순위 — 옛 통합 히스토리 (지금은 비어 있지만 남은 파일이 있을 수 있다).
+    if (info.title.empty()) {
+      auto hIt = m_historyMap.find(info.key);
+      if (hIt != m_historyMap.end()) {
+        for (auto &srcRec : hIt->second) {
+          try {
+            const auto &song = srcRec.second.at("data").at("song");
+            info.title = song.value("title", "");
+            info.artist = song.value("artist", "");
+          } catch (...) {
+          }
+          if (!info.title.empty())
+            break;
+        }
+      }
+    }
+
+    // 3순위 — 아직 동기화되지 않은 pending/ 파일 안의 원문.
+    if (info.title.empty()) {
+      if (!pendingScanned) {
+        pendingScanned = true;
+        for (auto &[t, a] : ScanPendingOriginals(m_recordDir))
+          pendingOrig.emplace(NormalizeKey(t, a), std::make_pair(t, a));
+      }
+      auto pIt = pendingOrig.find(info.key);
+      if (pIt != pendingOrig.end()) {
+        info.title = pIt->second.first;
+        info.artist = pIt->second.second;
+      }
+    }
+
+    // 4순위 — 어디에도 원문이 없다. 키를 잘라 쓴다 (소문자로 보인다).
+    if (info.title.empty())
+      SplitNormalizedKey(info.key, info.title, info.artist);
+
+    for (auto s = it.value().begin(); s != it.value().end(); ++s) {
+      info.sources.push_back(s.key());
+      try {
+        const auto &mb = s.value().at("multi_bands");
+        static const char *kBandKeys[] = {"31", "15", "10", "5"};
+        for (const char *b : kBandKeys) {
+          if (mb.contains(b) && mb[b].is_array() && !mb[b].empty()) {
+            info.maxBands = std::max(info.maxBands, std::atoi(b));
+            break;
+          }
+        }
+      } catch (...) {
+      }
+    }
+    std::sort(info.sources.begin(), info.sources.end());
+    out.push_back(std::move(info));
+  }
+
+  std::sort(out.begin(), out.end(),
+            [](const CachedSongInfo &a, const CachedSongInfo &b) {
+              if (a.title != b.title)
+                return a.title < b.title;
+              return a.artist < b.artist;
+            });
+  return out;
+}
+
+bool RecordManager::DeleteCachedSongByKey(const std::string &key) {
+  if (key.empty())
+    return false;
+
+  std::lock_guard<std::mutex> lk(m_mutex);
+  bool removed = false;
+
+  // pending/ 파일 이름은 *원문* 제목/아티스트 해시라 키만으로는 못 만든다.
+  // 원문은 캐시 항목의 song 필드 → 옛 히스토리 순으로 찾는다. 둘 다 없으면
+  // 캐시와 히스토리에서만 사라지므로 EQ 는 더 이상 복원되지 않고, pending
+  // 파일은 다음 동기화에서 서버로 올라간 뒤 자연히 정리된다.
+  std::string origTitle, origArtist;
+  if (m_cache.contains("songs") && m_cache["songs"].is_object() &&
+      m_cache["songs"].contains(key) && m_cache["songs"][key].is_object()) {
+    for (auto s = m_cache["songs"][key].begin();
+         s != m_cache["songs"][key].end(); ++s) {
+      if (!s.value().is_object() || !s.value().contains("song"))
+        continue;
+      const auto &song = s.value()["song"];
+      if (!song.is_object())
+        continue;
+      origTitle = song.value("title", "");
+      origArtist = song.value("artist", "");
+      if (!origTitle.empty())
+        break;
+    }
+  }
+  if (origTitle.empty()) {
+    auto hIt = m_historyMap.find(key);
+    if (hIt != m_historyMap.end()) {
+      for (auto &srcRec : hIt->second) {
+        try {
+          const auto &song = srcRec.second.at("data").at("song");
+          origTitle = song.value("title", "");
+          origArtist = song.value("artist", "");
+        } catch (...) {
+        }
+        if (!origTitle.empty())
+          break;
+      }
+    }
+  }
+  // 마지막 수단 — pending/ 파일 자체에 원문이 들어 있다. 이름은 해시라
+  // 역산이 안 되지만, 안을 열어 정규화해 보면 어느 곡인지 맞출 수 있다.
+  if (origTitle.empty()) {
+    for (auto &[t, a] : ScanPendingOriginals(m_recordDir)) {
+      if (NormalizeKey(t, a) == key) {
+        origTitle = t;
+        origArtist = a;
+        break;
+      }
+    }
+  }
+
+  if (m_cache.contains("songs") && m_cache["songs"].is_object() &&
+      m_cache["songs"].contains(key)) {
+    m_cache["songs"].erase(key);
+    removed = true;
+  }
+  if (m_historyMap.erase(key) > 0)
+    removed = true;
+  m_entryCache.erase(key);
+
+  if (!origTitle.empty()) {
+    try {
+      std::error_code ec;
+      if (std::filesystem::remove(PendingDir(m_recordDir) + "\\" +
+                                      PendingFilenameFor(origTitle, origArtist),
+                                  ec))
+        removed = true;
+    } catch (...) {
+    }
+  }
+
+  if (removed) {
+    SaveCache();
+
+    // history_integrated.json 에서도 같은 키를 빼야 다음 실행에서 되살아나지
+    // 않는다. ClearSongEQCache 와 같은 처리다.
+    try {
+      json history = json::array();
+      if (std::filesystem::exists(m_historyFile)) {
+        std::ifstream f(m_historyFile);
+        history = json::parse(f);
+      }
+      json kept = json::array();
+      for (auto &rec : history) {
+        auto &song = rec["data"]["song"];
+        if (NormalizeKey(song.value("title", ""), song.value("artist", "")) !=
+            key)
+          kept.push_back(rec);
+      }
+      std::ofstream out(m_historyFile, std::ios::trunc);
+      out << kept.dump(4);
+    } catch (...) {
+    }
   }
   return removed;
 }
@@ -1701,8 +2059,13 @@ bool RecordManager::SyncToDB(long timeoutSecs) {
     json rpcItems = json::array();
     std::map<std::string, std::vector<std::filesystem::path>> hashToFiles;
     for (auto &it : items) {
-      std::string h = GenerateTrackHash(it.data.value("title", ""),
-                                        it.data.value("artist", ""));
+      std::string h = it.data.value("mapping_key", "");
+      if (h.empty()) {
+        // schema_version 1 pending 파일 호환. 새 파일은 SaveInteraction 에서
+        // v2:smtc:<sha256> mapping_key 를 이미 넣는다.
+        h = GenerateTrackHash(it.data.value("title", ""),
+                              it.data.value("artist", ""));
+      }
       if (h.empty()) continue;
       rpcItems.push_back({{"track_hash",  h},
                           {"title",       it.data.value("title", "")},
