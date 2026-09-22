@@ -13,11 +13,14 @@
 struct EQEntry {
   std::string title, artist, genre, source;
   // [v0.1.1 identity-v2] DB track.track_hash 로 올라갈 매핑 키.
-  // 비어 있으면 SaveInteraction 이 title/artist/sourceApp 으로 v2 키를 만든다.
+  // 비어 있으면 SaveInteraction 이 title/artist/sourceKey 로 v2 키를 만든다.
   // title/artist 는 사람이 보는 값, mappingKey 는 EQ 재매칭용 안정 키다.
   std::string mappingKey;
   std::string identitySource;  // "smtc" / "audio_fp" 등. 현재는 smtc.
-  std::string sourceApp;       // Windows SMTC SourceAppUserModelId 를 friendly name 으로 정리한 값.
+  std::string sourceApp;       // Windows SMTC SourceAppUserModelId 를 friendly name 으로 정리한 값. 표시·기록용.
+  // [identity-v2] SourceAppUserModelId 원문. 신뢰 판정과 앱 키의 유일한 재료다.
+  // sourceApp 은 "edge" 부분문자열 매칭 같은 손실 가공을 거치므로 키에 쓰지 않는다.
+  std::string sourceKey;
   std::vector<float> gains5, gains10, gains15, gains31;
   std::string deviceName, prompt, timestamp;
 };
@@ -192,9 +195,11 @@ private:
   std::string NormalizeKey(const std::string &title, const std::string &artist);
   std::string GenerateTrackHash(const std::string &title,
                                 const std::string &artist);
+  // [identity-v2] 2단 키. sourceKey 는 SourceAppUserModelId **원문**이어야
+  // 한다 — friendly name 을 넘기면 신뢰 판정이 틀린다.
   std::string GenerateTrackMappingKey(const std::string &title,
                                       const std::string &artist,
-                                      const std::string &sourceApp);
+                                      const std::string &sourceKey);
   std::string RefreshAccessToken(const std::string &refreshToken);
   void EnsureRecordDir();
   void LoadCache();

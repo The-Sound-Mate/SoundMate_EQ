@@ -423,6 +423,57 @@ std::string IdentityPart(std::string s) {
   return CollapseAsciiWhitespace(TrimAscii(std::move(s)));
 }
 
+// [identity-v2] SourceAppUserModelId 원문 → 소문자 앱 키.
+//   1. 소문자화  2. 마지막 \ / ! 뒤만  3. 끝의 .exe 제거
+// 예) "SpotifyAB.SpotifyMusic_zpd...!Spotify" → "spotify"
+//     "chrome.exe" → "chrome"
+// 비신뢰 키의 네임스페이스 분리에만 쓴다. 신뢰 키에는 들어가지 않는다.
+std::string AppKeyFrom(const std::string &rawAumid) {
+  std::string s = TrimAscii(rawAumid);
+  for (auto &c : s) c = (char)std::tolower((unsigned char)c);
+
+  const auto pos = s.find_last_of("\\/!");
+  if (pos != std::string::npos && pos + 1 < s.size()) s = s.substr(pos + 1);
+
+  if (s.size() > 4 && s.compare(s.size() - 4, 4, ".exe") == 0)
+    s = s.substr(0, s.size() - 4);
+
+  return s;
+}
+
+// [identity-v2] 메타데이터를 믿을 수 있는 앱인가.
+//
+// 판정 기준은 "무슨 사이트인가"가 아니라 "title/artist 가 태그에서 제대로
+// 분리돼 오는가"다. 전용 음악 앱은 그렇고, 브라우저는 페이지가 준 값이라
+// title 에 "(Official MV) [4K]" 가, artist 에 채널명이 들어온다.
+//
+// 원문 전체에서 부분문자열을 찾는다 — 패키지 AUMID 는
+// "AppleInc.AppleMusicWin_nzyj5cx40ttqa!App" 처럼 앱 키(=마지막 ! 뒤)에는
+// 상표가 없고 패키지 이름 쪽에만 있는 경우가 있다.
+//
+// "youtube" 단독은 **신뢰가 아니다** — 브라우저 탭일 수 있다. "youtubemusic"
+// 만 신뢰한다. foobar/VLC 같은 로컬 플레이어는 태그가 좋을 수도 있지만 알 수
+// 없으므로 기본은 비신뢰다. 비신뢰는 "저장 안 함"이 아니라 "네임스페이스 분리"다.
+bool IsTrustedSource(const std::string &rawAumid) {
+  // 소문자화 + 영숫자만 남긴다. 실제 AUMID 는 "YouTube Music.exe",
+  // "Amazon Music.exe", "Apple Music.exe" 처럼 공백이 끼어 있어서
+  // 그냥 부분문자열을 찾으면 셋 다 놓친다.
+  std::string s;
+  s.reserve(rawAumid.size());
+  for (unsigned char c : rawAumid) {
+    if (std::isalnum(c)) s.push_back((char)std::tolower(c));
+  }
+
+  static const char *kTrusted[] = {
+      "spotify", "applemusic", "itunes", "youtubemusic",
+      "tidal",   "deezer",     "amazonmusic",
+  };
+  for (const char *needle : kTrusted) {
+    if (s.find(needle) != std::string::npos) return true;
+  }
+  return false;
+}
+
 std::string Sha256Hex(const std::string &raw) {
   HCRYPTPROV hProv = 0;
   HCRYPTHASH hHash = 0;
@@ -477,24 +528,55 @@ std::string RecordManager::GenerateTrackHash(const std::string &title,
   return hashStr.empty() ? "unknown" : hashStr;
 }
 
+// [identity-v2] 2단 키.
+//
+// sourceKey 는 SMTC SourceAppUserModelId **원문**이다. 표시용 friendly name
+// (EQEntry::sourceApp) 을 넘기면 신뢰 판정이 틀린다 — friendly name 은
+// "edge" 부분문자열 매칭 같은 손실 가공을 거친다.
+//
+// 신뢰 앱(스포티파이/애플뮤직/…)은 title/artist 가 태그에서 제대로 분리돼
+// 오므로 **앱을 키에 넣지 않는다**. 같은 곡을 스포티파이에서 듣든 애플뮤직에서
+// 듣든 한 키로 모여야 EQ 가 따라간다.
+//
+// 비신뢰 앱(브라우저/로컬 플레이어/미상)은 title 에 "(Official MV) [4K]" 가,
+// artist 에 채널명이 들어온다. 이쪽은 앱 키로 네임스페이스를 갈라 신뢰 쪽
+// 키를 오염시키지 않게 한다. 저장을 막지는 않는다 — 브라우저 안에서는 그
+// 나름대로 일관되기 때문이다.
+//
+// 이전 버전은 sourceApp 을 **무조건** 키에 넣었다. 그래서 같은 곡이 앱마다
+// 다른 키로 영구히 쪼개졌다. 그 키들과 호환되지 않는 것은 의도된 것이다 —
+// DB 는 2026-09-21 에 비웠다 (docs/ALGORITHM_CHANGES.md 참조).
+//
+// 반환 길이: 4 + 64 = 68자. sync_track_history 의 track_hash <= 128 이내.
 std::string RecordManager::GenerateTrackMappingKey(const std::string &title,
                                                    const std::string &artist,
-                                                   const std::string &sourceApp) {
+                                                   const std::string &sourceKey) {
+  // [주의] 여기서 공격적 정규화(괄호 제거·특수문자 제거)를 하면 안 된다.
+  // 서로 다른 곡이 같은 키로 뭉개진다. IdentityPart 는 trim + ASCII 소문자화 +
+  // 공백 축약만 한다 — 한글은 그대로 통과한다.
   const std::string t = IdentityPart(title);
   if (t.empty()) return "unknown";
 
+  // artist 가 비어도 키를 만든다. 브라우저 메타데이터는 artist 가 자주 비고,
+  // 그 때문에 저장 자체가 막히면 안 된다.
   const std::string a = IdentityPart(artist);
-  const std::string src = IdentityPart(sourceApp);
 
-  // [identity-v2] iTunes/텍스트 검색 결과를 정체성으로 쓰지 않는다.
-  // SMTC 가 준 로컬 메타데이터와 재생 앱 범위만으로 안정 키를 만든다.
-  // artist 가 비어도 title+source 로 키를 만들 수 있게 해 YouTube/브라우저
-  // 메타데이터의 빈 artist 때문에 저장 자체가 막히지 않게 한다.
   const char sep = '\x1f';
-  std::string raw = std::string("v2") + sep + src + sep + a + sep + t;
+
+  if (IsTrustedSource(sourceKey)) {
+    std::string raw = std::string("v2t") + sep + a + sep + t;
+    std::string hex = Sha256Hex(raw);
+    if (hex.empty()) return "unknown";
+    return "v2t:" + hex;
+  }
+
+  // 빈 sourceKey 도 여기로 온다 — AppKeyFrom("") == "" 이므로 "미상 앱"
+  // 이라는 하나의 네임스페이스로 모인다.
+  const std::string app = AppKeyFrom(sourceKey);
+  std::string raw = std::string("v2u") + sep + app + sep + a + sep + t;
   std::string hex = Sha256Hex(raw);
   if (hex.empty()) return "unknown";
-  return "v2:smtc:" + hex;
+  return "v2u:" + hex;
 }
 
 void RecordManager::SetUserId(const std::string &uid) {
@@ -1339,9 +1421,12 @@ void RecordManager::SaveInteraction(const EQEntry &orig) {
   std::string key = NormalizeKey(entry.title, entry.artist);
   const std::string mappingKey = !entry.mappingKey.empty()
                                      ? entry.mappingKey
+                                     // [identity-v2] 신뢰 판정 재료는 AUMID
+                                     // 원문(sourceKey)이다. sourceApp 은
+                                     // 표시용이라 넘기면 안 된다.
                                      : GenerateTrackMappingKey(entry.title,
                                                                entry.artist,
-                                                               entry.sourceApp);
+                                                               entry.sourceKey);
   const std::string identitySource = !entry.identitySource.empty()
                                          ? entry.identitySource
                                          : "smtc";
@@ -1357,6 +1442,10 @@ void RecordManager::SaveInteraction(const EQEntry &orig) {
                     {"mapping_key", mappingKey},
                     {"identity_source", identitySource},
                     {"source_app", entry.sourceApp},
+                    // [identity-v2] AUMID 원문. 키는 mapping_key 로 이미
+                    // 확정돼 있지만, 나중에 키 규칙이 바뀌었을 때 원재료
+                    // 없이는 재계산을 못 한다.
+                    {"source_key", entry.sourceKey},
                     {"source", entry.source},
                     {"eq_5", entry.gains5},
                     {"eq_10", entry.gains10},
@@ -1418,6 +1507,7 @@ void RecordManager::SaveInteraction(const EQEntry &orig) {
                                          {"mapping_key", mappingKey},
                                          {"identity_source", identitySource},
                                          {"source_app", entry.sourceApp},
+                                         {"source_key", entry.sourceKey},
                                          {"song",
                                           {{"title", entry.title},
                                            {"artist", entry.artist}}},
@@ -1447,6 +1537,7 @@ bool RecordManager::GetCachedEQ(const std::string &title,
         e.mappingKey = d.value("mapping_key", "");
         e.identitySource = d.value("identity_source", "");
         e.sourceApp = d.value("source_app", "");
+        e.sourceKey = d.value("source_key", "");
         auto mb = d.value("multi_bands", json::object());
         if (mb.contains("5"))
           e.gains5 = mb["5"].get<std::vector<float>>();
@@ -2062,7 +2153,7 @@ bool RecordManager::SyncToDB(long timeoutSecs) {
       std::string h = it.data.value("mapping_key", "");
       if (h.empty()) {
         // schema_version 1 pending 파일 호환. 새 파일은 SaveInteraction 에서
-        // v2:smtc:<sha256> mapping_key 를 이미 넣는다.
+        // v2t:/v2u:<sha256> mapping_key 를 이미 넣는다.
         h = GenerateTrackHash(it.data.value("title", ""),
                               it.data.value("artist", ""));
       }

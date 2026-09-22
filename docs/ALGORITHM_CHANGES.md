@@ -1385,9 +1385,9 @@ LookaheadLimiter 는 **사용자 요청으로** 신호 경로에서 들어냈고
 
 ## [2026-09-21 밤] 곡 식별(identity) v2 — 잘못된 EQ 적용 경로와 DB 초기화
 
-알고리즘 변경 아님(아직). 이번 기록은 **치명적 오류 1건(E10)** 과 그 대응으로
-실행한 **DB 데이터 초기화**다. 새 키 체계의 구현은 `docs/IDENTITY_V2_PLAN.md`
-에 있고 코드는 아직 미컴파일 상태다. **reset.exe 동반 갱신 불필요** — 엔진
+이번 기록은 **치명적 오류 1건(E10)** 과 그 대응으로 실행한 **DB 데이터
+초기화**다. 설계는 `docs/IDENTITY_V2_PLAN.md` 에 있고, 코드 구현은 다음 절
+**A12** 에 따로 적었다. **reset.exe 동반 갱신 불필요** — 엔진
 DLL·레지스트리·GUID 무변경.
 
 ### 치명적 오류
@@ -1461,3 +1461,89 @@ delete from public.track;        -- 297 → user_track_history 354 cascade
   §2 를 쓰되 §3-1 의 빈 배열 함정(`coalesce(..., '{}'::double precision[])`)을
   반드시 적용해야 원본과 같아진다. 스키마를 되돌리려면 추가한 6열을 drop 한다.
   `RecordManager` 의 두 함수는 호출부가 없어지므로 남겨 둬도 무해하다.
+
+---
+
+## [2026-09-22] identity-v2 2단 키 구현 (v0.1.1)
+
+위 E10 의 조치 1번을 실제 코드로 옮긴 기록이다. **reset.exe 동반 갱신 불필요**
+— 엔진 DLL·레지스트리·GUID 무변경, 앱 측 식별 키 산출만 바뀐다.
+
+### 알고리즘 변경
+
+#### A12. 매핑 키를 1단 → 2단으로 교체
+
+  - 무엇이:
+
+    ```
+    이전  v2:smtc:sha256("v2" \x1f 표시용앱이름 \x1f artist \x1f title)
+          → 앱 이름이 **무조건** 키에 들어감
+
+    이후  신뢰   v2t:sha256("v2t" \x1f artist \x1f title)          (앱 없음)
+          비신뢰 v2u:sha256("v2u" \x1f 앱키 \x1f artist \x1f title) (앱 포함)
+    ```
+
+    신뢰 판정: `SourceAppUserModelId()` **원문**을 소문자화·영숫자만 남긴 뒤
+    `spotify` / `applemusic` / `itunes` / `youtubemusic` / `tidal` / `deezer` /
+    `amazonmusic` 중 하나를 포함하면 신뢰. 그 외 전부 비신뢰.
+
+  - 왜:
+    1. **신뢰 쪽에서 앱을 뺀 이유** — 같은 곡을 스포티파이에서 듣다가
+       애플뮤직에서 들으면 이전 키는 영구히 2개로 쪼개졌다. 사용자가 맞춰 둔
+       EQ 가 앱을 바꾸는 순간 사라진다. 전용 음악 앱은 title/artist 를
+       태그에서 제대로 분리해 주므로 앱 없이도 같은 곡이 같은 키가 된다.
+    2. **비신뢰 쪽에 앱을 남긴 이유** — 브라우저는 페이지가 준 값을 그대로
+       준다. title 에 `(Official MV) [4K]`, artist 에 채널명이 들어온다.
+       이걸 신뢰 쪽과 같은 네임스페이스에 넣으면 깨끗한 키를 오염시킨다.
+       저장을 막지는 않는다 — 브라우저 안에서는 그 나름대로 일관되기 때문에
+       "유튜브에서 들을 때의 EQ" 는 정상적으로 따라온다.
+    3. `youtube` **단독은 신뢰가 아니다**. 브라우저 탭일 수 있다.
+       `youtubemusic` 만 신뢰한다.
+    4. 신뢰 판정에서 영숫자만 남기는 이유 — 실제 AUMID 가
+       `YouTube Music.exe` / `Amazon Music.exe` / `Apple Music.exe` 처럼
+       공백을 끼고 온다. 그냥 부분문자열로 찾으면 셋 다 놓친다.
+
+  - 키 재료를 `sourceApp` → `sourceKey` 로 바꾼 이유:
+    `MediaMonitor` 가 만드는 표시용 이름(`source`)은 손실 가공이다. 특히
+    `msedge|edge` 부분문자열 매칭은 이름에 `edge` 가 든 다른 앱까지 전부
+    `Edge` 로 뭉갠다. 그래서 `SongInfo::sourceKey` / `EQEntry::sourceKey` 를
+    신설해 **AUMID 원문**을 가공 전에 따로 들고 다닌다. 표시용 이름은 그대로
+    두고 기록에도 계속 남는다.
+
+  - 정규화 강도는 그대로: `IdentityPart` = trim + ASCII 소문자화 + 공백 축약.
+    **괄호·특수문자 제거 같은 공격적 정규화는 하지 않는다** — 서로 다른 곡이
+    같은 키로 뭉개지면 E10 과 똑같은 "조용히 틀린 EQ" 가 된다. 한글은 그대로
+    통과한다.
+
+  - 음색 영향: 없음. 커브 산출식은 한 줄도 건드리지 않았다.
+    GATE 1 `cases=82160 mismatched=0 / IDENTICAL (bit-exact)`,
+    GATE 2 `[PASS] 48kHz / 44.1kHz 양쪽 통과, 예산 초과 0건`.
+
+  - 이전 키와의 호환: **없다. 의도한 것이다.** DB 는 2026-09-21 에 비웠고,
+    로컬 캐시에 남은 `v2:smtc:` 키는 새 규칙으로 다시 만들어진다. 오식별로
+    오염된 옛 키를 끌고 가는 것이 더 나쁘다.
+
+  - 키 길이: `4 + 64 = 68`자. `sync_track_history` 의 `track_hash <= 128` 이내.
+
+  - 바뀐 파일:
+    | 파일 | 변경 |
+    |---|---|
+    | `core/MediaMonitor.h` | `SongInfo::sourceKey` 추가 |
+    | `core/MediaMonitor.cpp` | friendly name 가공 **전에** `info.sourceKey = appId` |
+    | `core/RecordManager.h` | `EQEntry::sourceKey` 추가, 선언 인자명 교체 |
+    | `core/RecordManager.cpp` | `IsTrustedSource()` / `AppKeyFrom()` 신설, `GenerateTrackMappingKey()` 2단화, pending·캐시에 `source_key` 저장/복원 |
+    | `ui/MainWindow.h` | `m_currentSourceKey` 추가 |
+    | `ui/MainWindow.cpp` | 곡 전환 시 대입, AI 스레드 캡처, 저장 경로 2곳(AI/prompt·manual)에서 `entry.sourceKey` 채움 |
+
+  - 되돌리는 법: `GenerateTrackMappingKey` 본문을 `v2:smtc:` 1단 형태로
+    되돌리고 `SyncToDB` 의 폴백 인자를 `entry.sourceKey` → `entry.sourceApp`
+    으로 되돌린다. `sourceKey` 멤버들은 남겨 둬도 무해하다.
+
+### 아직 안 한 것 (v0.1.2 이후)
+
+  - 로컬 랜드마크 지문 인덱스 — 비신뢰 소스에서도 곡을 동일 판정하는 수단
+  - `sync_track_history` RPC 가 새로 추가된 6열(`key_tier`, `source_key` 등)을
+    채우게 하는 작업. 지금은 nullable 이라 비어 있다
+  - `MainWindow.cpp` 곡 전환마다 도는 `ProcessBatchSync` 스레드의 디바운스
+  - 별칭(alias) 검토 UI
+

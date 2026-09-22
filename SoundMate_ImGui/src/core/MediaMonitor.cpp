@@ -68,6 +68,9 @@ SongInfo MediaMonitor::FetchCurrentMedia() {
         // [UI 개선] Source 앱 이름 추출 — SourceAppUserModelId 에서 friendly name 변환
         try {
             auto appId = winrt::to_string(session.SourceAppUserModelId());
+            // [identity-v2] 아래 friendly name 변환은 정보를 잃는다.
+            // 키 재료로 쓸 원문을 가공 전에 먼저 보관한다.
+            info.sourceKey = appId;
             // 소문자 변환 — case-insensitive 매칭
             std::string lower = appId;
             for (auto& c : lower) c = (char)std::tolower((unsigned char)c);

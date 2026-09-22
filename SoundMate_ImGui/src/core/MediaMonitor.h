@@ -23,6 +23,12 @@ struct SongInfo {
     // [UI 개선] 좌측 패널 메타데이터 표시용
     std::string source;            // 재생 앱 이름 (YouTube, Spotify 등)
     int         durationSeconds = 0; // 총 재생 시간 (초)
+
+    // [v0.1.1 identity-v2] SourceAppUserModelId 원문. source 는 표시용으로
+    // 가공되면서 정보를 잃는다 — "edge" 부분문자열 매칭처럼 다른 앱을 같은
+    // 이름으로 뭉개기도 한다. 키 재료로는 이 원문만 쓴다.
+    // 빈 문자열이면 비신뢰(untrusted) 로 취급된다.
+    std::string sourceKey;
 };
 
 // 곡이 바뀌었을 때 호출될 콜백 타입

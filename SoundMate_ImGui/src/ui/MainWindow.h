@@ -470,6 +470,9 @@ private:
   // SMTC 가 알려주는 재생 앱 이름 (Chrome, Spotify 등). 곡 제목 옆에
   //   프로세스 이름을 붙일 때 후보를 좁히는 데 쓴다.
   std::string m_currentSource;
+  // [identity-v2] SourceAppUserModelId 원문. m_currentSource 는 표시용으로
+  //   가공되면서 정보를 잃으므로, 매핑 키의 신뢰 판정에는 이 원문만 쓴다.
+  std::string m_currentSourceKey;
   // 지금 곡을 내보내고 있는 프로세스 이름. 못 정하면 빈 문자열.
   std::string CurrentSourceProcess() const;
   bool m_appEqOpen = false;

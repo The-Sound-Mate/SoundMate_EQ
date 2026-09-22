@@ -733,6 +733,8 @@ void MainWindow::TriggerAIGeneration() {
   std::string userPref = g_recordManager.GetUserTendency();
 
   std::string aiSourceApp = m_currentSource;
+  // [identity-v2] 매핑 키의 신뢰 판정 재료. 표시용 이름과 따로 잡아 넘긴다.
+  std::string aiSourceKey = m_currentSourceKey;
 
   // [A-1] 호출 시점의 곡 epoch 캡처 — 응답 도착 전 곡이 바뀌면 결과 폐기.
   // 옛 곡의 AI 결과가 새 곡에 잘못 적용되는 사고 방지.
@@ -740,7 +742,8 @@ void MainWindow::TriggerAIGeneration() {
 
   auto abortFlagPtr = m_aiAbortFlag;
   m_aiThread = std::thread([this, prompt, accessToken, aiTitle, aiArtist,
-                            aiSourceApp, userPref, myEpoch, abortFlagPtr]() {
+                            aiSourceApp, aiSourceKey, userPref, myEpoch,
+                            abortFlagPtr]() {
     // 어떤 경로로 빠져나가도 m_aiProcessing 은 반드시 false 로 복원되어야 한다.
     // 안 그러면 후속 곡의 TriggerAIGeneration 가 영구히 차단되는 데드락 발생.
     struct AiProcessingGuard {
@@ -918,6 +921,7 @@ void MainWindow::TriggerAIGeneration() {
       entry.artist = aiArtist;
       entry.identitySource = "smtc";
       entry.sourceApp = aiSourceApp;
+      entry.sourceKey = aiSourceKey;
       entry.source = prompt.empty() ? "AI" : "prompt";
       entry.prompt = prompt;
       entry.gains5 = result.bands5;
@@ -1421,6 +1425,7 @@ void MainWindow::Render() {
       m_rawTitle = song.title;
       m_rawArtist = song.artist;
       m_currentSource = song.source;
+      m_currentSourceKey = song.sourceKey;  // [identity-v2] AUMID 원문
       m_displayTitle = song.title + " - " + song.artist;
       m_marqueeOffset = 0.0f;
       // [EQ 복원용] 곡 바뀜 → 이전 곡 원본 스냅샷 무효화.
@@ -2797,6 +2802,7 @@ void MainWindow::RenderEQPanel() {
       entry.artist = canon.artist.empty() ? m_currentArtist : canon.artist;
       entry.identitySource = "smtc";
       entry.sourceApp = m_currentSource;
+      entry.sourceKey = m_currentSourceKey;  // [identity-v2] AUMID 원문
       entry.source = "manual";
       entry.deviceName = GetSelectedDeviceGuid();
       // [최종] master31 을 SSOT 로 저장. SaveInteraction 내부에서 5/10/15 downsample 자동 채움.
