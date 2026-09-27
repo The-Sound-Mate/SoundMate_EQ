@@ -153,6 +153,29 @@ untrusted : "v2u:" + sha256hex( "v2u" \x1f appKey \x1f norm(artist) \x1f norm(ti
 
 ## 4. 연결(link) 모델 — "같은 곡 확정 시"
 
+### 4-0. 전제: `track` 은 전역 카탈로그다 (2026-09-22 실측)
+
+```
+public.track
+  track_hash   UNIQUE      ← 전역 유일
+  canonical_id uuid        ← self-FK
+  (user_id 컬럼이 없다)
+```
+
+곡 1개 = 행 1개이고, 유저별 데이터는 `user_track_history` 가 `track_id` 로 참조한다.
+따라서 **`track.canonical_id` 에 쓰는 순간 그 결정은 전 사용자에게 적용된다.**
+
+이 사실이 설계를 가른다. 초기안은 "앱에서 사용자에게 물어보고 그 답을
+`canonical_id` 에 쓴다" 였는데, 그러면:
+
+- 누군가 음악 듣다가 귀찮아서 아무거나 누른 게 **전 사용자의 EQ 를 틀리게 만든다.**
+  E10 보다 나쁘다 — E10 은 조회 한 건이 틀린 거라 그 행만 고치면 됐다.
+- 같은 질문을 N 명에게 N 번 물어보는 중복이다.
+- 음악 재생 중에 모달을 띄우는 최악의 UX 다.
+
+**결정 (2026-09-22): 앱은 사용자에게 묻지 않는다.**
+매핑은 자동으로 하고, 자동으로 못 가리는 것만 **웹사이트 관리 화면**으로 보낸다.
+
 ### 4-1. 원칙: 연결하되 병합하지 않는다
 
 `track.canonical_id` (self-FK, nullable) 를 둔다.
@@ -165,15 +188,75 @@ untrusted : "v2u:" + sha256hex( "v2u" \x1f appKey \x1f norm(artist) \x1f norm(ti
 틀린 연결이야말로 지금 고치고 있는 버그다. 되돌릴 수 있어야 한다.
 `canonical_id = NULL` 한 줄로 연결 해제가 끝나야 한다.
 
-### 4-2. 연결이 생기는 조건
+### 4-2. 저장 계층 2개 — 매핑은 전체곡 테이블에만 쓴다
 
-| 단계 | 연결 주체 | 자동 적용 |
+> **2026-09-22 정정.** 초안은 유저별 링크 테이블(`user_track_link`) 을 둔
+> 3계층이었다. 사용자 지시로 **매핑은 전체곡 테이블 한 곳**으로 좁혔고
+> 해당 테이블은 삭제했다(0행, 데이터 손실 없음). 아래가 확정안이다.
+
+| 계층 | 테이블 | 범위 | 누가 쓰는가 |
+|---|---|---|---|
+| ① 확정 링크 | `track.canonical_id` | **전역** | 승격 잡 / 웹 관리자 |
+| ② 관측·검토 큐 | `track_link_candidate` | 전역 | 클라이언트가 제안(`propose_track_link`), 웹 관리 화면이 소비 |
+
+유저별 링크 테이블을 없앤 이유:
+
+- **유저별 데이터는 이미 `user_track_history` 가 담당한다.** 곡↔곡 매핑을
+  유저별로 또 저장하면 같은 사실이 두 곳에 생기고 어느 쪽이 진짜인지 갈린다.
+- **근거는 ②가 이미 남긴다.** `track_link_candidate.observers`(uuid 배열) 에
+  누가 제안했는지가 쌓이므로, "유저별 집계" 요구는 이것으로 충족된다.
+  결론(`canonical_id`)만 한 곳에 쓴다.
+
+**대가(의도된 것):** 개인 예외 — "나는 유튜브 버전은 따로 듣겠다" — 를
+DB 로 표현하는 경로가 사라졌다. 필요해지면 클라이언트 로컬 설정으로 푼다.
+전역 카탈로그에 유저별 예외를 섞지 않는다.
+
+### 4-3. 신뢰도 등급 — 무엇이 자동이고 무엇이 웹으로 가는가
+
+| 등급 | 근거 | 동작 |
 |---|---|---|
-| v0.1.2 | 지문이 **후보 제시** | ❌ 안 함 |
-| v0.1.2 | 사용자가 "같은 곡" 확인 | ✅ 확정 |
-| v0.1.3 | 확정된 별칭 | ✅ 자동 EQ |
+| **高** | 지문: 비중첩 윈도 **3개 이상**이 같은 오프셋 빈에 동의 + 표 집중도 임계 초과 | ② 에 `reason='strong_fingerprint'` 로 제안. 관측자 N명이면 자동 승격 |
+| **中** | 윈도 2개 동의 / 지문 약함 + 텍스트 강일치 | ② 에 `reason='weak_fingerprint'`. 자동 승격 대상 |
+| **低·애매** | 윈도 1개 / 표 분산 / 텍스트 충돌(아티스트가 다름) / 한쪽만 `v2t` | ② 에 `vote_spread` / `text_conflict` / `tier_mismatch`. **자동 승격 제외 → 웹 관리 화면** |
 
-지문이 맞아도 **혼자서는 연결하지 않는다.** 첫 연결은 반드시 사용자 확인.
+**클라이언트는 전역 링크를 직접 만들지 못한다.** 고신뢰라도 제안까지다.
+"高면 즉시 전역 설정" 을 RPC 로 열면, 신뢰도를 클라이언트가 주장하게 되어
+E11(로그인한 아무나 전역 링크를 덮어쓰던 구멍)이 RPC 로 되살아난다.
+전역 링크는 **㉠ 독립 관측자 N명 또는 ㉡ 관리자 승인** 두 경로로만 생긴다.
+
+"서로 다른 유저 N명" 이 핵심이다. 한 사람이 같은 곡을 30번 들어도 1표다
+(`observers` 배열에 중복 추가하지 않는다). 독립 관측이 아니면 증거가 아니다.
+
+### 4-4. 웹 관리 화면이 필요로 하는 것 (별도 저장소)
+
+검토 큐 한 행당 화면에 있어야 하는 것:
+
+- 쌍 양쪽의 `title` / `artist` / `source_key` / `key_tier`
+- **왜 애매한지** — 동의 윈도 수, 표 집중도, 텍스트 유사도
+- 몇 명에게서 관측됐는지 (`observed_users`)
+- **승인** → `track.canonical_id` 설정 + `linked_by='admin'` + 큐 행 `resolved`
+- **거부** → 큐 행 `rejected`. 같은 쌍을 다시 제안하지 않는다
+- **보류** → 표본이 더 쌓일 때까지 대기
+
+> `track.linked_by` CHECK 는 `'fingerprint'|'promoted'|'admin'|'user'` 로
+> 확장 적용 완료 (§8-1).
+> 등급별로 나눠 놓는 이유는 **나중에 한 등급만 골라 되돌리기 위해서**다.
+> 자동 링크가 잘못 걸린 게 드러나면 `linked_by='fingerprint'` 만 한 번에 끌 수 있다.
+
+### 4-5. 연결 ≠ EQ 자동 적용
+
+| 축 | 하는 일 | 실패하면 | 복구 |
+|---|---|---|---|
+| ① 매핑 | "이 둘은 같은 곡" 판정 | 조용히 **다른 곡 EQ** | 어렵다 — 언제 틀렸는지 모른다 |
+| ② 동기화 | 로컬 → DB 업로드 | 업로드 누락 | 쉽다 — 멱등 키로 재시도 |
+| ③ 자동 적용 | 연결된 곡 EQ 를 가져다 씀 | 원치 않는 EQ | 쉽다 — 끄면 된다 |
+
+**셋은 별개 축이다.** 묶으면 하나가 고장날 때 셋 다 고장난다.
+특히 ①과 ③은 반드시 분리한다 — "같은 곡이다" 와 "그러니 EQ 를 가져와라" 는 다른 말이고,
+유튜브 MV 로 들을 때는 일부러 다르게 듣고 싶을 수 있다.
+
+**v0.1.2 범위 결정 (2026-09-22): ① + ② 까지. ③은 v0.1.3.**
+연결이 실제로 맞는지 데이터가 쌓인 뒤에 켜는 순서다.
 
 ---
 
@@ -276,7 +359,12 @@ std::thread([]() { g_recordManager.ProcessBatchSync(false); }).detach();
 
 ---
 
-## 7. 이미 작성된 코드 (디스크 반영, **미컴파일**)
+## 7. 이미 작성된 코드 (컴파일·게이트 3종 통과·커밋 완료 — `119ae5d`)
+
+> 이 절은 작성 당시 "미컴파일" 상태를 적은 것이다.
+> 2026-09-22 에 구현·빌드·게이트 통과·커밋이 끝났다.
+> 상세는 `docs/ALGORITHM_CHANGES.md` 의 **A12** 항목.
+
 
 | 파일 | 변경 |
 |---|---|
@@ -328,8 +416,63 @@ v2:smtc:sha256("v2" | sourceApp | artist | title)
 ## 10. 불변 원칙
 
 1. **불확실하면 저장된 EQ 를 적용하지 않는다.** 설문 커브 + 적응으로 간다
-2. **첫 연결은 반드시 사람이 확인한다.** 지문 혼자 연결하지 않는다
+2. **애매하면 사람이 본다.** 고신뢰만 자동 연결하고, 나머지는 웹 검토 큐로 보낸다.
+   일반 사용자에게는 묻지 않는다 — 전역 결정이기 때문이다 (§4-0)
 3. **길이는 키가 아니다.** 신뢰도 가산점일 뿐
 4. **연결은 되돌릴 수 있어야 한다.** 물리 병합 금지
 5. **곡 전환 경로에서 DB 를 부르지 않는다**
 6. 프리앰프는 건드리지 않는다 (`EQController.cpp:132`, `const float preamp = 0.0f;`)
+
+> 원칙 2 는 2026-09-22 에 바뀌었다. 이전 문구는 "첫 연결은 반드시 사람이 확인한다"
+> 였는데, `track` 이 전역 카탈로그라 그 '사람'이 일반 사용자면 한 번의 오클릭이
+> 전 사용자를 오염시킨다. 확인 주체를 관리자로 옮기고 고신뢰는 자동화했다.
+
+---
+
+## 8. DB 연결 계층 — 적용 완료 (2026-09-22)
+
+Supabase 에 마이그레이션 4건 적용됨. 웹 구현자용 문서는
+`docs/WEB_LINK_REVIEW_HANDOFF.md` (이 저장소 밖 사람이 읽는 전제로 따로 작성).
+
+### 8-1. 적용된 것
+
+| 대상 | 내용 |
+|---|---|
+| `track.linked_by` CHECK | `'user'\|'fingerprint'` → `'fingerprint'\|'promoted'\|'admin'\|'user'` |
+| **컬럼 GRANT** | `authenticated` 에서 `canonical_id` / `linked_by` / `linked_at` **쓰기 제거**. `track_hash` 는 UPDATE 제거 (INSERT 만 허용) |
+| ~~`user_track_link`~~ | 신설했다가 **같은 날 삭제**(0행). 매핑은 전체곡 테이블만 — §4-2 정정 |
+| `track_link_candidate` | 신설. 검토 큐. RLS = **관리자만**. `observers uuid[]` 로 중복 관측 제거. `reason` 에 `strong_fingerprint` 추가 |
+| `track_link_review` | 신설 뷰. `observers` 를 가린 관리 화면용. `security_invoker` |
+| `propose_track_link()` | 클라이언트용. SECURITY DEFINER. 쌍 방향 정규화 + 관측자 누적. `authenticated` 만 |
+| `resolve_track_link()` | 관리자용 승인/거부/보류. 체인 방지 검증 포함. `authenticated` + `is_admin` |
+| `promote_track_links()` | 승격 잡. **service_role 전용**. 근거를 `track_link_candidate.observed_users` 로 교체(구 `user_track_link` 집계). 지문 근거 후보만 자동 승격, 1홉 3중 가드 |
+
+### 8-2. 같이 고친 보안 구멍
+
+| # | 문제 | 조치 |
+|---|---|---|
+| S1 | `track` 의 RLS 가 `UPDATE USING (true)` 라 **로그인한 아무나 아무 곡의 `canonical_id` 를 바꿀 수 있었다** | RLS 는 컬럼 단위가 안 되므로 테이블 GRANT 를 내리고 컬럼 화이트리스트로 재부여 |
+| S2 | 신규 RPC 3개가 `anon` 에게도 EXECUTE 로 열림 (Supabase 기본 권한이 `revoke ... from public` 으로 안 지워짐) | `revoke execute ... from anon` 명시 |
+| S3 | `promote_track_links` 가드가 `auth.uid() is not null and not is_admin(...)` 이라 **미인증이면 통째로 통과** | JWT 클레임 기반으로 뒤집음. 클레임 없음(=DB 직결)만 허용 |
+| S4 | `revoke update (col)` 이 무시됨 — 테이블 레벨 GRANT 가 전 컬럼을 포함 | S1 의 재부여 방식으로 해결. **적용 후 `information_schema.column_privileges` 로 실측 확인함** |
+| S5 | `min(uuid)` 집계가 Postgres 에 없어 `promote_track_links` 가 런타임 실패 | `(array_agg(...))[1]` 로 교체. 스모크 실행으로 발견 |
+| S6 | `password_resets` 에 `anon`/`authenticated` **전체 CRUD GRANT**. RLS 무정책이 막고 있을 뿐이라 정책 1개만 추가돼도 재설정 토큰이 열린다 | `revoke all from anon, authenticated`. RLS 가 이미 전부 막고 있었으므로 쓰는 경로가 존재할 수 없음 |
+| S7 | `jsonb_to_eq_array` 의 `search_path` 미고정 (`sync_track_history` DEFINER 안에서 호출됨) | 본문 변경 없이 `alter function ... set search_path = public, pg_temp` |
+
+전수 점검에서 **오탐으로 판정한 것**(근거는 `ALGORITHM_CHANGES.md` 2026-09-22 절):
+`track_alias`/`track_meta` 무정책 RLS(권한 자체가 0건), `pg_net` in public
+(소유 객체 전부 `net` 스키마, `public` 에 0개 — 옮기면 지원티켓 웹훅만 깨진다),
+`authenticated` SECURITY DEFINER 16건(관리자 함수 4종은 본문에 `is_admin` 가드 확인).
+
+### 8-3. 아직 안 된 것
+
+- `sync_track_history` RPC 가 `track` 의 `key_tier` / `source_key` / `identity_source` 를
+  아직 안 채운다 → 검토 화면에 표시할 재료가 비어 있다. **v0.1.2 선행 과제**
+- 클라이언트의 `propose_track_link` 호출부 — 지문(§5) 구현에 의존
+- RPC 통합 테스트: SQL 콘솔에는 `auth.uid()` 가 없어 관리자 세션 호출을 검증 못 했다.
+  정적 검증 + `promote_track_links` 0행 반환까지만 확인됨
+- **`check_user_exists` / `get_user_id_by_email` 이 `anon` 에 열려 있다** —
+  가입 여부 열거 + 이메일→UUID 직접 조회. 가드 없음. 끊는 SQL 은 준비됐지만
+  웹사이트 가입·재설정 흐름이 쓸 가능성이 높고 사이트 코드는 수정 금지라 **보류.**
+  사용자 확인 필요
+- `auth_leaked_password_protection` 비활성 — SQL 로 못 켠다. 대시보드 Auth 설정

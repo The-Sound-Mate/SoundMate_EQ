@@ -1547,3 +1547,207 @@ delete from public.track;        -- 297 → user_track_history 354 cascade
   - `MainWindow.cpp` 곡 전환마다 도는 `ProcessBatchSync` 스레드의 디바운스
   - 별칭(alias) 검토 UI
 
+
+---
+
+## [2026-09-22] identity-v2 연결 계층 — DB 적용 (v0.1.1 / v0.1.2 준비)
+
+코드 변경 없음. Supabase 스키마·권한·RPC 만 바뀌었다.
+설계 배경은 `docs/IDENTITY_V2_PLAN.md` 4절, 웹 구현자용 문서는
+`docs/WEB_LINK_REVIEW_HANDOFF.md`.
+
+### 알고리즘 변경
+
+#### A13. "같은 곡" 확정 주체를 사용자 → 자동+관리자 로 옮김
+
+  - 무엇이:
+      이전 — 앱이 사용자에게 "같은 곡인가요?" 를 묻고 그 답을
+             `track.canonical_id` 에 기록 (계획서 초기안)
+      이후 — 앱은 묻지 않는다. 고신뢰 지문은 자동 연결,
+             애매한 쌍만 `track_link_candidate` 큐 → 웹 관리자가 승인
+
+  - 왜:
+      `public.track` 에 `user_id` 컬럼이 없다 (2026-09-22 실측).
+      곡 1개 = 행 1개인 전역 카탈로그이고 유저별 데이터는
+      `user_track_history` 가 `track_id` 로 참조한다.
+      즉 `canonical_id` 에 쓰는 것은 전 사용자에게 적용되는 결정이다.
+      초기안대로면 누군가 음악 듣다 귀찮아서 누른 오클릭이
+      전 사용자의 EQ 를 틀리게 만든다. E10 보다 나쁘다 —
+      E10 은 조회 한 건이 틀린 거라 그 행만 고치면 됐다.
+
+  - 음색 영향: 없음(아직). 연결이 EQ 에 반영되는 것은 v0.1.3.
+      매핑·동기화·자동적용 3축을 분리했고 v0.1.2 범위는 매핑+동기화까지다.
+
+  - 되돌리는 법:
+      `track.linked_by` 값별로 일괄 해제가 가능하도록 등급을 나눠 뒀다.
+      `update public.track set canonical_id=null, linked_by=null, linked_at=null
+         where linked_by='fingerprint';`
+      물리 병합을 안 하므로 행 손실은 없다.
+
+#### A14. 유저별 관측 링크 계층 신설 (`user_track_link`)
+
+  - 무엇이: 전역 `track.canonical_id` 한 층 → 3층
+      ① `track.canonical_id`      전역 확정 (자동 고신뢰 / 승격 / 관리자)
+      ② `user_track_link`         유저별 관측. 집계 단위 + 개인예외(`rejected`)
+      ③ `track_link_candidate`    애매한 쌍의 검토 큐
+
+  - 왜: 전역 링크는 결과만 남기고 근거를 못 남긴다.
+      "총 곡 데이터는 모이되 유저별로도 집계 가능" 을 만족시키려면
+      누가 무엇을 같다고 봤는지가 남아야 한다.
+      또 전역 링크가 맞아도 "나는 유튜브 버전은 따로 듣겠다" 가 가능해야 한다.
+
+  - 승격 규칙: 서로 다른 유저 3명(기본값)이 독립 관측하면 ①로 승격.
+      한 사람이 같은 곡을 30번 들어도 1표다 — `observers uuid[]` 로 중복 제거.
+      한 곡의 표가 서로 다른 대표로 갈리면 자동 승격하지 않는다.
+
+  - 되돌리는 법: `linked_by='promoted'` 일괄 해제. 테이블은 drop 하면 된다
+      (클라이언트가 아직 쓰지 않으므로 의존 없음).
+
+### 치명적 오류
+
+#### E11. 로그인한 아무나 전역 곡 연결을 덮어쓸 수 있었다 ★
+
+  - 증상/재현:
+      `public.track` 의 RLS 정책이
+        `Authenticated users can update tracks : UPDATE USING (true)`
+      였다. `track` 은 전역 카탈로그이므로, 로그인한 아무 계정이나
+      REST 로 임의 곡의 `canonical_id` / `linked_by` / `track_hash` 를
+      바꿀 수 있었다. 곡 A 의 `canonical_id` 를 곡 B 로 돌리면
+      **전 사용자가 A 를 틀 때 B 의 EQ 를 받는다.**
+
+  - 근거:
+      `pg_policies` 조회로 `qual = true` 확인.
+      클라이언트 실측: `RecordManager.cpp:2085` 의 SELECT 와
+      `:2191` 의 `sync_track_history` RPC 뿐, `track` 직접 쓰기 경로 없음
+      → 해당 정책은 클라이언트가 쓰지 않는 열린 문이었다.
+
+  - 조치:
+      RLS 는 컬럼 단위가 안 되므로 GRANT 로 막았다.
+        `revoke insert, update on public.track from authenticated, anon;`
+        `grant insert (track_hash,title,artist,genre,key_tier,source_key,
+                       identity_source) on public.track to authenticated;`
+        `grant update (title,artist,genre,key_tier,source_key,
+                       identity_source) on public.track to authenticated;`
+      `canonical_id` / `linked_by` / `linked_at` 는 쓰기 불가,
+      `track_hash` 는 INSERT 만 가능하고 UPDATE 불가.
+      쓰기는 SECURITY DEFINER 함수(`sync_track_history`,
+      `resolve_track_link`)만 통과한다.
+      적용 후 `information_schema.column_privileges` 로 실측 확인함.
+
+  - 함정: 처음에 `revoke update (canonical_id) ... ` 컬럼 단위로만 회수했는데
+      **아무 효과가 없었다.** PostgreSQL 에서 테이블 레벨 GRANT 가 있으면
+      그것이 전 컬럼을 포함하므로 컬럼 회수가 무시된다.
+      테이블 권한을 먼저 내려야 한다. 실측 안 했으면 못 잡았을 오류다.
+
+#### E12. 신규 RPC 3개가 `anon` 에게 열려 있었다
+
+  - 증상: `revoke all on function ... from public` 을 했는데도 advisor 가
+      `anon` 이 `/rest/v1/rpc/...` 로 호출 가능하다고 보고.
+  - 원인: Supabase 가 `ALTER DEFAULT PRIVILEGES` 로 `anon`/`authenticated`
+      에게 EXECUTE 를 **명시적으로** 부여한다. PUBLIC 회수로는 안 지워진다.
+  - 조치: `revoke execute on function ... from anon;` 명시.
+      `promote_track_links` 는 `authenticated` 에서도 회수(service_role 전용).
+
+#### E13. `promote_track_links` 가드가 미인증이면 통과했다
+
+  - 증상: `if auth.uid() is not null and not is_admin(auth.uid()) then raise`
+      → `auth.uid()` 가 null 이면 조건이 거짓이라 **검사 없이 통과**.
+  - 조치: JWT 클레임 기반으로 뒤집음. 클레임이 있으면 service_role 또는
+      관리자만, 클레임이 없으면(DB 직결 cron/psql) 허용.
+      EXECUTE 자체도 service_role 로 제한.
+
+#### E14. `min(uuid)` — Postgres 에 없는 집계
+
+  - 증상: `promote_track_links` 실행 시
+      `ERROR: 42883: function min(uuid) does not exist`.
+  - 조치: `having count(*) = 1` 이 단일 행을 보장하므로
+      `(array_agg(canonical_id))[1]` 로 교체. 재실행 0행 반환 확인.
+  - 교훈: DDL 이 `success` 를 반환해도 plpgsql 본문은 실행 전까지 검증되지 않는다.
+      함수는 반드시 한 번 호출해 봐야 한다.
+
+### 아직 안 한 것
+
+  - `sync_track_history` 가 `key_tier` / `source_key` / `identity_source` 를
+    채우게 하는 작업 — 안 하면 검토 화면에 표시할 재료가 비어 있다 (v0.1.2 선행)
+  - 클라이언트의 `propose_track_link` 호출부 — 지문 구현에 의존
+  - RPC 통합 테스트 — SQL 콘솔에는 `auth.uid()` 가 없어 관리자 세션 호출 검증 불가.
+    정적 검증 + `promote_track_links` 0행 반환까지만 확인됨
+
+---
+
+## [2026-09-22] 매핑 범위 축소 + DB 보안 전면 점검
+
+### 알고리즘 변경
+
+#### A15. 곡↔곡 매핑을 **전체곡 테이블 한 곳**으로 축소
+
+  - 무엇이: 3계층(① `track.canonical_id` 전역 / ② `user_track_link` 유저별
+      / ③ `track_link_candidate` 검토큐) → **2계층**(① 전역 결론 + ③ 관측·검토큐).
+      `user_track_link` 테이블 삭제.
+  - 왜: 유저별 데이터는 `user_track_history` 가 이미 담당한다. 곡↔곡 매핑을
+      유저별로 또 저장하면 **같은 사실이 두 곳에 생기고 어느 쪽이 진짜인지 갈린다.**
+      관측(표)은 `track_link_candidate.observers` 에 모으고, **결론은
+      `track.canonical_id` 한 곳에만** 쓴다.
+  - 부작용(의도됨): 유저가 개인적으로만 연결/해제하는 경로가 사라졌다.
+      연결은 전역이므로 ㉠ 독립 관측자 N명 또는 ㉡ 관리자 승인으로만 생긴다.
+  - 되돌리는 법: 이 문서의 이전 절(§2026-09-22 연결 계층)에 `user_track_link`
+      DDL 전문이 남아 있다. 표는 0행이었으므로 손실 데이터 없음.
+
+#### A16. 승격 기준을 관측자 수 기반으로 교체
+
+  - 무엇이: `promote_track_links` 가 `user_track_link` 를
+      `count(distinct user_id) >= N` 으로 집계 → `track_link_candidate.observed_users >= N`.
+  - 자동 승격 대상을 `reason in ('strong_fingerprint','weak_fingerprint')` 로 제한.
+      `text_conflict` / `tier_mismatch` / `vote_spread` 는 **사람이 본다.**
+      (`reason` CHECK 에 `strong_fingerprint` 추가)
+  - 대표 선정 규칙: 메타데이터가 채워진 쪽 우선 → 동률이면 `id` 순.
+      `track` 에 `created_at` 이 **없어서** 시간순을 못 쓴다. 결정적이어야
+      여러 번 돌려도 같은 결과가 나온다.
+  - 1홉 불변식 3중 가드(대표가 남을 가리킴 / 피링크가 이미 연결됨 /
+      피링크를 누가 대표로 삼고 있음) — 하나라도 걸리면 건너뛴다.
+  - 검증: `p_min_users < 2` 거부 + 실제 호출 0행 반환 확인(E14 교훈 적용).
+
+### 보안 결함
+
+#### E15. `password_resets` 에 `anon` 전체 CRUD 권한이 남아 있었다 ★
+
+  - 증상: `anon`/`authenticated` 둘 다 SELECT·INSERT·UPDATE·DELETE·TRUNCATE 보유.
+  - 지금 안 털린 이유: RLS 가 켜져 있고 **정책이 0개**라 전부 거부된다.
+      즉 **정책 하나만 추가되거나 RLS 가 꺼지는 순간** 비밀번호 재설정 토큰이
+      통째로 열린다. "지금은 안전"과 "안전하게 설계됨"은 다르다.
+  - 조치: `revoke all ... from anon, authenticated`. RLS 가 이미 전부 막고
+      있었으므로 이 권한을 **쓰는 경로는 존재할 수 없다** → 회수해도 무해.
+  - 검증: `role_table_grants` 조회 `(none)` 확인.
+
+#### E16. `jsonb_to_eq_array` search_path 미고정
+
+  - `SECURITY DEFINER` 는 아니지만 `sync_track_history`(DEFINER) 안에서
+      호출된다. 호출자 `search_path` 가 함수 해석에 끼어들 여지를 없앴다.
+  - 조치: 본문 변경 없이 `alter function ... set search_path = public, pg_temp`.
+
+### 오탐으로 판정한 것 — 근거를 남긴다
+
+| advisor 항목 | 판정 | 근거 |
+|---|---|---|
+| `rls_enabled_no_policy`: `track_alias`, `track_meta` | 오탐 | `anon`/`authenticated` **권한이 아예 없다**(`role_table_grants` 0건). service_role 전용 설계. 정책을 추가하면 오히려 약해진다 |
+| `rls_enabled_no_policy`: `password_resets` | 해소 | E15 로 권한 회수. 무정책 RLS + 무권한 = 정책보다 강함 |
+| `extension_in_public`: `pg_net` | 오탐 | `pg_depend` 확인 결과 pg_net 소유 객체는 **전부 `net` 스키마**에 있고 `public` 에는 0개. 등록 네임스페이스만 `public`. 스키마 이동은 실익 없이 지원티켓 웹훅(`on_support_ticket_inserted`, `on_support_reply_inserted`)을 깨뜨릴 위험만 있다 → **건드리지 않음** |
+| `authenticated_security_definer_*` 16건 | 오탐 | 본문을 전부 읽어 확인. 관리자 함수 4종(`reset_all_beta_plans`, `set_beta_plan_by_email`, `get_admin_user_profiles`, `get_admin_beta_applications`)은 **본문 첫머리에 `profiles.is_admin` 가드**가 있다. 나머지는 `auth.uid()` 로 자기 데이터만 다루거나(`consume_ai_quota`, `register_device`, `check_device_session`, `sync_track_history`) 의도된 사용자 기능 |
+
+`sync_track_history` 별도 확인: `INSERT INTO track (track_hash, title, artist, genre)`
+컬럼 화이트리스트 + `user_id` 를 서버가 결정 + 200건 상한.
+**`canonical_id` 를 건드릴 경로가 없다** → E11 수정의 우회로 아님.
+
+### 남은 것 — 사용자 판단 필요
+
+  - **`check_user_exists` / `get_user_id_by_email` 이 `anon` 에 열려 있다.**
+      전자는 가입 여부 열거, 후자는 **이메일 → 사용자 UUID 직접 조회**.
+      둘 다 가드가 없다. 그런데 이 둘은 웹사이트 가입·비밀번호 재설정
+      흐름이 쓸 가능성이 높고, 사이트 코드는 이 저장소에 없으며
+      **수정 금지 지시가 있다.** 끊으면 가입이 죽을 수 있어 보류.
+      최근 24시간 edge 로그에는 호출 0건(= 데스크톱 앱은 안 쓴다).
+  - `increment_download_count` / `increment_visitor_count` 의 `anon` 실행:
+      공개 카운터라 의도된 것. 악용해도 **수치 부풀리기뿐**(데이터 노출·권한
+      상승 없음). 레이트리밋은 별도 설계 필요.
+  - `auth_leaked_password_protection` 비활성: SQL 로 못 바꾼다.
+      Supabase 대시보드 Auth 설정에서 켜야 한다.

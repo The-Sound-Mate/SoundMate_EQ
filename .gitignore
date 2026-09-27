@@ -81,3 +81,6 @@ build-release/
 tools/obj/
 tools/*.exe
 tools/*.log
+
+# 프로그램과 무관한 작업 폴더 (사업계획서 빌드 등) — 저장소에 넣지 않는다
+scratch/
